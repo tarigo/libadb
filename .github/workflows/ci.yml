@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy_libadb:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - tokio
+          - smol
+          - tokio,usb
+          - tokio,rusb
+          - smol,usb
+          - smol,rusb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install libusb (rusb builds)
+        if: contains(matrix.features, 'rusb')
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - name: Install libudev (nusb builds)
+        if: contains(matrix.features, 'usb') || contains(matrix.features, 'nusb')
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-libadb-${{ matrix.features }}
+      - run: cargo clippy -p libadb --no-default-features --features "${{ matrix.features }}" --all-targets -- -D warnings
+
+  clippy_ffi:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - usb
+          - rusb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install libusb (rusb builds)
+        if: contains(matrix.features, 'rusb')
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - name: Install libudev (nusb builds)
+        if: contains(matrix.features, 'usb') || contains(matrix.features, 'nusb')
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-ffi-${{ matrix.features }}
+      - run: cargo clippy -p libadb-ffi --no-default-features --features "${{ matrix.features }}" --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [tokio, smol]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.features }}
+      - run: cargo test -p libadb --no-default-features --features ${{ matrix.features }}
+
+  doc:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: libadb, features: "tokio,rusb" }
+          - { package: libadb, features: "smol,nusb" }
+          - { package: libadb-ffi, features: "rusb" }
+          - { package: libadb-ffi, features: "nusb" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libusb + libudev
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc-${{ matrix.package }}-${{ matrix.features }}
+      - run: cargo doc -p ${{ matrix.package }} --no-default-features --features "${{ matrix.features }}" --no-deps
+
+  msrv:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: libadb, features: "tokio" }
+          - { package: libadb, features: "smol" }
+          - { package: libadb, features: "split" }
+          - { package: libadb, features: "tokio,rusb" }
+          - { package: libadb, features: "smol,nusb" }
+          - { package: libadb-ffi, features: "" }
+          - { package: libadb-ffi, features: "rusb" }
+          - { package: libadb-ffi, features: "nusb" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - name: Install libusb (rusb builds)
+        if: contains(matrix.features, 'rusb')
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - name: Install libudev (nusb builds)
+        if: contains(matrix.features, 'nusb')
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-${{ matrix.package }}-${{ matrix.features }}
+      - run: cargo check -p ${{ matrix.package }} --no-default-features --features "${{ matrix.features }}"
+
+  no_std_msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: no-std-msrv
+      # libadb is rlib-only, so checking it without runtime features
+      # against a bare-metal target verifies the no_std + alloc promise.
+      - run: cargo check -p libadb --target thumbv7m-none-eabi --no-default-features

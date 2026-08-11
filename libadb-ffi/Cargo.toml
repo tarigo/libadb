@@ -1,0 +1,40 @@
+[package]
+name = "libadb-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "C ABI for libadb"
+documentation = "https://docs.rs/libadb-ffi"
+readme = "../README.md"
+keywords = ["adb", "android", "ffi", "c-api"]
+categories = ["api-bindings", "external-ffi-bindings"]
+
+[package.metadata.docs.rs]
+features = ["usb"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "adb"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+libadb = { path = "../libadb", version = "0.1.0", default-features = false, features = ["split"] }
+# `std` provides `impl embedded_io::Error for std::io::Error`, needed
+# by the blocking TCP transport.
+embedded-io = { version = "0.6", features = ["std"] }
+embedded-io-async = { version = "0.6", features = ["std"] }
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }
+signature = { version = "2", default-features = false, features = ["alloc"] }
+
+# TCP support is always compiled in and runs on the crate's own
+# blocking executor — no async runtime is linked. USB backends are
+# opt-in and mutually exclusive, mirroring `libadb`.
+[features]
+default = []
+nusb = ["libadb/nusb"]
+rusb = ["libadb/rusb"]
+usb = ["nusb"]

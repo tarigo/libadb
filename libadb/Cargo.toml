@@ -1,0 +1,96 @@
+[package]
+name = "libadb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Low-level ADB protocol library for direct TCP and USB communication"
+documentation = "https://docs.rs/libadb"
+readme = "../README.md"
+keywords = ["adb", "android", "usb", "no_std", "embedded"]
+categories = ["embedded", "no-std", "network-programming", "hardware-support"]
+
+[package.metadata.docs.rs]
+features = ["tokio", "usb"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+bytes = { version = "1", default-features = false }
+embedded-io = "0.6"
+embedded-io-async = "0.6"
+heapless = "0.9"
+log = "0.4"
+
+# Only required by the full-duplex `split` module (the `split`
+# feature, implied by every runtime feature). Kept optional so pure
+# no_std builds with no such feature enabled don't drag these in.
+[dependencies.async-lock]
+version = "3"
+optional = true
+default-features = false
+
+[dependencies.event-listener]
+version = "5"
+optional = true
+default-features = false
+
+[dependencies.embedded-io-adapters]
+version = "0.6"
+optional = true
+default-features = false
+
+[dependencies.tokio]
+version = "1"
+optional = true
+default-features = false
+features = ["net", "io-util"]
+
+[dependencies.smol]
+version = "2"
+optional = true
+
+[dependencies.nusb]
+version = "0.1"
+optional = true
+
+[dependencies.rusb]
+version = "0.9"
+optional = true
+
+[features]
+default = ["tokio"]
+# Full-duplex Reader/Writer support (the `split` module) with no
+# bundled async runtime. Pulls in `std` for its sync primitives.
+# Implied by every runtime feature below; enable it directly only for
+# runtime-less consumers (e.g. `libadb-ffi`'s blocking executor).
+split = ["dep:async-lock", "dep:event-listener", "event-listener/std"]
+# Internal feature: any USB backend (nusb or rusb) is active. Used to
+# gate the shared `Transport::Usb` variant and related glue code.
+# Pulls `tokio/rt` (if tokio is on) because `any::connect` offloads the
+# blocking USB connect/enumerate path to `tokio::task::spawn_blocking`.
+# Enabled implicitly by `nusb` or `rusb` — do not enable directly
+# (enforced by a compile_error in `lib.rs`).
+_usb = ["tokio?/rt"]
+tokio = ["split", "dep:tokio", "dep:embedded-io-adapters", "embedded-io-adapters/tokio-1"]
+smol = ["split", "dep:smol", "dep:embedded-io-adapters", "embedded-io-adapters/futures-03"]
+nusb = ["split", "_usb", "dep:nusb"]
+rusb = ["split", "_usb", "dep:rusb"]
+# Convenience alias: enables the default USB backend (`nusb`). Switch to
+# the libusb-based backend by disabling default features and enabling
+# `rusb` instead. `nusb` and `rusb` are mutually exclusive.
+usb = ["nusb"]
+
+[dev-dependencies]
+bytes = "1"
+env_logger = "0.11"
+libc = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "signal", "time"] }
+smol = "2"
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }
+signature = "2"
