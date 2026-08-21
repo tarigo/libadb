@@ -1,7 +1,7 @@
 use super::super::error::ProtocolError;
 use super::{
     constant::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, MAX_PAYLOAD},
-    Checksumable, Command, Message, MESSAGE_SIZE,
+    Checksum, Checksumable, Command, Message, MESSAGE_SIZE,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -110,8 +110,10 @@ impl Packet {
         }))
     }
 
-    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), ProtocolError> {
-        let message = self.to_message()?;
+    /// `checksum` decides whether `data_check` carries the payload sum
+    /// or stays zero — see [`Checksum`].
+    pub fn encode(&self, dst: &mut BytesMut, checksum: Checksum) -> Result<(), ProtocolError> {
+        let message = self.to_message(checksum)?;
         dst.reserve(MESSAGE_SIZE + self.data.len());
         dst.put_u32_le(message.command);
         dst.put_u32_le(message.arg0);
@@ -123,7 +125,7 @@ impl Packet {
         Ok(())
     }
 
-    fn to_message(&self) -> Result<Message, ProtocolError> {
+    fn to_message(&self, checksum: Checksum) -> Result<Message, ProtocolError> {
         if self.data.len() > MAX_PAYLOAD as usize {
             return Err(ProtocolError::PayloadTooLarge);
         }
@@ -132,7 +134,7 @@ impl Packet {
             arg0: self.arg0,
             arg1: self.arg1,
             data_length: self.data.len() as u32,
-            data_check: self.data.calculate_checksum(),
+            data_check: checksum.of(&self.data),
             magic: self.command.magic(),
         })
     }
@@ -143,7 +145,7 @@ mod tests {
     extern crate std;
 
     use super::super::super::error::ProtocolError;
-    use super::super::{constant::MAX_PAYLOAD, packet::Packet, Command, MESSAGE_SIZE};
+    use super::super::{constant::MAX_PAYLOAD, packet::Packet, Checksum, Command, MESSAGE_SIZE};
     use bytes::{BufMut, Bytes, BytesMut};
 
     /// Decode with the library-wide limit; tests that care about a
@@ -253,7 +255,7 @@ mod tests {
     fn encode_then_decode_reproduces_packet_without_payload() {
         let original = Packet::new(Command::Ready, 7, 42, Bytes::new());
         let mut buf = BytesMut::new();
-        original.encode(&mut buf).unwrap();
+        original.encode(&mut buf, Checksum::Compute).unwrap();
         assert_eq!(buf.len(), MESSAGE_SIZE);
         assert_eq!(decode(&mut buf), Ok(Some(original)));
     }
@@ -262,7 +264,7 @@ mod tests {
     fn encode_then_decode_reproduces_packet_with_payload() {
         let original = Packet::new(Command::Write, 1, 2, Bytes::from_static(b"hello, device"));
         let mut buf = BytesMut::new();
-        original.encode(&mut buf).unwrap();
+        original.encode(&mut buf, Checksum::Compute).unwrap();
         assert_eq!(buf.len(), MESSAGE_SIZE + b"hello, device".len());
         assert_eq!(decode(&mut buf), Ok(Some(original)));
     }
@@ -272,7 +274,10 @@ mod tests {
         let oversized = alloc::vec![0u8; MAX_PAYLOAD as usize + 1];
         let packet = Packet::new(Command::Write, 0, 0, Bytes::from(oversized));
         let mut buf = BytesMut::new();
-        assert_eq!(packet.encode(&mut buf), Err(ProtocolError::PayloadTooLarge));
+        assert_eq!(
+            packet.encode(&mut buf, Checksum::Compute),
+            Err(ProtocolError::PayloadTooLarge)
+        );
     }
 
     #[test]
@@ -335,5 +340,38 @@ mod tests {
         let command: u32 = Command::Write.into();
         let mut buf = encode_header(command, 0, 0, MAX_PAYLOAD + 1, 0, magic(command));
         assert_eq!(decode(&mut buf), Err(ProtocolError::PayloadTooLarge));
+    }
+
+    fn data_check_of(buf: &BytesMut) -> u32 {
+        u32::from_le_bytes(buf[16..20].try_into().unwrap())
+    }
+
+    #[test]
+    fn encode_writes_the_sum_when_asked_to_compute() {
+        let packet = Packet::new(Command::Write, 1, 2, Bytes::from_static(b"abc"));
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf, Checksum::Compute).unwrap();
+        assert_eq!(data_check_of(&buf), 294);
+    }
+
+    #[test]
+    fn encode_zeroes_data_check_when_skipping() {
+        let packet = Packet::new(Command::Write, 1, 2, Bytes::from_static(b"abc"));
+        let mut buf = BytesMut::new();
+        packet.encode(&mut buf, Checksum::Skip).unwrap();
+        assert_eq!(data_check_of(&buf), 0);
+        // Everything else is byte-identical to the checksummed form.
+        let mut checked = BytesMut::new();
+        packet.encode(&mut checked, Checksum::Compute).unwrap();
+        assert_eq!(buf[..16], checked[..16]);
+        assert_eq!(buf[20..], checked[20..]);
+    }
+
+    #[test]
+    fn a_skipped_checksum_still_decodes() {
+        let original = Packet::new(Command::Write, 1, 2, Bytes::from_static(b"payload"));
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf, Checksum::Skip).unwrap();
+        assert_eq!(decode(&mut buf), Ok(Some(original)));
     }
 }

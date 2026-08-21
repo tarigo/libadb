@@ -5,7 +5,7 @@ use super::error::{Error, ProtocolError};
 use super::protocol::command::Command;
 use super::protocol::constant::MAX_PAYLOAD;
 use super::protocol::packet::Packet;
-use super::protocol::MESSAGE_SIZE;
+use super::protocol::{Checksum, MESSAGE_SIZE};
 
 pub(crate) const RECV_SCRATCH: usize = 4096;
 
@@ -21,9 +21,13 @@ pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Err
     Ok(())
 }
 
-pub(crate) async fn send_pkt<T: Write>(t: &mut T, pkt: &Packet) -> Result<(), Error<T::Error>> {
+pub(crate) async fn send_pkt<T: Write>(
+    t: &mut T,
+    pkt: &Packet,
+    checksum: Checksum,
+) -> Result<(), Error<T::Error>> {
     let mut buf = BytesMut::with_capacity(MESSAGE_SIZE + pkt.data.len());
-    pkt.encode(&mut buf)?;
+    pkt.encode(&mut buf, checksum)?;
     write_all(t, &buf).await
 }
 
@@ -46,26 +50,19 @@ pub(crate) async fn recv_pkt<T: Read>(
     }
 }
 
-fn payload_checksum(payload: &[u8]) -> u32 {
-    let mut sum = 0u32;
-    for &b in payload {
-        sum = sum.wrapping_add(b as u32);
-    }
-    sum
-}
-
 fn encode_header(
     command: Command,
     arg0: u32,
     arg1: u32,
     payload: &[u8],
+    checksum: Checksum,
 ) -> Result<[u8; MESSAGE_SIZE], ProtocolError> {
     if payload.len() > MAX_PAYLOAD as usize {
         return Err(ProtocolError::PayloadTooLarge);
     }
     let cmd_u32: u32 = command.into();
     let data_length = payload.len() as u32;
-    let data_check = payload_checksum(payload);
+    let data_check = checksum.of(payload);
     let magic = command.magic();
     let mut h = [0u8; MESSAGE_SIZE];
     h[0..4].copy_from_slice(&cmd_u32.to_le_bytes());
@@ -83,8 +80,9 @@ pub(crate) async fn send_raw<T: Write>(
     arg0: u32,
     arg1: u32,
     payload: &[u8],
+    checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
-    let header = encode_header(command, arg0, arg1, payload)?;
+    let header = encode_header(command, arg0, arg1, payload, checksum)?;
     write_all(t, &header).await?;
     if !payload.is_empty() {
         write_all(t, payload).await?;
@@ -98,8 +96,17 @@ pub(crate) async fn send_okay_to<T: Write>(
     local_id: u32,
     remote_id: u32,
     wrte_len: usize,
+    checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
     let ack = (wrte_len as u32).to_le_bytes();
     let payload: &[u8] = if delayed_ack { &ack } else { &[] };
-    send_raw(transport, Command::Ready, local_id, remote_id, payload).await
+    send_raw(
+        transport,
+        Command::Ready,
+        local_id,
+        remote_id,
+        payload,
+        checksum,
+    )
+    .await
 }

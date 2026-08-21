@@ -44,6 +44,7 @@ use crate::base::connection::{
 use crate::base::error::Error;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::packet::Packet;
+use crate::base::protocol::Checksum;
 use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw};
 use crate::device_banner::DeviceBanner;
 
@@ -72,6 +73,7 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) channels: Mutex<[Option<ChannelSlot>; MC]>,
     pub(crate) signals: [FlowSignal; MC],
     pub(crate) max_payload: u32,
+    pub(crate) protocol_version: u32,
     pub(crate) config: ConnectionConfig,
     pub(crate) delayed_ack: bool,
     pub(crate) device_banner: Option<DeviceBanner<MP, MF>>,
@@ -90,6 +92,10 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     fn lock_channels(&self) -> std::sync::MutexGuard<'_, [Option<ChannelSlot>; MC]> {
         self.channels.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn checksum(&self) -> Checksum {
+        Checksum::for_version(self.protocol_version)
     }
 }
 
@@ -212,6 +218,11 @@ where
         &self.shared.config
     }
 
+    /// Protocol version in effect: `min(ADB_VERSION, device version)`.
+    pub fn protocol_version(&self) -> u32 {
+        self.shared.protocol_version
+    }
+
     /// Whether delayed-ACK flow control was negotiated.
     pub fn delayed_ack(&self) -> bool {
         self.shared.delayed_ack
@@ -275,14 +286,22 @@ where
         let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
         {
             let mut wh = self.shared.write_half.lock().await;
-            send_pkt(&mut *wh, &pkt).await?;
+            send_pkt(&mut *wh, &pkt, self.shared.checksum()).await?;
         }
 
         let result = self.await_open_ack(local_id, slot_idx, &mut guard).await;
         if let Err(ref e) = result {
             if !matches!(e, Error::ChannelClosed) {
                 let mut wh = self.shared.write_half.lock().await;
-                let _ = send_raw(&mut *wh, Command::Close, local_id, 0, &[]).await;
+                let _ = send_raw(
+                    &mut *wh,
+                    Command::Close,
+                    local_id,
+                    0,
+                    &[],
+                    self.shared.checksum(),
+                )
+                .await;
             }
         }
         result
@@ -371,6 +390,7 @@ where
                             local_id,
                             remote_id,
                             payload_len,
+                            self.shared.checksum(),
                         )
                         .await?;
                     }
@@ -425,7 +445,15 @@ where
                 len,
             } => {
                 let mut wh = self.shared.write_half.lock().await;
-                send_okay_to(&mut *wh, self.shared.delayed_ack, local_id, remote_id, len).await?;
+                send_okay_to(
+                    &mut *wh,
+                    self.shared.delayed_ack,
+                    local_id,
+                    remote_id,
+                    len,
+                    self.shared.checksum(),
+                )
+                .await?;
             }
             DispatchOutcome::SlotUpdated { idx } => {
                 self.shared.signals[idx].wake();
@@ -485,6 +513,11 @@ where
         self.shared.delayed_ack
     }
 
+    /// Protocol version in effect: `min(ADB_VERSION, device version)`.
+    pub fn protocol_version(&self) -> u32 {
+        self.shared.protocol_version
+    }
+
     /// Raw device banner bytes from the CNXN handshake.
     ///
     /// Lock-free connection metadata — available even while the
@@ -517,6 +550,7 @@ where
             return Ok(());
         }
         let max = (self.shared.max_payload as usize).max(1);
+        let checksum = self.shared.checksum();
 
         let mut offset = 0;
         while offset < data.len() {
@@ -529,7 +563,15 @@ where
 
             {
                 let mut wh = self.shared.write_half.lock().await;
-                send_raw(&mut *wh, Command::Write, local_id, remote_id, chunk).await?;
+                send_raw(
+                    &mut *wh,
+                    Command::Write,
+                    local_id,
+                    remote_id,
+                    chunk,
+                    checksum,
+                )
+                .await?;
             }
             guard.commit();
             offset += n;
@@ -550,7 +592,12 @@ where
         let (local_id, remote_id) = self.channel_ids(ch)?;
         {
             let mut wh = self.shared.write_half.lock().await;
-            send_pkt(&mut *wh, &Packet::close(local_id, remote_id)).await?;
+            send_pkt(
+                &mut *wh,
+                &Packet::close(local_id, remote_id),
+                self.shared.checksum(),
+            )
+            .await?;
         }
         {
             let mut chs = self.shared.lock_channels();

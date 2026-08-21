@@ -12,6 +12,7 @@ use super::error::Error;
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::packet::Packet;
+use super::protocol::Checksum;
 use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, RECV_SCRATCH};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
@@ -31,6 +32,7 @@ pub struct Connection<
     transport: T,
     channels: [Option<ChannelSlot>; MAX_CHANNELS],
     max_payload: u32,
+    protocol_version: u32,
     config: ConnectionConfig,
     device_banner: Option<DeviceBanner<MAX_PROPERTIES, MAX_FEATURES>>,
     local_id_counter: u32,
@@ -43,6 +45,7 @@ async fn dispatch_to<T: Write>(
     channels: &mut [Option<ChannelSlot>],
     delayed_ack: bool,
     rx_cap: usize,
+    checksum: Checksum,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
     if let DispatchOutcome::AckWrite {
@@ -51,7 +54,7 @@ async fn dispatch_to<T: Write>(
         len,
     } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap)?
     {
-        send_okay_to(transport, delayed_ack, local_id, remote_id, len).await?;
+        send_okay_to(transport, delayed_ack, local_id, remote_id, len, checksum).await?;
     }
     Ok(())
 }
@@ -75,6 +78,19 @@ where
     /// [`max_payload`](Self::max_payload) is the outbound one.
     pub fn config(&self) -> &ConnectionConfig {
         &self.config
+    }
+
+    /// Protocol version in effect: `min(ADB_VERSION, device version)`.
+    ///
+    /// At or above
+    /// [`ADB_VERSION_SKIP_CHECKSUM`](crate::protocol::constant::ADB_VERSION_SKIP_CHECKSUM)
+    /// outgoing packets leave `data_check` zero, as `adb` itself does.
+    pub fn protocol_version(&self) -> u32 {
+        self.protocol_version
+    }
+
+    fn checksum(&self) -> Checksum {
+        Checksum::for_version(self.protocol_version)
     }
 
     /// Raw device banner bytes received during CNXN handshake.
@@ -174,6 +190,7 @@ where
             channels: std::sync::Mutex::new(self.channels),
             signals: core::array::from_fn(|_| crate::split::FlowSignal::new()),
             max_payload: self.max_payload,
+            protocol_version: self.protocol_version,
             config: self.config,
             delayed_ack: self.delayed_ack,
             device_banner: self.device_banner,
@@ -233,12 +250,21 @@ where
             0
         };
         let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
-        send_pkt(&mut self.transport, &pkt).await?;
+        let checksum = self.checksum();
+        send_pkt(&mut self.transport, &pkt, checksum).await?;
 
         let result = self.await_open_ack(local_id, slot_idx).await;
         if let Err(ref e) = result {
             if !matches!(e, Error::ChannelClosed) {
-                let _ = send_raw(&mut self.transport, Command::Close, local_id, 0, &[]).await;
+                let _ = send_raw(
+                    &mut self.transport,
+                    Command::Close,
+                    local_id,
+                    0,
+                    &[],
+                    checksum,
+                )
+                .await;
             }
         }
         result
@@ -351,6 +377,7 @@ where
 
         let max = (self.max_payload as usize).max(1);
         let delayed_ack = self.delayed_ack;
+        let checksum = self.checksum();
 
         let mut offset = 0;
         while offset < data.len() {
@@ -371,6 +398,7 @@ where
                 local_id,
                 remote_id,
                 &data[offset..offset + n],
+                checksum,
             )
             .await?;
 
@@ -392,7 +420,13 @@ where
         ch: ChannelId,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
         let (local_id, remote_id) = self.channel_ids(ch)?;
-        send_pkt(&mut self.transport, &Packet::close(local_id, remote_id)).await?;
+        let checksum = self.checksum();
+        send_pkt(
+            &mut self.transport,
+            &Packet::close(local_id, remote_id),
+            checksum,
+        )
+        .await?;
         self.channels[ch.slot] = None;
         Ok(())
     }
@@ -427,6 +461,7 @@ where
         let (local_id, remote_id) = self.channel_ids(ch)?;
         let delayed_ack = self.delayed_ack;
         let rx_cap = self.config.rx_cap();
+        let checksum = self.checksum();
 
         let mut interrupt = core::pin::pin!(interrupt);
 
@@ -441,6 +476,7 @@ where
                             local_id,
                             remote_id,
                             payload_len,
+                            checksum,
                         )
                         .await?;
 
@@ -465,6 +501,7 @@ where
                             &mut self.channels,
                             delayed_ack,
                             rx_cap,
+                            checksum,
                             pkt,
                         )
                         .await?;
@@ -539,22 +576,29 @@ where
         remote_id: u32,
         wrte_len: usize,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
+        let checksum = self.checksum();
+        let delayed_ack = self.delayed_ack;
         send_okay_to(
             &mut self.transport,
-            self.delayed_ack,
+            delayed_ack,
             local_id,
             remote_id,
             wrte_len,
+            checksum,
         )
         .await
     }
 
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
+        let delayed_ack = self.delayed_ack;
+        let rx_cap = self.config.rx_cap();
+        let checksum = self.checksum();
         dispatch_to(
             &mut self.transport,
             &mut self.channels,
-            self.delayed_ack,
-            self.config.rx_cap(),
+            delayed_ack,
+            rx_cap,
+            checksum,
             pkt,
         )
         .await
