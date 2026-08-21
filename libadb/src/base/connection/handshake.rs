@@ -10,6 +10,7 @@ use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
 use crate::base::protocol::features::{self, Feature};
 use crate::base::protocol::packet::Packet;
+use crate::base::protocol::Checksum;
 use crate::base::wire::{recv_pkt, send_pkt};
 
 pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
@@ -117,7 +118,9 @@ where
             config.max_payload(),
             banner.to_vec(),
         );
-        send_pkt(&mut transport, &pkt).await?;
+        // The device has not told us its version yet, so stay on the
+        // conservative side: a pre-0x0100_0001 peer verifies this packet.
+        send_pkt(&mut transport, &pkt, Checksum::Compute).await?;
 
         let mut recv_buf = BytesMut::new();
         let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf, config.max_payload()).await?;
@@ -140,6 +143,7 @@ where
             channels: core::array::from_fn(|_| None),
             // Bounded by our own encoder, not just by the device's offer.
             max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
+            protocol_version: cnxn.arg0.min(command::ADB_VERSION),
             config,
             device_banner,
             local_id_counter: 1,
@@ -160,7 +164,12 @@ where
             .await
             .map_err(|_| Error::Auth(AuthError::SignFailed))?;
 
-        send_pkt(transport, &Packet::auth_signature(signature)).await?;
+        send_pkt(
+            transport,
+            &Packet::auth_signature(signature),
+            Checksum::Compute,
+        )
+        .await?;
 
         let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
         if resp.command == Command::Connect {
@@ -169,7 +178,12 @@ where
 
         if resp.command == Command::Auth && resp.arg0 == command::AUTH_TOKEN {
             let pubkey = auth.public_key();
-            send_pkt(transport, &Packet::auth_public_key(pubkey.to_vec())).await?;
+            send_pkt(
+                transport,
+                &Packet::auth_public_key(pubkey.to_vec()),
+                Checksum::Compute,
+            )
+            .await?;
 
             let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
             if resp.command == Command::Connect {

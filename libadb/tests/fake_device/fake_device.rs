@@ -36,13 +36,21 @@ pub struct MsgHeader {
     pub arg0: u32,
     pub arg1: u32,
     pub data_length: u32,
+    /// Raw `data_check` field. Zero means either that the sender
+    /// skipped the sum or that every payload byte is zero, so only a
+    /// payload holding a non-zero byte tells the two apart.
+    pub data_check: u32,
+}
+
+fn checksum(payload: &[u8]) -> u32 {
+    payload
+        .iter()
+        .fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
 }
 
 fn encode_header(cmd: u32, arg0: u32, arg1: u32, payload: &[u8], dst: &mut [u8; HEADER_SIZE]) {
     let data_length = payload.len() as u32;
-    let data_check = payload
-        .iter()
-        .fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+    let data_check = checksum(payload);
     let magic = command::magic(cmd);
     dst[0..4].copy_from_slice(&cmd.to_le_bytes());
     dst[4..8].copy_from_slice(&arg0.to_le_bytes());
@@ -65,6 +73,7 @@ fn decode_header(src: &[u8; HEADER_SIZE]) -> MsgHeader {
         arg0: u32::from_le_bytes(src[4..8].try_into().unwrap()),
         arg1: u32::from_le_bytes(src[8..12].try_into().unwrap()),
         data_length: u32::from_le_bytes(src[12..16].try_into().unwrap()),
+        data_check: u32::from_le_bytes(src[16..20].try_into().unwrap()),
     }
 }
 
@@ -95,6 +104,7 @@ pub enum AuthPolicy {
 pub struct FakeDevice {
     banner: Vec<u8>,
     max_payload: u32,
+    protocol_version: u32,
     initial_asb: Option<u32>,
     auth: AuthPolicy,
     expect_open_asb: Option<u32>,
@@ -111,6 +121,7 @@ impl FakeDevice {
         Self {
             banner: DEFAULT_BANNER.to_vec(),
             max_payload: DEFAULT_MAX_PAYLOAD,
+            protocol_version: libadb::protocol::constant::ADB_VERSION,
             initial_asb: None,
             auth: AuthPolicy::None,
             expect_open_asb: Some(INITIAL_DELAYED_ACK_BYTES),
@@ -124,6 +135,15 @@ impl FakeDevice {
 
     pub fn max_payload(mut self, max_payload: u32) -> Self {
         self.max_payload = max_payload;
+        self
+    }
+
+    /// Protocol version the device reports in `CNXN.arg0`. Defaults to
+    /// [`ADB_VERSION`](libadb::protocol::constant::ADB_VERSION); pass
+    /// `0x0100_0000` to emulate a pre-2017 device that still verifies
+    /// checksums.
+    pub fn protocol_version(mut self, version: u32) -> Self {
+        self.protocol_version = version;
         self
     }
 
@@ -197,8 +217,10 @@ impl FakeDeviceHandle {
             next_device_id: 1,
             host_banner: Vec::new(),
             host_max_payload: 0,
+            host_protocol_version: 0,
             expect_open_asb: self.config.expect_open_asb,
             last_open_asb: None,
+            handshake_headers: Vec::new(),
         };
         session.handshake(&self.config).await;
         session
@@ -212,13 +234,16 @@ pub struct FakeSession {
     next_device_id: u32,
     host_banner: Vec<u8>,
     host_max_payload: u32,
+    host_protocol_version: u32,
     expect_open_asb: Option<u32>,
     last_open_asb: Option<u32>,
+    handshake_headers: Vec<MsgHeader>,
 }
 
 impl FakeSession {
     async fn handshake(&mut self, config: &FakeDevice) {
         let (hdr, host_banner) = self.recv().await;
+        self.handshake_headers.push(hdr);
         assert_eq!(
             hdr.command, CMD_CNXN,
             "expected CNXN, got 0x{:08X}",
@@ -233,12 +258,14 @@ impl FakeSession {
         self.delayed_ack = config.initial_asb.is_some() && has_feature(&host_banner, DELAYED_ACK);
         self.host_banner = host_banner;
         self.host_max_payload = hdr.arg1;
+        self.host_protocol_version = hdr.arg0;
 
         match &config.auth {
             AuthPolicy::None => {}
             AuthPolicy::AcceptSignature { token } => {
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, token).await;
                 let (h, _) = self.expect(CMD_AUTH).await;
+                self.handshake_headers.push(h);
                 assert_eq!(h.arg0, AUTH_SIGNATURE, "expected SIGNATURE");
             }
             AuthPolicy::RequirePublicKey {
@@ -248,10 +275,12 @@ impl FakeSession {
             } => {
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, first_token).await;
                 let (h, _) = self.expect(CMD_AUTH).await;
+                self.handshake_headers.push(h);
                 assert_eq!(h.arg0, AUTH_SIGNATURE);
 
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, second_token).await;
                 let (h, pk) = self.expect(CMD_AUTH).await;
+                self.handshake_headers.push(h);
                 assert_eq!(h.arg0, AUTH_RSAPUBLICKEY);
                 assert_eq!(&pk, expected_pubkey, "RSAPUBLICKEY payload mismatch");
             }
@@ -259,7 +288,7 @@ impl FakeSession {
 
         self.send(
             CMD_CNXN,
-            libadb::protocol::constant::ADB_VERSION,
+            config.protocol_version,
             config.max_payload,
             &config.banner,
         )
@@ -281,6 +310,17 @@ impl FakeSession {
         self.host_max_payload
     }
 
+    /// `arg0` of the client's CNXN — the protocol version it offers.
+    pub fn host_protocol_version(&self) -> u32 {
+        self.host_protocol_version
+    }
+
+    /// Headers of every packet the client sent before the device's CNXN
+    /// reply, in order (CNXN, then any AUTH).
+    pub fn handshake_headers(&self) -> &[MsgHeader] {
+        &self.handshake_headers
+    }
+
     /// `arg1` of the most recent OPEN accepted by this session — the
     /// delayed-ACK credit the client granted (`None` before any OPEN).
     pub fn last_open_asb(&self) -> Option<u32> {
@@ -297,6 +337,12 @@ impl FakeSession {
         }
     }
 
+    /// Escape hatch: put bytes on the wire verbatim, bypassing header
+    /// construction — for hand-rolled or deliberately malformed packets.
+    pub async fn send_raw_bytes(&mut self, bytes: &[u8]) {
+        rt::write_all(&mut self.stream, bytes).await;
+    }
+
     /// Low-level: receive the next message and its payload.
     pub async fn recv(&mut self) -> (MsgHeader, Vec<u8>) {
         let mut buf = [0u8; HEADER_SIZE];
@@ -305,6 +351,17 @@ impl FakeSession {
         let mut payload = vec![0u8; hdr.data_length as usize];
         if !payload.is_empty() {
             rt::read_exact(&mut self.stream, &mut payload).await;
+        }
+        // Zero is either an opt-out or an all-zero payload (an empty
+        // one included); either way there is nothing to verify. A
+        // non-zero field must be the real sum.
+        if hdr.data_check != 0 {
+            assert_eq!(
+                hdr.data_check,
+                checksum(&payload),
+                "wrong data_check on 0x{:08X}",
+                hdr.command,
+            );
         }
         (hdr, payload)
     }

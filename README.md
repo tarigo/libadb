@@ -102,6 +102,22 @@ exhaust the heap. Since adbd never exceeds the size the host
 advertised, `embedded()` (or `new().with_max_payload(…)`) is what keeps
 the footprint bounded.
 
+## Protocol version
+
+The library offers `0x0100_0001` in its CNXN and then adopts
+`min(mine, the device's)`, readable via `Connection::protocol_version()`.
+ADB retired payload checksums at exactly that version, so from there on
+outgoing packets leave `data_check` zero — the same thing `adb` does.
+
+Two deliberate exceptions keep older peers working: handshake packets
+(CNXN, AUTH) are still checksummed, because the device has not announced
+its version yet, and an inbound non-zero `data_check` is always verified.
+A device reporting `0x0100_0000` gets checksummed traffic throughout.
+
+The sum is a full pass over every payload. On a microcontroller that
+dominates the cost of a channel write: skipping it made a 32 KiB
+`write_stdin` roughly four times faster.
+
 ## Supported services
 
 | Module        | Wire service                 | Notes                             |
