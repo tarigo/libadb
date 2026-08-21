@@ -38,10 +38,11 @@ use std::sync::Mutex;
 use crate::base::channel::{
     channel_ids_of, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot, DispatchOutcome,
 };
-use crate::base::connection::{DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES};
+use crate::base::connection::{
+    ConnectionConfig, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
+};
 use crate::base::error::Error;
 use crate::base::protocol::command::Command;
-use crate::base::protocol::features;
 use crate::base::protocol::packet::Packet;
 use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw};
 use crate::device_banner::DeviceBanner;
@@ -71,6 +72,7 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) channels: Mutex<[Option<ChannelSlot>; MC]>,
     pub(crate) signals: [FlowSignal; MC],
     pub(crate) max_payload: u32,
+    pub(crate) config: ConnectionConfig,
     pub(crate) delayed_ack: bool,
     pub(crate) device_banner: Option<DeviceBanner<MP, MF>>,
     pub(crate) local_id_counter: AtomicU32,
@@ -200,9 +202,14 @@ where
         }
     }
 
-    /// Negotiated max payload (bytes).
+    /// Maximum payload size for outbound packets.
     pub fn max_payload(&self) -> u32 {
         self.shared.max_payload
+    }
+
+    /// Resource limits this connection was opened with.
+    pub fn config(&self) -> &ConnectionConfig {
+        &self.shared.config
     }
 
     /// Whether delayed-ACK flow control was negotiated.
@@ -261,7 +268,7 @@ where
         let mut guard = SlotGuard::new(Arc::clone(&self.shared), slot_idx);
 
         let open_arg1 = if self.shared.delayed_ack {
-            features::INITIAL_DELAYED_ACK_BYTES
+            self.shared.config.initial_ack_bytes()
         } else {
             0
         };
@@ -288,7 +295,12 @@ where
         guard: &mut SlotGuard<WH, MC, MP, MF>,
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         loop {
-            let pkt = recv_pkt(&mut self.read_half, &mut self.recv_buf).await?;
+            let pkt = recv_pkt(
+                &mut self.read_half,
+                &mut self.recv_buf,
+                self.shared.config.max_payload(),
+            )
+            .await?;
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id => {
                     {
@@ -342,7 +354,12 @@ where
         let (local_id, remote_id) = self.channel_ids(ch)?;
 
         loop {
-            let pkt = recv_pkt(&mut self.read_half, &mut self.recv_buf).await?;
+            let pkt = recv_pkt(
+                &mut self.read_half,
+                &mut self.recv_buf,
+                self.shared.config.max_payload(),
+            )
+            .await?;
             match pkt.command {
                 Command::Write if pkt.arg1 == local_id => {
                     let payload_len = pkt.data.len();
@@ -363,7 +380,7 @@ where
                     if n < pkt.data.len() {
                         let mut chs = self.shared.lock_channels();
                         if let Some(slot) = slot_for_mut(&mut *chs, ch) {
-                            slot.rx_buf.extend_from_slice(&pkt.data[n..]);
+                            slot.push_rx(&pkt.data[n..], self.shared.config.rx_cap())?;
                         }
                     }
                     return Ok(n);
@@ -393,7 +410,12 @@ where
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let outcome = {
             let mut chs = self.shared.lock_channels();
-            dispatch_packet(&mut *chs, &pkt, self.shared.delayed_ack)?
+            dispatch_packet(
+                &mut *chs,
+                &pkt,
+                self.shared.delayed_ack,
+                self.shared.config.rx_cap(),
+            )?
         };
 
         match outcome {
@@ -448,9 +470,14 @@ where
         Self { shared }
     }
 
-    /// Negotiated max payload (bytes).
+    /// Maximum payload size for outbound packets.
     pub fn max_payload(&self) -> u32 {
         self.shared.max_payload
+    }
+
+    /// Resource limits this connection was opened with.
+    pub fn config(&self) -> &ConnectionConfig {
+        &self.shared.config
     }
 
     /// Whether delayed-ACK flow control was negotiated.

@@ -27,13 +27,15 @@ pub(crate) async fn send_pkt<T: Write>(t: &mut T, pkt: &Packet) -> Result<(), Er
     write_all(t, &buf).await
 }
 
+/// Rejects any packet whose announced payload exceeds `max_payload`.
 pub(crate) async fn recv_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
+    max_payload: u32,
 ) -> Result<Packet, Error<T::Error>> {
     let mut tmp = [0u8; RECV_SCRATCH];
     loop {
-        if let Some(pkt) = Packet::decode(buf)? {
+        if let Some(pkt) = Packet::decode(buf, max_payload)? {
             return Ok(pkt);
         }
         match t.read(&mut tmp).await {

@@ -75,6 +75,33 @@ println!("{}", core::str::from_utf8(&out.stdout)?);
 reading `~/.android/adbkey`. See any file under `libadb/examples/` for
 a complete `AdbKeyAuth` that uses the `rsa` crate.
 
+## Memory budget
+
+`ConnectionConfig` bounds everything the library allocates per
+connection:
+
+| Field                | Default (`new()`) | `embedded()` | Effect                                              |
+|----------------------|-------------------|--------------|-----------------------------------------------------|
+| `max_payload`        | 1 MiB             | 8 KiB        | advertised in CNXN — caps any single inbound packet |
+| `initial_ack_bytes`  | 32 MiB            | 32 KiB       | delayed-ACK credit granted per channel              |
+| `max_rx_per_channel` | unbounded         | 64 KiB       | fuse on data buffered for an unread channel         |
+
+```rust,ignore
+use libadb::{Connection, ConnectionConfig, Feature};
+
+let conn = Connection::<_>::connect_with_config(
+    transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
+).await?;
+```
+
+The default matches what `adb` does on a desktop. On a microcontroller
+it does not fit: a device that takes the advertised 1 MiB at face value
+can send a packet the receive buffer has to hold whole, and with only a
+few hundred KiB of RAM a single 64 KiB WRTE is already enough to
+exhaust the heap. Since adbd never exceeds the size the host
+advertised, `embedded()` (or `new().with_max_payload(…)`) is what keeps
+the footprint bounded.
+
 ## Supported services
 
 | Module        | Wire service                 | Notes                             |

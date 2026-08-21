@@ -10,9 +10,10 @@ use super::channel::{
 use super::device_banner::DeviceBanner;
 use super::error::Error;
 use super::protocol::command::Command;
-use super::protocol::features::{self, Feature};
+use super::protocol::features::Feature;
 use super::protocol::packet::Packet;
 use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, RECV_SCRATCH};
+pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 pub const DEFAULT_MAX_CHANNELS: usize = 32;
 pub const DEFAULT_MAX_PROPERTIES: usize = 64;
@@ -30,6 +31,7 @@ pub struct Connection<
     transport: T,
     channels: [Option<ChannelSlot>; MAX_CHANNELS],
     max_payload: u32,
+    config: ConnectionConfig,
     device_banner: Option<DeviceBanner<MAX_PROPERTIES, MAX_FEATURES>>,
     local_id_counter: u32,
     delayed_ack: bool,
@@ -40,13 +42,14 @@ async fn dispatch_to<T: Write>(
     transport: &mut T,
     channels: &mut [Option<ChannelSlot>],
     delayed_ack: bool,
+    rx_cap: usize,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
     if let DispatchOutcome::AckWrite {
         local_id,
         remote_id,
         len,
-    } = dispatch_packet(channels, &pkt, delayed_ack)?
+    } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap)?
     {
         send_okay_to(transport, delayed_ack, local_id, remote_id, len).await?;
     }
@@ -58,9 +61,20 @@ impl<T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATUR
 where
     T: Read + Write,
 {
-    /// Negotiated maximum payload size (bytes).
+    /// Maximum payload size for outbound packets: the smaller of what
+    /// the device advertised in its CNXN and what this library can
+    /// encode.
     pub fn max_payload(&self) -> u32 {
         self.max_payload
+    }
+
+    /// Resource limits this connection was opened with.
+    ///
+    /// [`ConnectionConfig::max_payload`] is the inbound direction — what
+    /// this host advertised to the device — while
+    /// [`max_payload`](Self::max_payload) is the outbound one.
+    pub fn config(&self) -> &ConnectionConfig {
+        &self.config
     }
 
     /// Raw device banner bytes received during CNXN handshake.
@@ -160,6 +174,7 @@ where
             channels: std::sync::Mutex::new(self.channels),
             signals: core::array::from_fn(|_| crate::split::FlowSignal::new()),
             max_payload: self.max_payload,
+            config: self.config,
             delayed_ack: self.delayed_ack,
             device_banner: self.device_banner,
             local_id_counter: AtomicU32::new(self.local_id_counter),
@@ -213,7 +228,7 @@ where
 
         let local_id = self.next_local_id();
         let open_arg1 = if self.delayed_ack {
-            features::INITIAL_DELAYED_ACK_BYTES
+            self.config.initial_ack_bytes()
         } else {
             0
         };
@@ -235,7 +250,12 @@ where
         slot_idx: usize,
     ) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         loop {
-            let pkt = recv_pkt(&mut self.transport, &mut self.recv_buf).await?;
+            let pkt = recv_pkt(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+            )
+            .await?;
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id => {
                     let mut slot = ChannelSlot::new(local_id);
@@ -279,9 +299,15 @@ where
         }
 
         let (local_id, remote_id) = self.channel_ids(ch)?;
+        let rx_cap = self.config.rx_cap();
 
         loop {
-            let pkt = recv_pkt(&mut self.transport, &mut self.recv_buf).await?;
+            let pkt = recv_pkt(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+            )
+            .await?;
             match pkt.command {
                 Command::Write if pkt.arg1 == local_id => {
                     let payload_len = pkt.data.len();
@@ -291,7 +317,7 @@ where
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     if n < pkt.data.len() {
                         if let Some(slot) = self.channels[ch.slot].as_mut() {
-                            slot.rx_buf.extend_from_slice(&pkt.data[n..]);
+                            slot.push_rx(&pkt.data[n..], rx_cap)?;
                         }
                     }
                     return Ok(n);
@@ -400,11 +426,12 @@ where
 
         let (local_id, remote_id) = self.channel_ids(ch)?;
         let delayed_ack = self.delayed_ack;
+        let rx_cap = self.config.rx_cap();
 
         let mut interrupt = core::pin::pin!(interrupt);
 
         loop {
-            if let Some(pkt) = Packet::decode(&mut self.recv_buf)? {
+            if let Some(pkt) = Packet::decode(&mut self.recv_buf, self.config.max_payload())? {
                 match pkt.command {
                     Command::Write if pkt.arg1 == local_id => {
                         let payload_len = pkt.data.len();
@@ -421,7 +448,7 @@ where
                         buf[..n].copy_from_slice(&pkt.data[..n]);
                         if n < pkt.data.len() {
                             if let Some(slot) = self.channels[ch.slot].as_mut() {
-                                slot.rx_buf.extend_from_slice(&pkt.data[n..]);
+                                slot.push_rx(&pkt.data[n..], rx_cap)?;
                             }
                         }
                         return Ok(SelectResult::Data(n));
@@ -433,8 +460,14 @@ where
                         return Err(Error::ChannelClosed);
                     }
                     _ => {
-                        dispatch_to(&mut self.transport, &mut self.channels, delayed_ack, pkt)
-                            .await?;
+                        dispatch_to(
+                            &mut self.transport,
+                            &mut self.channels,
+                            delayed_ack,
+                            rx_cap,
+                            pkt,
+                        )
+                        .await?;
                         continue;
                     }
                 }
@@ -521,6 +554,7 @@ where
             &mut self.transport,
             &mut self.channels,
             self.delayed_ack,
+            self.config.rx_cap(),
             pkt,
         )
         .await
@@ -544,7 +578,12 @@ where
             }
 
             let local_id = self.channel_ids(ch)?.0;
-            let pkt = recv_pkt(&mut self.transport, &mut self.recv_buf).await?;
+            let pkt = recv_pkt(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+            )
+            .await?;
 
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id => {
@@ -569,4 +608,5 @@ where
     }
 }
 
+mod config;
 mod handshake;

@@ -59,7 +59,10 @@ impl Packet {
 }
 
 impl Packet {
-    pub fn decode(buf: &mut BytesMut) -> Result<Option<Self>, ProtocolError> {
+    /// Returns `Ok(None)` until a whole packet is buffered. The size
+    /// check happens before the payload is awaited, so an oversized
+    /// announcement fails instead of growing `buf` to fit it.
+    pub fn decode(buf: &mut BytesMut, max_payload: u32) -> Result<Option<Self>, ProtocolError> {
         if buf.len() < MESSAGE_SIZE {
             return Ok(None);
         }
@@ -81,7 +84,7 @@ impl Packet {
             return Err(ProtocolError::InvalidMagic);
         }
 
-        if message.data_length > MAX_PAYLOAD {
+        if message.data_length > max_payload.min(MAX_PAYLOAD) {
             return Err(ProtocolError::PayloadTooLarge);
         }
 
@@ -143,6 +146,12 @@ mod tests {
     use super::super::{constant::MAX_PAYLOAD, packet::Packet, Command, MESSAGE_SIZE};
     use bytes::{BufMut, Bytes, BytesMut};
 
+    /// Decode with the library-wide limit; tests that care about a
+    /// custom cap call `Packet::decode` directly.
+    fn decode(buf: &mut BytesMut) -> Result<Option<Packet>, ProtocolError> {
+        Packet::decode(buf, MAX_PAYLOAD)
+    }
+
     fn checksum(data: &[u8]) -> u32 {
         data.iter().map(|&b| b as u32).sum()
     }
@@ -179,7 +188,7 @@ mod tests {
         buf.put_u32_le(command);
 
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(None),
             "buffer smaller than header must yield None"
         );
@@ -191,7 +200,7 @@ mod tests {
         buf.put_u32_le(magic(command));
 
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(Some(Packet::new(Command::Ready, arg0, arg1, Bytes::new()))),
             "full header must decode into a ready packet"
         );
@@ -207,7 +216,7 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.put_u32_le(command);
 
-        assert_eq!(Packet::decode(&mut buf), Ok(None));
+        assert_eq!(decode(&mut buf), Ok(None));
 
         buf.put_u32_le(arg0);
         buf.put_u32_le(arg1);
@@ -216,21 +225,21 @@ mod tests {
         buf.put_u32_le(magic(command));
 
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(None),
             "header-only buffer must wait for the payload"
         );
 
         buf.put_slice(b"shel");
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(None),
             "partial payload must wait for the rest"
         );
 
         buf.put_slice(b"l_v2\0");
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(Some(Packet::new(
                 Command::Open,
                 arg0,
@@ -246,7 +255,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), MESSAGE_SIZE);
-        assert_eq!(Packet::decode(&mut buf), Ok(Some(original)));
+        assert_eq!(decode(&mut buf), Ok(Some(original)));
     }
 
     #[test]
@@ -255,7 +264,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), MESSAGE_SIZE + b"hello, device".len());
-        assert_eq!(Packet::decode(&mut buf), Ok(Some(original)));
+        assert_eq!(decode(&mut buf), Ok(Some(original)));
     }
 
     #[test]
@@ -270,7 +279,7 @@ mod tests {
     fn decode_rejects_bad_magic() {
         let command: u32 = Command::Ready.into();
         let mut buf = encode_header(command, 0, 0, 0, 0, magic(command) ^ 0x1);
-        assert_eq!(Packet::decode(&mut buf), Err(ProtocolError::InvalidMagic));
+        assert_eq!(decode(&mut buf), Err(ProtocolError::InvalidMagic));
     }
 
     #[test]
@@ -278,7 +287,7 @@ mod tests {
         let unknown: u32 = 0xDEAD_BEEF;
         let mut buf = encode_header(unknown, 0, 0, 0, 0, magic(unknown));
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Err(ProtocolError::InvalidCommand(unknown))
         );
     }
@@ -299,10 +308,7 @@ mod tests {
         );
         buf.put_slice(data);
 
-        assert_eq!(
-            Packet::decode(&mut buf),
-            Err(ProtocolError::InvalidChecksum)
-        );
+        assert_eq!(decode(&mut buf), Err(ProtocolError::InvalidChecksum));
     }
 
     #[test]
@@ -314,7 +320,7 @@ mod tests {
         buf.put_slice(data);
 
         assert_eq!(
-            Packet::decode(&mut buf),
+            decode(&mut buf),
             Ok(Some(Packet::new(
                 Command::Write,
                 1,
@@ -328,9 +334,6 @@ mod tests {
     fn decode_rejects_payload_length_above_max_payload() {
         let command: u32 = Command::Write.into();
         let mut buf = encode_header(command, 0, 0, MAX_PAYLOAD + 1, 0, magic(command));
-        assert_eq!(
-            Packet::decode(&mut buf),
-            Err(ProtocolError::PayloadTooLarge)
-        );
+        assert_eq!(decode(&mut buf), Err(ProtocolError::PayloadTooLarge));
     }
 }

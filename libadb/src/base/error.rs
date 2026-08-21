@@ -32,6 +32,17 @@ pub enum Error<E> {
     /// [`shell::v2::Shell`]: crate::shell::v2::Shell
     /// [`shell::v2::Shell::new`]: crate::shell::v2::Shell::new
     ReceiveBufferFull,
+    /// A channel buffered more unread data than
+    /// [`ConnectionConfig::max_rx_per_channel`] allows.
+    ///
+    /// Raised when the device keeps writing to a channel the application
+    /// is not draining. The connection is left intact but the offending
+    /// packet was dropped unacknowledged, so that channel now has a gap
+    /// in its byte stream and the device stalls on it — treat it as
+    /// fatal for that channel.
+    ///
+    /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
+    ChannelRxOverflow,
     /// Logcat binary entry parsing error.
     Logcat(crate::logcat::LogcatError),
     /// Hex-framed protobuf decode error (track-app, app-info).
@@ -153,6 +164,9 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::NoFreeChannels => f.write_str("no free channel slots"),
             Self::UnexpectedEof => f.write_str("unexpected eof"),
             Self::ReceiveBufferFull => f.write_str("receive buffer full"),
+            Self::ChannelRxOverflow => {
+                f.write_str("channel buffered more unread data than max_rx_per_channel allows")
+            }
             Self::Logcat(e) => write!(f, "{e}"),
             Self::Decode(e) => write!(f, "{e}"),
             Self::MissingFeature(feature) => {
@@ -189,6 +203,7 @@ where
             | Self::NoFreeChannels
             | Self::UnexpectedEof
             | Self::ReceiveBufferFull
+            | Self::ChannelRxOverflow
             | Self::MissingFeature(_) => None,
         }
     }
@@ -197,6 +212,18 @@ where
 impl<E> From<ProtocolError> for Error<E> {
     fn from(e: ProtocolError) -> Self {
         Self::Protocol(e)
+    }
+}
+
+/// A channel's receive buffer hit its configured cap. Internal marker
+/// turned into [`Error::ChannelRxOverflow`] at the call sites that know
+/// the transport error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RxOverflow;
+
+impl<E> From<RxOverflow> for Error<E> {
+    fn from(_: RxOverflow) -> Self {
+        Self::ChannelRxOverflow
     }
 }
 
