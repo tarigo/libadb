@@ -6,7 +6,7 @@ use embedded_io_async::{Read, Write};
 use super::connection::{
     Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
 };
-use super::error::{Error, ProtocolError};
+use super::error::{Error, ProtocolError, RxOverflow};
 use super::protocol::command::Command;
 use super::protocol::packet::Packet;
 
@@ -33,16 +33,20 @@ pub(crate) enum DispatchOutcome {
     Unmatched,
 }
 
-pub(crate) fn dispatch_packet(
+/// `rx_cap` bounds how much unread data a single channel may accumulate;
+/// a WRTE that would push it past the cap fails with
+/// [`Error::ChannelRxOverflow`] instead of growing the buffer.
+pub(crate) fn dispatch_packet<E>(
     channels: &mut [Option<ChannelSlot>],
     pkt: &Packet,
     delayed_ack: bool,
-) -> Result<DispatchOutcome, ProtocolError> {
+    rx_cap: usize,
+) -> Result<DispatchOutcome, Error<E>> {
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {
             Command::Write if pkt.arg1 == slot.local_id => {
-                let (local_id, remote_id, len) = slot.apply_write(&pkt.data);
+                let (local_id, remote_id, len) = slot.apply_write(&pkt.data, rx_cap)?;
                 return Ok(DispatchOutcome::AckWrite {
                     local_id,
                     remote_id,
@@ -164,9 +168,21 @@ impl ChannelSlot {
         Ok(())
     }
 
-    pub fn apply_write(&mut self, payload: &[u8]) -> (u32, u32, usize) {
+    pub fn apply_write(
+        &mut self,
+        payload: &[u8],
+        cap: usize,
+    ) -> Result<(u32, u32, usize), RxOverflow> {
+        self.push_rx(payload, cap)?;
+        Ok((self.local_id, self.remote_id, payload.len()))
+    }
+
+    pub fn push_rx(&mut self, payload: &[u8], cap: usize) -> Result<(), RxOverflow> {
+        if self.rx_buf.len().saturating_add(payload.len()) > cap {
+            return Err(RxOverflow);
+        }
         self.rx_buf.extend_from_slice(payload);
-        (self.local_id, self.remote_id, payload.len())
+        Ok(())
     }
 
     pub fn apply_close(&mut self) {

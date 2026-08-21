@@ -42,6 +42,32 @@
 //! println!("{}", core::str::from_utf8(&out.stdout)?);
 //! ```
 //!
+//! # Memory budget
+//!
+//! Every connection is opened with a [`ConnectionConfig`] that bounds
+//! what the library may allocate:
+//!
+//! * `max_payload` — advertised to the device in CNXN, so it caps the
+//!   size of any single inbound packet (and hence the receive buffer);
+//! * `initial_ack_bytes` — delayed-ACK credit granted per channel;
+//! * `max_rx_per_channel` — fuse on data buffered for a channel nobody
+//!   is reading.
+//!
+//! [`ConnectionConfig::new`] reproduces `adb`'s desktop behaviour (1 MiB
+//! packets, 32 MiB credit, unbounded buffering).
+//! [`ConnectionConfig::embedded`] fits a microcontroller:
+//!
+//! ```ignore
+//! let conn = Connection::<_>::connect_with_config(
+//!     transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
+//! ).await?;
+//! ```
+//!
+//! On a microcontroller-sized heap the default config is unusable: one
+//! 64 KiB WRTE can exhaust it, because the packet has to be buffered
+//! whole. `embedded()` caps packets at 8 KiB, and adbd honours the
+//! advertised limit.
+//!
 //! # Services
 //!
 //! * [`shell::v1`] — legacy `shell:` (interleaved stdout/stderr, no exit code)
@@ -99,8 +125,8 @@ pub mod uri;
 pub use base::{auth, channel, connection, device_banner, error, protocol};
 
 // Core types used in every non-trivial caller.
-pub use base::connection::Connection;
-pub use base::error::Error;
+pub use base::connection::{Connection, ConnectionConfig};
+pub use base::error::{Error, ProtocolError};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
 pub use transport::Splittable;
 
@@ -124,7 +150,10 @@ pub use transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 
 /// Common vocabulary for `use libadb::prelude::*;`.
 pub mod prelude {
-    pub use crate::{Connection, Error, Feature, Splittable, DEFAULT_HOST_FEATURES};
+    pub use crate::{
+        Connection, ConnectionConfig, Error, Feature, ProtocolError, Splittable,
+        DEFAULT_HOST_FEATURES,
+    };
 
     #[cfg(feature = "split")]
     pub use crate::{Reader, Writer};

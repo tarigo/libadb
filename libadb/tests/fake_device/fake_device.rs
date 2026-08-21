@@ -97,6 +97,7 @@ pub struct FakeDevice {
     max_payload: u32,
     initial_asb: Option<u32>,
     auth: AuthPolicy,
+    expect_open_asb: Option<u32>,
 }
 
 impl Default for FakeDevice {
@@ -112,6 +113,7 @@ impl FakeDevice {
             max_payload: DEFAULT_MAX_PAYLOAD,
             initial_asb: None,
             auth: AuthPolicy::None,
+            expect_open_asb: Some(INITIAL_DELAYED_ACK_BYTES),
         }
     }
 
@@ -143,6 +145,16 @@ impl FakeDevice {
 
     pub fn auth(mut self, policy: AuthPolicy) -> Self {
         self.auth = policy;
+        self
+    }
+
+    /// Delayed-ACK credit the device expects to see in `OPEN.arg1`.
+    ///
+    /// Defaults to [`INITIAL_DELAYED_ACK_BYTES`]; override it when the
+    /// client is configured with a custom initial credit, or pass `None`
+    /// to skip the assertion entirely.
+    pub fn expect_open_asb(mut self, expected: Option<u32>) -> Self {
+        self.expect_open_asb = expected;
         self
     }
 
@@ -184,6 +196,9 @@ impl FakeDeviceHandle {
             initial_asb: self.config.initial_asb.unwrap_or(0),
             next_device_id: 1,
             host_banner: Vec::new(),
+            host_max_payload: 0,
+            expect_open_asb: self.config.expect_open_asb,
+            last_open_asb: None,
         };
         session.handshake(&self.config).await;
         session
@@ -196,6 +211,9 @@ pub struct FakeSession {
     initial_asb: u32,
     next_device_id: u32,
     host_banner: Vec<u8>,
+    host_max_payload: u32,
+    expect_open_asb: Option<u32>,
+    last_open_asb: Option<u32>,
 }
 
 impl FakeSession {
@@ -214,6 +232,7 @@ impl FakeSession {
         // so the fixture can't drift from the client under test.
         self.delayed_ack = config.initial_asb.is_some() && has_feature(&host_banner, DELAYED_ACK);
         self.host_banner = host_banner;
+        self.host_max_payload = hdr.arg1;
 
         match &config.auth {
             AuthPolicy::None => {}
@@ -254,6 +273,18 @@ impl FakeSession {
     /// Raw `host::...` banner the client sent in its CNXN message.
     pub fn host_banner(&self) -> &[u8] {
         &self.host_banner
+    }
+
+    /// `arg1` of the client's CNXN — the largest payload it is willing
+    /// to receive.
+    pub fn host_max_payload(&self) -> u32 {
+        self.host_max_payload
+    }
+
+    /// `arg1` of the most recent OPEN accepted by this session — the
+    /// delayed-ACK credit the client granted (`None` before any OPEN).
+    pub fn last_open_asb(&self) -> Option<u32> {
+        self.last_open_asb
     }
 
     /// Low-level: send a message with command + args + payload.
@@ -306,11 +337,14 @@ impl FakeSession {
     pub async fn accept_open_any(&mut self) -> (FakeChannel<'_>, Vec<u8>) {
         let (hdr, dest) = self.expect(CMD_OPEN).await;
         let client_id = hdr.arg0;
+        self.last_open_asb = Some(hdr.arg1);
         if self.delayed_ack {
-            assert_eq!(
-                hdr.arg1, INITIAL_DELAYED_ACK_BYTES,
-                "OPEN arg1 must carry INITIAL_DELAYED_ACK_BYTES"
-            );
+            if let Some(expected) = self.expect_open_asb {
+                assert_eq!(
+                    hdr.arg1, expected,
+                    "OPEN arg1 must carry the configured initial delayed-ACK credit"
+                );
+            }
         }
         let device_id = self.next_device_id;
         self.next_device_id += 1;

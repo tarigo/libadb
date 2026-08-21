@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
-use super::Connection;
+use super::{Connection, ConnectionConfig};
 use crate::base::auth::Authenticator;
 use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
@@ -29,9 +29,10 @@ pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
 async fn recv_handshake_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
+    max_payload: u32,
 ) -> Result<Packet, Error<T::Error>> {
     loop {
-        let pkt = recv_pkt(t, buf).await?;
+        let pkt = recv_pkt(t, buf, max_payload).await?;
         match pkt.command {
             Command::Connect | Command::Auth => return Ok(pkt),
             Command::Close | Command::Ready | Command::Write | Command::Open => {
@@ -66,8 +67,25 @@ where
         auth: A,
         features: &[Feature],
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        Self::connect_with_config(transport, auth, features, ConnectionConfig::new()).await
+    }
+
+    /// Like [`connect`](Self::connect), but with explicit resource
+    /// limits instead of the desktop defaults.
+    ///
+    /// `config.max_payload()` is what this host advertises to the device
+    /// in CNXN, so it directly bounds how large an inbound packet — and
+    /// therefore the receive buffer — can get. Use
+    /// [`ConnectionConfig::embedded`] as a starting point on memory-tight
+    /// targets.
+    pub async fn connect_with_config<A: Authenticator>(
+        transport: T,
+        auth: A,
+        features: &[Feature],
+        config: ConnectionConfig,
+    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
         let banner = build_host_banner(features);
-        Self::connect_with_raw_banner(transport, auth, banner.as_slice()).await
+        Self::connect_with_raw_banner_and_config(transport, auth, banner.as_slice(), config).await
     }
 
     /// Connect to an ADB device with a caller-supplied raw identity
@@ -77,25 +95,37 @@ where
     /// feature list; prefer [`connect`](Self::connect) for the common
     /// case.
     pub async fn connect_with_raw_banner<A: Authenticator>(
+        transport: T,
+        auth: A,
+        banner: &[u8],
+    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        Self::connect_with_raw_banner_and_config(transport, auth, banner, ConnectionConfig::new())
+            .await
+    }
+
+    /// [`connect_with_raw_banner`](Self::connect_with_raw_banner) with
+    /// explicit resource limits.
+    pub async fn connect_with_raw_banner_and_config<A: Authenticator>(
         mut transport: T,
         mut auth: A,
         banner: &[u8],
+        config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
         let pkt = Packet::new(
             Command::Connect,
             command::ADB_VERSION,
-            command::MAX_PAYLOAD,
+            config.max_payload(),
             banner.to_vec(),
         );
         send_pkt(&mut transport, &pkt).await?;
 
         let mut recv_buf = BytesMut::new();
-        let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf).await?;
+        let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf, config.max_payload()).await?;
 
         let cnxn = match pkt.command {
             Command::Connect => pkt,
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                Self::do_auth(&mut transport, &mut auth, &mut recv_buf, pkt.data).await?
+                Self::do_auth(&mut transport, &mut auth, &mut recv_buf, pkt.data, &config).await?
             }
             other => return Err(ProtocolError::UnexpectedCommand(other).into()),
         };
@@ -108,7 +138,9 @@ where
         Ok(Self {
             transport,
             channels: core::array::from_fn(|_| None),
-            max_payload: cnxn.arg1,
+            // Bounded by our own encoder, not just by the device's offer.
+            max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
+            config,
             device_banner,
             local_id_counter: 1,
             delayed_ack,
@@ -121,6 +153,7 @@ where
         auth: &mut A,
         recv_buf: &mut BytesMut,
         token: Bytes,
+        config: &ConnectionConfig,
     ) -> Result<Packet, Error<<T as ErrorType>::Error>> {
         let signature = auth
             .sign(&token)
@@ -129,7 +162,7 @@ where
 
         send_pkt(transport, &Packet::auth_signature(signature)).await?;
 
-        let resp = recv_handshake_pkt(transport, recv_buf).await?;
+        let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
         if resp.command == Command::Connect {
             return Ok(resp);
         }
@@ -138,7 +171,7 @@ where
             let pubkey = auth.public_key();
             send_pkt(transport, &Packet::auth_public_key(pubkey.to_vec())).await?;
 
-            let resp = recv_handshake_pkt(transport, recv_buf).await?;
+            let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
             if resp.command == Command::Connect {
                 return Ok(resp);
             }
