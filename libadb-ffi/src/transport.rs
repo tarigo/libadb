@@ -19,7 +19,7 @@ use libadb::transport::rusb::{connect_by_selector, UsbConnectError};
 type Usb = libadb::transport::nusb::UsbTransport;
 
 #[cfg(all(feature = "rusb", not(feature = "nusb")))]
-type Usb = libadb::transport::rusb::UsbTransport;
+type Usb = libadb::transport::rusb::UsbTransport<libadb::transport::runtime::Inline>;
 
 #[cfg(not(any(feature = "nusb", feature = "rusb")))]
 type Usb = libadb::transport::common::NoUsb;

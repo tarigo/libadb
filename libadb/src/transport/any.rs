@@ -58,7 +58,7 @@ pub async fn connect<R, B>(
 ) -> Result<AnyTransport<R, B::Transport>, ConnectError<B::Error>>
 where
     R: Runtime,
-    B: UsbBackend,
+    B: UsbBackend<R>,
     B::Transport: Send + 'static,
     B::Error: Send + 'static,
 {
@@ -234,9 +234,9 @@ mod tests {
 
         // Compiling this is the assertion: two backends, one build,
         // chosen per call site rather than per feature set.
-        fn takes_backend<B: UsbBackend>() {}
-        takes_backend::<Nusb>();
-        takes_backend::<Rusb>();
+        fn takes_backend<R, B: UsbBackend<R>>() {}
+        takes_backend::<TestRuntime, Nusb>();
+        takes_backend::<TestRuntime, Rusb>();
     }
 
     #[test]

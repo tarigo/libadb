@@ -23,7 +23,7 @@
 pub mod split;
 pub mod tcp;
 
-#[cfg(any(feature = "tokio", feature = "smol"))]
+#[cfg(feature = "split")]
 pub mod runtime;
 
 #[cfg(feature = "nusb")]
@@ -47,8 +47,13 @@ pub use split::Splittable;
 /// and by [`common::NoUsb`] for builds without USB. Choosing a backend
 /// is a type argument rather than a feature, so enabling both features
 /// compiles and each call site says which one it wants.
-pub trait UsbBackend {
-    /// Transport this backend produces.
+/// `R` is the runtime the resulting transport will run its blocking
+/// work on. A backend that has none — `nusb` does its own async IO —
+/// simply ignores it, while `rusb` uses it for every transfer. Because
+/// the runtime comes from the same place as the one dialling TCP, the
+/// two cannot drift apart.
+pub trait UsbBackend<R> {
+    /// Transport this backend produces on runtime `R`.
     type Transport: embedded_io_async::Read + embedded_io_async::Write;
     /// Why opening a device failed.
     type Error: core::fmt::Display;
