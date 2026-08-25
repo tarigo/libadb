@@ -1,9 +1,14 @@
 use super::super::error::ProtocolError;
 use super::{
     constant::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, MAX_PAYLOAD},
-    Checksum, Checksumable, Command, Message, MESSAGE_SIZE,
+    Checksumable, Command, Message, MESSAGE_SIZE,
 };
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+
+#[cfg(test)]
+use super::Checksum;
+#[cfg(test)]
+use bytes::BufMut;
 
 /// An ADB packet (message + payload).
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +129,11 @@ impl Packet {
 
     /// `checksum` decides whether `data_check` carries the payload sum
     /// or stays zero — see [`Checksum`].
+    /// Serialize into one contiguous buffer. Test-only: on the wire a
+    /// packet must go out as a separate header write and payload write
+    /// (see [`send_pkt`](crate::base::wire::send_pkt)), which is what
+    /// adbd's exact-size header read requires.
+    #[cfg(test)]
     pub fn encode(&self, dst: &mut BytesMut, checksum: Checksum) -> Result<(), ProtocolError> {
         let message = self.to_message(checksum)?;
         dst.reserve(MESSAGE_SIZE + self.data.len());
@@ -137,6 +147,7 @@ impl Packet {
         Ok(())
     }
 
+    #[cfg(test)]
     fn to_message(&self, checksum: Checksum) -> Result<Message, ProtocolError> {
         if self.data.len() > MAX_PAYLOAD as usize {
             return Err(ProtocolError::PayloadTooLarge);
