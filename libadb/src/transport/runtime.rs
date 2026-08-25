@@ -6,6 +6,9 @@
 //! in one dependency tree could not ask for different ones. They are
 //! now chosen per call site through [`Runtime`], so enabling both
 //! features compiles and each caller says which one it means.
+//!
+//! [`Inline`] covers builds with no runtime at all: it runs blocking
+//! work on the calling thread and cannot dial TCP.
 
 use core::future::Future;
 
@@ -53,6 +56,68 @@ impl core::fmt::Display for BlockingError {
 }
 
 impl core::error::Error for BlockingError {}
+
+/// Runs blocking work on the calling thread.
+///
+/// The fallback for builds with no async runtime — `libadb-ffi` drives
+/// its transports on a blocking executor, where offloading would be
+/// pointless. Also what a `rusb` transport defaults to when no runtime
+/// feature is on.
+pub struct Inline;
+
+impl Runtime for Inline {
+    type Tcp = NoTcp;
+
+    fn connect_tcp(
+        _host: &str,
+        _port: u16,
+    ) -> impl Future<Output = Result<Self::Tcp, std::io::Error>> + Send {
+        core::future::ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Inline cannot dial TCP: pick a runtime such as Tokio or Smol",
+        )))
+    }
+
+    fn run_blocking<T, F>(f: F) -> impl Future<Output = Result<T, BlockingError>> + Send
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        core::future::ready(Ok(f()))
+    }
+}
+
+/// TCP half of [`Inline`]: no values, so it can never be dialled.
+#[derive(Debug)]
+pub enum NoTcp {}
+
+impl embedded_io::ErrorType for NoTcp {
+    type Error = crate::transport::common::NoUsbError;
+}
+
+impl embedded_io_async::Read for NoTcp {
+    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
+        match *self {}
+    }
+}
+
+impl embedded_io_async::Write for NoTcp {
+    async fn write(&mut self, _buf: &[u8]) -> Result<usize, Self::Error> {
+        match *self {}
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        match *self {}
+    }
+}
+
+impl Splittable for NoTcp {
+    type ReadHalf = NoTcp;
+    type WriteHalf = NoTcp;
+    fn split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self::Error> {
+        match self {}
+    }
+}
 
 /// The `tokio` runtime.
 #[cfg(feature = "tokio")]
@@ -137,5 +202,41 @@ impl Runtime for Smol {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let mut fut = core::pin::pin!(fut);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        match fut.as_mut().poll(&mut cx) {
+            core::task::Poll::Ready(v) => v,
+            core::task::Poll::Pending => panic!("Inline never parks"),
+        }
+    }
+
+    #[test]
+    fn inline_runs_the_closure_on_this_thread() {
+        let here = std::thread::current().id();
+        let ran_on = block_on(Inline::run_blocking(std::thread::current)).unwrap();
+        assert_eq!(ran_on.id(), here);
+    }
+
+    #[test]
+    fn inline_cannot_dial_tcp() {
+        let err = block_on(Inline::connect_tcp("127.0.0.1", 5555)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    #[cfg(all(feature = "tokio", feature = "smol"))]
+    #[test]
+    fn every_runtime_marker_is_usable_in_one_build() {
+        fn takes<R: Runtime>() {}
+        takes::<Tokio>();
+        takes::<Smol>();
+        takes::<Inline>();
     }
 }
