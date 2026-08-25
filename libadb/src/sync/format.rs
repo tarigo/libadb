@@ -23,7 +23,12 @@ pub(super) const ID_DNT2: [u8; 4] = *b"DNT2";
 pub(super) const ID_QUIT: [u8; 4] = *b"QUIT";
 
 pub(super) const STAT_V1_SIZE: usize = 16;
-pub(super) const STAT_V2_SIZE: usize = 72;
+/// Size of a `STA2` response: the four-byte id plus the body
+/// [`parse_stat_v2_body`] decodes.
+pub const STAT_V2_SIZE: usize = 72;
+
+/// Size of the body a `STA2` response carries after its id.
+pub const STAT_V2_BODY_SIZE: usize = STAT_V2_SIZE - 4;
 pub(super) const DENT_V1_SIZE: usize = 20;
 pub(super) const DENT_V2_SIZE: usize = 76;
 
@@ -108,8 +113,13 @@ pub(super) fn format_u32(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
     &out[pos..]
 }
 
-#[doc(hidden)]
-pub(super) fn parse_stat_v2_body(b: &[u8]) -> StatV2 {
+/// Decode the body of a `STA2` response — everything after its
+/// four-byte id.
+///
+/// Takes a fixed-size array rather than a slice, so a short response
+/// cannot reach the field reads: the caller has to establish the length
+/// first, which the session does while it waits for the whole record.
+pub fn parse_stat_v2_body(b: &[u8; STAT_V2_BODY_SIZE]) -> StatV2 {
     StatV2 {
         error: u32_at(b, 0),
         dev: u64_at(b, 4),
