@@ -8,14 +8,12 @@
 //! # Submodules
 //!
 //! * [`tcp`] — `TokioTcp` / `SmolTcp` aliases (features `tokio` / `smol`).
-//! * `nusb` — `UsbTransport` via `nusb` (feature `nusb`, also enabled
-//!   by the `usb` convenience alias).
-//! * `rusb` — `UsbTransport` via libusb/`rusb` (feature `rusb`; mutually
-//!   exclusive with `nusb`).
-//! * `usb` — backward-compatibility alias re-exporting the active USB
-//!   backend under the pre-rename path.
-//! * [`common`] — [`common::Transport`] enum wrapping either the active TCP
-//!   transport or USB behind a single concrete type.
+//! * `nusb` — `UsbTransport` and the [`UsbBackend`] marker `Nusb`
+//!   (feature `nusb`, also enabled by the `usb` convenience alias).
+//! * `rusb` — the same via libusb (feature `rusb`). Both backends can be
+//!   compiled in at once; pick one per call site through [`UsbBackend`].
+//! * [`common`] — [`common::Transport`], a TCP-or-USB enum parameterised
+//!   over both halves, and [`common::NoUsb`] for builds with no backend.
 //! * [`any`] — [`any::AnyTransport`] and [`any::connect`] for URI-based
 //!   dispatch between `tcp://` and `usb://` (features `tokio` or `smol`).
 //! * [`split`] — the [`Splittable`] trait itself.
@@ -29,9 +27,6 @@ pub mod nusb;
 #[cfg(feature = "rusb")]
 pub mod rusb;
 
-#[cfg(feature = "_usb")]
-pub mod usb;
-
 #[cfg(feature = "split")]
 pub mod common;
 
@@ -39,6 +34,28 @@ pub mod common;
 pub mod any;
 
 pub use split::Splittable;
+
+/// A USB backend: the way to obtain a USB transport from a
+/// [`UsbSelector`](crate::uri::UsbSelector).
+///
+/// Implemented by the zero-sized markers `nusb::Nusb` and `rusb::Rusb`,
+/// and by [`common::NoUsb`] for builds without USB. Choosing a backend
+/// is a type argument rather than a feature, so enabling both features
+/// compiles and each call site says which one it wants.
+pub trait UsbBackend {
+    /// Transport this backend produces.
+    type Transport: embedded_io_async::Read + embedded_io_async::Write;
+    /// Why opening a device failed.
+    type Error: core::fmt::Display;
+
+    /// Enumerate, match `selector`, and claim the device's ADB interface.
+    ///
+    /// Blocking: enumeration and claiming are synchronous in both
+    /// backends. Callers on an async runtime should offload it.
+    fn connect_by_selector(
+        selector: crate::uri::UsbSelector<'_>,
+    ) -> Result<Self::Transport, Self::Error>;
+}
 
 /// ADB USB interface class (vendor-specific).
 pub const ADB_CLASS: u8 = 0xFF;

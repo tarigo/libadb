@@ -29,14 +29,16 @@ handler). The `libadb-ffi` crate is where those live.
 |---------|-------------------------------------------------------------------------|
 | `tokio` | `tokio::net::TcpStream` transport (default)                             |
 | `smol`  | `smol::net::TcpStream` transport; mutually exclusive with `tokio`       |
-| `nusb`  | USB transport via `nusb` (pure-Rust); mutually exclusive with `rusb`    |
-| `rusb`  | USB transport via `rusb` (libusb); mutually exclusive with `nusb`       |
+| `nusb`  | USB transport via `nusb` (pure-Rust); combinable with `rusb`            |
+| `rusb`  | USB transport via `rusb` (libusb); combinable with `nusb`               |
 | `usb`   | Convenience alias — enables the default USB backend (`nusb`)            |
 | `split` | Full-duplex `Reader`/`Writer` pair with no bundled runtime (pulls in `std`); implied by every feature above |
 
-`tokio` and `smol` cannot be enabled together; neither can `nusb` and
-`rusb`. To pick the libusb backend, disable defaults and enable `rusb`
-directly:
+`tokio` and `smol` cannot be enabled together. Both USB backends may
+be, though: which one a call site uses is a type argument
+(`transport::UsbBackend`), not a feature, so an unrelated crate turning
+on `rusb` cannot change what your code talks to. To use the libusb
+backend, disable defaults and enable `rusb` directly:
 
 ```toml
 libadb = { version = "0.1", default-features = false, features = ["tokio", "rusb"] }
@@ -138,21 +140,36 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
 - `TokioTcp` — wraps `tokio::net::TcpStream`
 - `SmolTcp` — wraps `smol::net::TcpStream`
-- `UsbTransport` — USB transport with device discovery by VID:PID or
-  serial. Two backends with different trade-offs: pure-Rust `nusb`
-  (default, async bulk transfers via its own IO backend) or `rusb`/libusb
-  (blocking bulk transfers wrapped in `spawn_blocking` / `unblock`).
-  What stays the same regardless of backend: the `UsbTransport` type
-  name with `embedded_io_async::{Read, Write}` + `libadb::Splittable`
-  impls, and the `connect("usb://…")` URI entry point (enumeration is
-  offloaded to the runtime's blocking pool so it never stalls the
-  executor). What differs: the backend-specific error enums
-  (`UsbError`, `UsbConnectError` have different variants and wrap
-  different underlying types) and low-level constructors — switching
-  backends can therefore be a breaking change for code that touches
-  those APIs directly.
+- `transport::nusb::UsbTransport` / `transport::rusb::UsbTransport` —
+  USB transports with device discovery by VID:PID or serial, one per
+  backend. Both implement `embedded_io_async::{Read, Write}` +
+  `libadb::Splittable` and are reached through the same
+  `connect::<Backend>("usb://…")` entry point (enumeration is offloaded
+  to the runtime's blocking pool so it never stalls the executor). They
+  differ in trade-offs — pure-Rust `nusb` does async bulk transfers via
+  its own IO backend, `rusb`/libusb wraps blocking ones — and in their
+  error enums (`UsbError`, `UsbConnectError` have different variants and
+  wrap different underlying types), so switching backends touches any
+  code that names those types.
 - Any type implementing `embedded_io_async::{Read, Write}` +
   `libadb::Splittable` works as a custom transport
+
+The USB backend is chosen per call site, so a build may carry both:
+
+```rust,ignore
+use libadb::transport::{any, nusb::Nusb, rusb::Rusb, common::NoUsb};
+
+let a = any::connect::<Nusb>("usb://18d1:4ee7").await?;
+let b = any::connect::<Rusb>("usb://serial/ABC123").await?;
+
+// With no backend compiled in, `usb://` still builds; it fails at
+// runtime instead.
+let Err(err) = any::connect::<NoUsb>("usb://").await else {
+    unreachable!("NoUsb cannot serve usb://")
+};
+// tcp:// works regardless of the backend parameter.
+let tcp = any::connect::<NoUsb>("tcp://127.0.0.1:5555").await?;
+```
 
 `Connection::split()` gives you a full-duplex `Reader` / `Writer` pair
 so that a reader task and a writer task can coexist on the same

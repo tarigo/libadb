@@ -18,8 +18,8 @@
 //! |---------|----------------------------------------------------------------------------|
 //! | `tokio` | TCP transport over `tokio::net::TcpStream` (default)                       |
 //! | `smol`  | TCP transport over `smol::net::TcpStream`; mutually exclusive with `tokio` |
-//! | `nusb`  | USB transport via `nusb` (pure-Rust); mutually exclusive with `rusb`       |
-//! | `rusb`  | USB transport via `rusb` (libusb); mutually exclusive with `nusb`          |
+//! | `nusb`  | USB transport via `nusb` (pure-Rust); may be combined with `rusb`          |
+//! | `rusb`  | USB transport via `rusb` (libusb); may be combined with `nusb`             |
 //! | `usb`   | Convenience alias enabling the default USB backend (`nusb`)                |
 //! | `split` | [`split`] Reader/Writer pair with no bundled runtime; pulls in `std`. Implied by every feature above |
 //!
@@ -81,7 +81,8 @@
 //!
 //! # Transports
 //!
-//! `TokioTcp`, `SmolTcp`, `UsbTransport`, or any user type implementing
+//! `TokioTcp`, `SmolTcp`, `transport::nusb::UsbTransport`,
+//! `transport::rusb::UsbTransport`, or any user type implementing
 //! `embedded_io_async::{Read, Write}` plus [`Splittable`]. For concurrent
 //! read and write tasks on the same connection, see
 //! [`Connection::split`] and the resulting `Reader` / `Writer` pair.
@@ -96,12 +97,6 @@
 
 #[cfg(all(feature = "tokio", feature = "smol"))]
 compile_error!("features `tokio` and `smol` are mutually exclusive; enable only one");
-
-#[cfg(all(feature = "nusb", feature = "rusb"))]
-compile_error!("features `nusb` and `rusb` are mutually exclusive; enable only one");
-
-#[cfg(all(feature = "_usb", not(any(feature = "nusb", feature = "rusb"))))]
-compile_error!("feature `_usb` is internal; enable `nusb` (or the `usb` alias) or `rusb` instead");
 
 extern crate alloc;
 
@@ -139,14 +134,7 @@ pub use transport::tcp::TokioTcp;
 #[cfg(feature = "smol")]
 pub use transport::tcp::SmolTcp;
 
-#[cfg(feature = "nusb")]
-pub use transport::nusb::UsbTransport;
-
-#[cfg(all(feature = "rusb", not(feature = "nusb")))]
-pub use transport::rusb::UsbTransport;
-
-#[cfg(feature = "_usb")]
-pub use transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
+pub use transport::{UsbBackend, ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 
 /// Common vocabulary for `use libadb::prelude::*;`.
 pub mod prelude {
@@ -163,7 +151,4 @@ pub mod prelude {
 
     #[cfg(feature = "smol")]
     pub use crate::SmolTcp;
-
-    #[cfg(feature = "_usb")]
-    pub use crate::UsbTransport;
 }

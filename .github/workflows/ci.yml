@@ -29,6 +29,7 @@ jobs:
           - smol
           - tokio,usb
           - tokio,rusb
+          - tokio,nusb,rusb
           - smol,usb
           - smol,rusb
     steps:
@@ -77,10 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [tokio, smol]
+        features: [tokio, smol, "tokio,nusb,rusb"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install libusb + libudev (USB rows)
+        if: contains(matrix.features, 'usb')
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.features }}

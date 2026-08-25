@@ -1,8 +1,8 @@
 /// ADB over USB transport (libusb / `rusb` backend).
 ///
 /// Functional counterpart of `crate::transport::nusb` but built on the
-/// blocking `rusb`/libusb bindings. Mutually exclusive with the `nusb`
-/// feature — enable one or the other.
+/// blocking `rusb`/libusb bindings. Both features may be enabled at
+/// once; the `Rusb` marker selects this backend at a call site.
 #[cfg(feature = "rusb")]
 pub use self::inner::*;
 
@@ -259,6 +259,22 @@ mod inner {
                 Self::Claim(e) => write!(f, "claim: {e}"),
                 Self::NoBulkEndpoints => f.write_str("interface has no bulk endpoints"),
             }
+        }
+    }
+
+    /// The `rusb` backend: libusb, blocking bulk transfers.
+    ///
+    /// Zero-sized marker for [`UsbBackend`](crate::transport::UsbBackend);
+    /// pass it where a backend is required, e.g.
+    /// `any::connect::<Rusb>("usb://")`.
+    pub struct Rusb;
+
+    impl crate::transport::UsbBackend for Rusb {
+        type Transport = UsbTransport;
+        type Error = UsbConnectError;
+
+        fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, UsbConnectError> {
+            connect_by_selector(selector)
         }
     }
 
