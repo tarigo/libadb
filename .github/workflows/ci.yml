@@ -182,6 +182,26 @@ jobs:
           key: msrv-${{ matrix.package }}-${{ matrix.features }}
       - run: just msrv-one ${{ matrix.package }} "${{ matrix.features }}"
 
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [packet_decode, shell_v2_frames, sync_parse]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install just + cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+      # A minute each: enough to catch a target that stopped building or
+      # panics on the first inputs, not a substitute for a real campaign.
+      - run: just fuzz ${{ matrix.target }} 60
+
   no_std_msrv:
     runs-on: ubuntu-latest
     steps:

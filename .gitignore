@@ -1,3 +1,7 @@
 target
 mutants.out
 mutants.out.old
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
+fuzz/coverage

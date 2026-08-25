@@ -11,8 +11,8 @@ use super::device_banner::DeviceBanner;
 use super::error::Error;
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
-use super::protocol::packet::Packet;
 use super::protocol::Checksum;
+use super::protocol::Packet;
 use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag, Staged, MIN_READ};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 

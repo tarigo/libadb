@@ -1,7 +1,9 @@
 # Development tasks for libadb. Run `just` to list them.
 #
 # CI drives the same recipes, so a green `just ci` locally means the
-# same commands, flags and feature sets the workflow will run.
+# same commands, flags and feature sets the workflow will run — with one
+# exception: the fuzz job. It needs nightly and cargo-fuzz and takes a
+# minute per target, so it stays out of `ci`; run `just fuzz-all`.
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
@@ -12,6 +14,7 @@ ffi_features := "usb rusb nusb,rusb"
 doc_features := "tokio smol tokio,rusb smol,nusb tokio,smol,nusb,rusb"
 msrv_version := "1.87.0"
 no_std_target := "thumbv7m-none-eabi"
+fuzz_targets := "packet_decode shell_v2_frames sync_parse"
 # What the bottom of a stack sits on; see the `restack` and `mutants`
 # recipes.
 restack_base := "origin/main"
@@ -33,7 +36,7 @@ export RUSTFLAGS := "-D warnings"
 default:
     @just --list
 
-# Everything CI checks.
+# Everything CI checks, except fuzzing — see the note at the top.
 ci: fmt-check clippy clippy-ffi test doc msrv no-std all-features
 
 fmt:
@@ -207,5 +210,22 @@ mutants *files:
     cargo mutants "${common[@]}" --in-diff "$diff"
 
 # Fuzz one target for `seconds` (needs nightly and cargo-fuzz).
+#
+# The target triple is passed explicitly: a cargo-fuzz binary that was
+# itself built for musl otherwise picks musl for the build too, where
+# there is no prebuilt std.
 fuzz target seconds="60":
-    cargo +nightly fuzz run --fuzz-dir fuzz {{target}} -- -max_total_time={{seconds}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host=$(rustc +nightly -vV | awk '/^host:/{print $2}')
+    cargo +nightly fuzz run --fuzz-dir fuzz --target "$host" {{target}} \
+        -- -max_total_time={{seconds}}
+
+# Every fuzz target, briefly — what CI runs on each push.
+fuzz-all seconds="60":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in {{fuzz_targets}}; do
+        echo "== fuzz $t"
+        just fuzz "$t" "{{seconds}}"
+    done
