@@ -7,7 +7,40 @@ use super::protocol::constant::MAX_PAYLOAD;
 use super::protocol::packet::Packet;
 use super::protocol::{Checksum, MESSAGE_SIZE};
 
-pub(crate) const RECV_SCRATCH: usize = 4096;
+/// Floor on how much to ask the transport for. A request smaller than
+/// this is padded up to it, so a header-sized read does not split a
+/// packet that would have arrived in one go.
+pub(crate) const MIN_READ: usize = 4096;
+
+/// Grows `buf` by `want` bytes and hands out that tail to be read into,
+/// cutting the buffer back to whatever was committed when dropped — so
+/// a failed or cancelled read leaves no placeholder bytes behind.
+pub(crate) struct Staged<'a> {
+    buf: &'a mut BytesMut,
+    keep: usize,
+}
+
+impl<'a> Staged<'a> {
+    pub(crate) fn new(buf: &'a mut BytesMut, want: usize) -> Self {
+        let keep = buf.len();
+        buf.resize(keep + want, 0);
+        Self { buf, keep }
+    }
+
+    pub(crate) fn spare(&mut self) -> &mut [u8] {
+        &mut self.buf[self.keep..]
+    }
+
+    pub(crate) fn commit(&mut self, n: usize) {
+        self.keep += n;
+    }
+}
+
+impl Drop for Staged<'_> {
+    fn drop(&mut self) {
+        self.buf.truncate(self.keep);
+    }
+}
 
 pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Error<T::Error>> {
     let mut pos = 0;
@@ -37,14 +70,15 @@ pub(crate) async fn recv_pkt<T: Read>(
     buf: &mut BytesMut,
     max_payload: u32,
 ) -> Result<Packet, Error<T::Error>> {
-    let mut tmp = [0u8; RECV_SCRATCH];
     loop {
         if let Some(pkt) = Packet::decode(buf, max_payload)? {
             return Ok(pkt);
         }
-        match t.read(&mut tmp).await {
+        let want = Packet::missing(buf).max(MIN_READ);
+        let mut staged = Staged::new(buf, want);
+        match t.read(staged.spare()).await {
             Ok(0) => return Err(Error::UnexpectedEof),
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Ok(n) => staged.commit(n),
             Err(e) => return Err(Error::Io(e)),
         }
     }
@@ -109,4 +143,175 @@ pub(crate) async fn send_okay_to<T: Write>(
         checksum,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Checksum;
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Poll, Waker};
+    use std::vec::Vec;
+
+    #[derive(Debug)]
+    struct MockErr;
+
+    impl embedded_io::Error for MockErr {
+        fn kind(&self) -> embedded_io::ErrorKind {
+            embedded_io::ErrorKind::Other
+        }
+    }
+
+    /// Hands out queued bytes, filling as much of the caller's buffer as
+    /// it can, and counts how many times it was asked.
+    struct Feeder {
+        queued: Vec<u8>,
+        reads: usize,
+        /// Cap on what a single read hands back; 0 means "no cap".
+        drip: usize,
+    }
+
+    impl Feeder {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                queued: bytes,
+                reads: 0,
+                drip: 0,
+            }
+        }
+
+        fn dripping(bytes: Vec<u8>, drip: usize) -> Self {
+            Self {
+                queued: bytes,
+                reads: 0,
+                drip,
+            }
+        }
+    }
+
+    impl embedded_io::ErrorType for Feeder {
+        type Error = MockErr;
+    }
+
+    impl Read for Feeder {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, MockErr> {
+            self.reads += 1;
+            let cap = if self.drip == 0 { buf.len() } else { self.drip };
+            let n = self.queued.len().min(buf.len()).min(cap);
+            buf[..n].copy_from_slice(&self.queued[..n]);
+            self.queued.drain(..n);
+            Ok(n)
+        }
+    }
+
+    /// Never produces anything, so a read on it parks forever.
+    struct Parked;
+
+    impl embedded_io::ErrorType for Parked {
+        type Error = MockErr;
+    }
+
+    impl Read for Parked {
+        async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, MockErr> {
+            core::future::pending().await
+        }
+    }
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        let mut fut = pin!(fut);
+        let mut cx = Context::from_waker(Waker::noop());
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("mock transports never park"),
+        }
+    }
+
+    fn wire_packet(payload_len: usize) -> Vec<u8> {
+        let payload = std::vec![0xAB; payload_len];
+        let pkt = Packet::new(Command::Write, 1, 2, payload);
+        let mut buf = BytesMut::new();
+        pkt.encode(&mut buf, Checksum::Compute).unwrap();
+        buf.to_vec()
+    }
+
+    #[test]
+    fn future_does_not_carry_a_scratch_buffer() {
+        let mut t = Feeder::new(Vec::new());
+        let mut buf = BytesMut::new();
+        let fut = recv_pkt(&mut t, &mut buf, MAX_PAYLOAD);
+        let size = core::mem::size_of_val(&fut);
+        assert!(
+            size < 512,
+            "recv_pkt future is {size} B — a scratch array that big lands in \
+             every caller's future, which is what embedded tasks pay for",
+        );
+    }
+
+    #[test]
+    fn a_large_packet_does_not_take_one_read_per_scratch_worth() {
+        let wire = wire_packet(64 * 1024);
+        let mut t = Feeder::new(wire.clone());
+        let mut buf = BytesMut::new();
+
+        let pkt = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap();
+
+        assert_eq!(pkt.data.len(), 64 * 1024);
+        assert!(
+            t.reads <= 4,
+            "took {} reads for one packet: the payload length is known from \
+             the header, so it should be requested in one go",
+            t.reads,
+        );
+    }
+
+    #[test]
+    fn a_cancelled_read_leaves_no_scratch_bytes_behind() {
+        let mut t = Parked;
+        let mut buf = BytesMut::from(&b"\x57\x52\x54\x45"[..]);
+        let before = buf.clone();
+
+        {
+            let mut fut = pin!(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD));
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        }
+
+        assert_eq!(
+            buf, before,
+            "a dropped read must not leave placeholder bytes in the buffer",
+        );
+    }
+
+    #[test]
+    fn a_packet_split_across_reads_is_reassembled() {
+        // 7 bytes at a time, so the header itself spans four reads.
+        let mut t = Feeder::dripping(wire_packet(100), 7);
+        let mut buf = BytesMut::new();
+
+        let pkt = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap();
+
+        assert_eq!(pkt.data.len(), 100);
+        assert_eq!(&pkt.data[..], &[0xAB; 100][..]);
+        assert!(buf.is_empty(), "nothing should be left over");
+    }
+
+    #[test]
+    fn bytes_beyond_the_packet_stay_buffered() {
+        let mut wire = wire_packet(8);
+        let trailing = wire_packet(4);
+        wire.extend_from_slice(&trailing);
+
+        let mut t = Feeder::new(wire);
+        let mut buf = BytesMut::new();
+
+        let first = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap();
+        assert_eq!(first.data.len(), 8);
+
+        let second = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap();
+        assert_eq!(second.data.len(), 4, "the second packet must survive");
+    }
 }

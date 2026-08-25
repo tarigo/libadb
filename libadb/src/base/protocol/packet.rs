@@ -110,6 +110,18 @@ impl Packet {
         }))
     }
 
+    /// Bytes still missing before [`decode`](Self::decode) can produce a
+    /// packet: the rest of the header, or the rest of the payload it
+    /// announces. Only meaningful after `decode` returned `Ok(None)`,
+    /// which is also what bounds the announced length.
+    pub fn missing(buf: &[u8]) -> usize {
+        if buf.len() < MESSAGE_SIZE {
+            return MESSAGE_SIZE - buf.len();
+        }
+        let data_length = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) as usize;
+        (MESSAGE_SIZE + data_length).saturating_sub(buf.len())
+    }
+
     /// `checksum` decides whether `data_check` carries the payload sum
     /// or stays zero — see [`Checksum`].
     pub fn encode(&self, dst: &mut BytesMut, checksum: Checksum) -> Result<(), ProtocolError> {

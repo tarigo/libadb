@@ -13,7 +13,7 @@ use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::packet::Packet;
 use super::protocol::Checksum;
-use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, RECV_SCRATCH};
+use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, Staged, MIN_READ};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 pub const DEFAULT_MAX_CHANNELS: usize = 32;
@@ -516,10 +516,13 @@ where
                     Interrupt(O),
                 }
 
-                let mut tmp = [0u8; RECV_SCRATCH];
+                let want = Packet::missing(&self.recv_buf).max(MIN_READ);
+                let this = &mut *self;
+                let mut staged = Staged::new(&mut this.recv_buf, want);
+                let transport = &mut this.transport;
 
                 let wakeup = {
-                    let mut read_fut = core::pin::pin!(self.transport.read(&mut tmp));
+                    let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
 
                     core::future::poll_fn(|cx| {
                         if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
@@ -535,7 +538,9 @@ where
                     .await?
                 };
                 match wakeup {
-                    Wakeup::Read(n) => self.recv_buf.extend_from_slice(&tmp[..n]),
+                    // `staged` trims the untouched tail as it drops, in
+                    // both arms.
+                    Wakeup::Read(n) => staged.commit(n),
                     Wakeup::Interrupt(val) => return Ok(SelectResult::Interrupted(val)),
                 }
             }
