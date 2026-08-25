@@ -191,7 +191,13 @@ adb_status_t adb_open_channel(
 /*
  * Read from a channel. *out_read receives the number of bytes read.
  * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED; ADB_OK with
- * *out_read == 0 never happens.
+ * *out_read == 0 never happens, which is what makes
+ *
+ *     while (adb_read_channel(...) == ADB_OK) { ... }
+ *
+ * a correct loop. buf_len == 0 is rejected with ADB_ERR_INVALID_ARG
+ * rather than answering with a zero such a loop would spin on, and a
+ * zero-length WRTE from the device is read past for the same reason.
  */
 adb_status_t adb_read_channel(
     adb_connection_t *conn,

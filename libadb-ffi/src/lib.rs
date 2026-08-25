@@ -417,7 +417,12 @@ pub unsafe extern "C" fn adb_open_channel(
 /// number of bytes actually read through `out_read`.
 ///
 /// A return of `ADB_OK` with `*out_read == 0` never occurs; channel
-/// closure is reported as [`AdbStatus::ChannelClosed`].
+/// closure is reported as [`AdbStatus::ChannelClosed`]. That is what
+/// makes `while (adb_read_channel(...) == ADB_OK)` a correct loop, so
+/// `buf_len == 0` is rejected with [`AdbStatus::InvalidArg`] rather
+/// than answering with a zero that the loop would spin on, and a
+/// zero-length WRTE from the device — legal, and delivering nothing —
+/// is read past instead of surfacing as that same zero.
 ///
 /// # Safety
 /// `conn` must be a valid handle. `buf` must be NULL or point to at
@@ -435,10 +440,20 @@ pub unsafe extern "C" fn adb_read_channel(
     if conn.is_null() || out_read.is_null() || (buf.is_null() && buf_len > 0) {
         return error::fail_invalid_arg("null pointer");
     }
+    if buf_len == 0 {
+        return error::fail_invalid_arg("buf_len is zero");
+    }
     let slice = slice::from_mut_ptr(buf, buf_len);
     let mut g = (*conn).lock_reader();
     let ch = decode_channel_id(id);
-    let n = ffi_try!(g.read_channel(ch, slice));
+    // The reader hands back Ok(0) for a zero-length WRTE; the C
+    // contract above forbids returning it.
+    let n = loop {
+        let n = ffi_try!(g.read_channel(ch, slice));
+        if n > 0 {
+            break n;
+        }
+    };
     *out_read = n;
     AdbStatus::Ok
 }
