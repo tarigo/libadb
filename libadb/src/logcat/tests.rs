@@ -225,5 +225,8 @@ fn destination_text() {
 #[test]
 fn destination_buffer_too_small() {
     let mut buf = [0u8; 10];
-    assert_eq!(write_destination(&mut buf, b"logcat -B", &[]), None);
+    assert_eq!(
+        write_destination(&mut buf, b"logcat -B", &[]),
+        Err(crate::base::destination::DestinationError::TooLong)
+    );
 }

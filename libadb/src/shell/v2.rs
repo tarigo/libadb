@@ -410,6 +410,12 @@ where
 /// stdin immediately, drains all output frames and closes the channel.
 /// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
 /// details.
+///
+/// `command` is shell source and reaches the device verbatim, so
+/// metacharacters in it keep their meaning and anything interpolated
+/// into it is the caller's to quote. [`cmd`](crate::cmd) quotes its
+/// arguments, but it always runs Android's `cmd` utility — it is not a
+/// general argv form of this call.
 pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
     conn: &mut Connection<T, MC, MP, MF>,
     command: &str,

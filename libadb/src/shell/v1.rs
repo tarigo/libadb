@@ -26,10 +26,10 @@ use crate::base::channel::{Channel, SelectResult};
 use crate::base::connection::{
     Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
 };
-use crate::base::destination;
+use crate::base::destination::{self, DestinationError};
 use crate::base::error::Error;
 
-fn write_destination(buf: &mut [u8], command: &str) -> Option<usize> {
+fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"shell:", command.as_bytes()], &[])
 }
 
@@ -117,7 +117,7 @@ pub async fn open<'a, T, const MC: usize, const MP: usize, const MF: usize>(
 where
     T: Read + Write,
 {
-    let dest_len = write_destination(dest_buf, command).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_destination(dest_buf, command)?;
     let channel = conn.open(&dest_buf[..dest_len]).await?;
     Ok(Shell { channel })
 }
@@ -132,6 +132,12 @@ where
 /// used transiently to build the `shell:<command>\0` destination string
 /// before any output arrives.
 ///
+/// `command` is shell source and reaches the device verbatim, so
+/// metacharacters in it keep their meaning and anything interpolated
+/// into it is the caller's to quote. [`cmd`](crate::cmd) quotes its
+/// arguments, but it always runs Android's `cmd` utility — it is not a
+/// general argv form of this call.
+///
 /// Note: the legacy protocol provides no exit code. If the caller needs
 /// one, use [`shell::v2::exec`](crate::shell::v2::exec) on devices that
 /// advertise the `shell_v2` feature.
@@ -143,7 +149,7 @@ pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
 where
     T: Read + Write,
 {
-    let dest_len = write_destination(buf, command).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_destination(buf, command)?;
     let channel = conn.open(&buf[..dest_len]).await?;
     let mut shell = Shell { channel };
 
@@ -191,6 +197,9 @@ mod tests {
     #[test]
     fn destination_buffer_too_small() {
         let mut buf = [0u8; 7];
-        assert_eq!(write_destination(&mut buf, "x"), None);
+        assert_eq!(
+            write_destination(&mut buf, "x"),
+            Err(DestinationError::TooLong)
+        );
     }
 }

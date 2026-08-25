@@ -8,6 +8,10 @@
 //! | 1 | `abb_exec` / `abb` | raw bytes | shell_v2 framing |
 //! | 2 | `shell,v2,raw:cmd …` | shell_v2 | shell_v2 framing |
 //!
+//! `args` is an argv either way: the `abb` services take NUL-separated
+//! arguments, and the shell fallback quotes each one, so a device
+//! without `abb` runs the same command as a device with it.
+//!
 //! # Examples
 //!
 //! ```ignore
@@ -33,12 +37,12 @@ use embedded_io_async::{Read, Write};
 
 use crate::abb;
 use crate::base::connection::Connection;
-use crate::base::destination;
+use crate::base::destination::{self, DestinationError};
 use crate::base::error::Error;
 use crate::base::protocol::features::Feature;
 use crate::shell::v2::Shell;
 
-fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Option<usize> {
+fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"shell,v2,raw:cmd"], args)
 }
 
@@ -61,7 +65,10 @@ where
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// For example, `cmd package list packages` is
-/// `&["package", "list", "packages"]`.
+/// `&["package", "list", "packages"]`. Each element arrives as one
+/// argument: spaces and shell metacharacters inside it are literal, and
+/// an embedded NUL is rejected with
+/// [`ProtocolError::InvalidDestination`](crate::ProtocolError::InvalidDestination).
 ///
 /// `rx` is a temporary buffer used for reading.
 pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
@@ -76,7 +83,7 @@ where
         return abb::exec(conn, args, rx).await;
     }
 
-    let dest_len = write_shell_destination(rx, args).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_shell_destination(rx, args)?;
     let channel = conn.open(&rx[..dest_len]).await?;
     let shell = Shell::new(channel, rx);
     let output = shell.collect().await?;
@@ -89,7 +96,8 @@ where
 /// `shell,v2,raw:cmd …`.  Both paths return a [`Shell`] handle for
 /// reading frames.
 ///
-/// `args` are the tokens that would follow `cmd` on the device shell.
+/// `args` are the tokens that would follow `cmd` on the device shell,
+/// one element per argument — see [`exec`] on how they are passed.
 /// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
 /// sizing advice.
 pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
@@ -104,7 +112,7 @@ where
         return abb::open(conn, args, rx).await;
     }
 
-    let dest_len = write_shell_destination(rx, args).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_shell_destination(rx, args)?;
     let channel = conn.open(&rx[..dest_len]).await?;
     Ok(Shell::new(channel, rx))
 }
@@ -137,6 +145,9 @@ mod tests {
     #[test]
     fn shell_destination_buffer_too_small() {
         let mut buf = [0u8; 10];
-        assert!(write_shell_destination(&mut buf, &["package"]).is_none());
+        assert_eq!(
+            write_shell_destination(&mut buf, &["package"]),
+            Err(DestinationError::TooLong)
+        );
     }
 }

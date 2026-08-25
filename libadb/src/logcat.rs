@@ -225,7 +225,11 @@ where
     }
 }
 
-fn write_destination(buf: &mut [u8], prefix: &[u8], args: &[&str]) -> Option<usize> {
+fn write_destination(
+    buf: &mut [u8],
+    prefix: &[u8],
+    args: &[&str],
+) -> Result<usize, crate::base::destination::DestinationError> {
     crate::base::destination::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
 }
 
@@ -239,7 +243,7 @@ where
     T: Read + Write,
 {
     conn.require_feature(crate::base::protocol::features::Feature::ShellV2)?;
-    let dest_len = write_destination(buf, prefix, args).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_destination(buf, prefix, args)?;
     conn.open(&buf[..dest_len]).await
 }
 
@@ -253,6 +257,9 @@ where
 /// * `&["-s", "MyTag:D"]` — filter by tag / priority
 /// * `&["--pid=1234"]` — filter by PID
 /// * `&["-T", "100"]` — start from the last 100 entries, then stream
+///
+/// Each element is one argument to `logcat`, so a filter expression may
+/// hold spaces or shell metacharacters without being split or executed.
 ///
 /// `buf` is the caller-owned buffer used both for channel IO and for
 /// accumulating binary stdout data.  A few KiB is enough for typical
