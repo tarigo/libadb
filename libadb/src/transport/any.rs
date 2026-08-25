@@ -223,7 +223,7 @@ mod tests {
                 matches!(err, ConnectError::Usb(NoBackend)),
                 "{uri}: got {err:?}",
             );
-            assert_eq!(format!("{}", err), "usb: no usb backend compiled in");
+            assert_eq!(format!("{}", err), "usb: no usb backend selected");
         }
     }
 
