@@ -8,4 +8,10 @@ exclude_re = [
     # no stand-in on the test side — they only prove themselves against
     # a bus, so mutating them is never caught here.
     'impl Enumerated for nusb::DeviceInfo',
+    # `NoTcp`, `NoUsb` and `NoUsbError` have no values, so these method
+    # bodies are `match *self {}` — unreachable by construction, and so
+    # is any mutant of them. Named one by one rather than by receiver:
+    # `NoUsb` also carries `connect_by_selector`, which does run and is
+    # worth mutating.
+    'for No(Tcp|Usb|UsbError)>::(read|write|flush|split|fmt|kind|source)',
 ]

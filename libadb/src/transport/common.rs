@@ -200,6 +200,8 @@ mod tests {
         }
     }
 
+    impl core::error::Error for MockErr {}
+
     impl core::fmt::Display for MockErr {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.write_str(self.0)
@@ -395,5 +397,17 @@ mod tests {
             Err(TransportError::Tcp(MockErr("split-fail"))) => {}
             Err(other) => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_transport_error_keeps_its_cause_reachable() {
+        use core::error::Error as _;
+
+        let e: TransportError<MockErr, MockErr> = TransportError::Tcp(MockErr("oops"));
+        let source = e.source().expect("the transport error is the cause");
+        assert_eq!(format!("{source}"), "oops");
+
+        let e: TransportError<MockErr, MockErr> = TransportError::Usb(MockErr("nope"));
+        assert!(e.source().is_some(), "the usb half has a cause too");
     }
 }

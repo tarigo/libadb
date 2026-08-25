@@ -145,6 +145,28 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_v2_destination_names_its_command() {
+        let raw = build_shell_v2_destination(false, "", "ls").unwrap();
+        assert_eq!(raw, "shell,v2,raw:ls\0");
+        let pty = build_shell_v2_destination(true, "", "ls").unwrap();
+        assert_eq!(pty, "shell,v2,pty:ls\0");
+        let term = build_shell_v2_destination(true, "xterm", "ls").unwrap();
+        assert_eq!(term, "shell,v2,pty,TERM=xterm:ls\0");
+    }
+
+    #[test]
+    fn a_nul_in_either_half_of_a_shell_v2_destination_is_rejected() {
+        assert_eq!(
+            build_shell_v2_destination(false, "", "l\0s"),
+            Err(ProtocolError::InvalidDestination)
+        );
+        assert_eq!(
+            build_shell_v2_destination(true, "xte\0rm", "ls"),
+            Err(ProtocolError::InvalidDestination)
+        );
+    }
+
+    #[test]
     fn shell_safe_arguments_stay_bare() {
         assert_eq!(
             rendered(&["package", "list", "packages"]),

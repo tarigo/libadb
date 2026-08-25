@@ -18,8 +18,8 @@ restack_base := "origin/main"
 # Feature set mutants are hunted under. It has to cover the code being
 # mutated: a mutant inside a `cfg`-ed out module compiles away, the
 # tests pass, and it is reported as surviving when nothing was tested at
-# all. One runtime plus both USB backends covers the crate.
-mutants_features := "tokio,nusb,rusb"
+# all. Both runtimes and both USB backends cover the crate.
+mutants_features := "tokio,smol,nusb,rusb"
 # Seconds a single mutant may take before it counts as a timeout. A
 # mutant that loops forever would otherwise hold the run open.
 mutants_timeout := "120"
@@ -187,8 +187,11 @@ restack +stack:
 mutants *files:
     #!/usr/bin/env bash
     set -euo pipefail
+    # `nproc` is GNU; macOS answers with sysctl and neither is
+    # guaranteed, so fall back to a modest fixed number.
+    jobs=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
     common=(--package libadb --features "{{mutants_features}}" \
-            --timeout {{mutants_timeout}} --jobs "$(nproc)")
+            --timeout {{mutants_timeout}} --jobs "$jobs")
     if [ -n "{{files}}" ]; then
         args=()
         for f in {{files}}; do args+=(--file "$f"); done

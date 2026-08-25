@@ -324,6 +324,17 @@ mod inner {
         }
 
         #[test]
+        fn a_transfer_error_stays_reachable_through_the_wrapper() {
+            use core::error::Error as _;
+            let err = UsbError(nusb::transfer::TransferError::Cancelled);
+            let source = err.source().expect("the transfer error is the source");
+            assert_eq!(
+                alloc::format!("{source}"),
+                alloc::format!("{}", nusb::transfer::TransferError::Cancelled)
+            );
+        }
+
+        #[test]
         fn any_walks_past_a_device_without_an_adb_interface() {
             let devices = vec![
                 Dev::new(0x1d6b, 0x0002, None),
@@ -353,6 +364,24 @@ mod inner {
                 pid: 0x4ee7,
             };
             assert_eq!(pick(devices, selector).unwrap(), (0x4ee7, 2));
+        }
+
+        #[test]
+        fn a_vid_pid_has_to_match_both_halves() {
+            let selector = UsbSelector::VidPid {
+                vid: 0x18d1,
+                pid: 0x4ee7,
+            };
+            let same_vid = vec![Dev::new(0x18d1, 0x4ee8, Some(0))];
+            assert!(matches!(
+                pick(same_vid, selector),
+                Err(UsbConnectError::NotFound)
+            ));
+            let same_pid = vec![Dev::new(0x18d2, 0x4ee7, Some(0))];
+            assert!(matches!(
+                pick(same_pid, selector),
+                Err(UsbConnectError::NotFound)
+            ));
         }
 
         #[test]
