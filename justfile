@@ -56,6 +56,9 @@ clippy-ffi-one features="":
 test-one features:
     cargo test -p libadb --no-default-features --features "{{features}}"
 
+test-ffi-one features="":
+    cargo test -p libadb-ffi --no-default-features --features "{{features}}"
+
 doc-one package features:
     RUSTDOCFLAGS="-D warnings" cargo doc -p {{package}} --no-default-features --features "{{features}}" --no-deps
 
@@ -88,6 +91,12 @@ test:
     for f in {{lib_features}}; do
         echo "== test [$f]"
         just test-one "$f"
+    done
+    echo "== test libadb-ffi [no features]"
+    just test-ffi-one ""
+    for f in {{ffi_features}}; do
+        echo "== test libadb-ffi [$f]"
+        just test-ffi-one "$f"
     done
 
 doc:

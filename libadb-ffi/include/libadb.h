@@ -283,7 +283,10 @@ adb_status_t adb_shell_read_frame(
     size_t       buf_cap,
     size_t      *out_len);
 
-/* Send a STDIN frame. */
+/* Send a STDIN frame.
+ *
+ * Safe to call from several threads on one session: each frame is
+ * written whole, never interleaved with another sender's. */
 adb_status_t adb_shell_write_stdin(
     adb_shell_t   *sh,
     const uint8_t *data,
