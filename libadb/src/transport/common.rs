@@ -7,8 +7,8 @@ use crate::transport::Splittable;
 ///
 /// Both halves are type parameters, so a build may carry several
 /// runtimes and several USB backends at once and each call site says
-/// which pair it wants. Use [`NoUsb`] for `U` when no backend is
-/// compiled in.
+/// which pair it wants. Use [`NoUsb`] for `U` at a call site that wants
+/// no USB at all.
 pub enum Transport<T, U> {
     Tcp(T),
     Usb(U),
@@ -55,13 +55,16 @@ impl<R> crate::transport::UsbBackend<R> for NoUsb {
     }
 }
 
-/// No USB backend was compiled in, so `usb://` cannot be served.
+/// [`NoUsb`] was chosen as the backend, so `usb://` cannot be served.
+///
+/// Says nothing about what the build contains: a call site may pick
+/// [`NoUsb`] with both backends compiled in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoBackend;
 
 impl core::fmt::Display for NoBackend {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("no usb backend compiled in")
+        f.write_str("no usb backend selected")
     }
 }
 
