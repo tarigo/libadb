@@ -13,6 +13,7 @@ mod inner {
     use core::time::Duration;
     use rusb::{Context, Direction, TransferType, UsbContext};
 
+    use crate::transport::runtime::Runtime;
     use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
     use crate::uri::UsbSelector;
 
@@ -39,10 +40,11 @@ mod inner {
     /// transport may then observe wire-framing corruption. Avoid
     /// cancelling read/write futures; use the connection-level
     /// timeout/error paths to terminate transfers cleanly.
-    pub struct UsbTransport {
+    pub struct UsbTransport<R> {
         handle: Arc<rusb::DeviceHandle<Context>>,
         ep_in: u8,
         ep_out: u8,
+        runtime: core::marker::PhantomData<R>,
         // Reused across read/write to avoid per-call heap allocation
         // when crossing the spawn_blocking/unblock boundary under the
         // tokio/smol runtime variants. Empty under the no-runtime path
@@ -51,18 +53,19 @@ mod inner {
         buffer: Vec<u8>,
     }
 
-    impl Clone for UsbTransport {
+    impl<R> Clone for UsbTransport<R> {
         fn clone(&self) -> Self {
             Self {
                 handle: self.handle.clone(),
                 ep_in: self.ep_in,
                 ep_out: self.ep_out,
+                runtime: core::marker::PhantomData,
                 buffer: Vec::new(),
             }
         }
     }
 
-    impl UsbTransport {
+    impl<R: Runtime> UsbTransport<R> {
         /// Build a transport from an already-claimed `rusb::DeviceHandle`,
         /// picking bulk IN/OUT endpoints from the given interface.
         pub fn new(
@@ -81,54 +84,43 @@ mod inner {
                 handle: Arc::new(handle),
                 ep_in,
                 ep_out,
+                runtime: core::marker::PhantomData,
                 buffer: Vec::new(),
             }
         }
 
-        /// Read from the bulk IN endpoint.
-        #[cfg(any(feature = "tokio", feature = "smol"))]
+        /// Read from the bulk IN endpoint, on `R`'s blocking pool.
         pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, UsbError> {
             let handle = self.handle.clone();
             let ep = self.ep_in;
             let mut buffer = core::mem::take(&mut self.buffer);
             buffer.resize(buf.len(), 0);
-            let (n, buffer) = blocking(move || {
+            let (n, buffer) = R::run_blocking(move || {
                 let n = bulk_read(&handle, ep, &mut buffer)?;
-                Ok((n, buffer))
+                Ok::<_, UsbError>((n, buffer))
             })
-            .await?;
+            .await
+            .map_err(|_| UsbError::BlockingTaskFailed)??;
             buf[..n].copy_from_slice(&buffer[..n]);
             self.buffer = buffer;
             Ok(n)
         }
 
-        /// Read from the bulk IN endpoint.
-        #[cfg(not(any(feature = "tokio", feature = "smol")))]
-        pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, UsbError> {
-            bulk_read(&self.handle, self.ep_in, buf)
-        }
-
-        /// Write to the bulk OUT endpoint.
-        #[cfg(any(feature = "tokio", feature = "smol"))]
+        /// Write to the bulk OUT endpoint, on `R`'s blocking pool.
         pub async fn write(&mut self, buf: &[u8]) -> Result<usize, UsbError> {
             let handle = self.handle.clone();
             let ep = self.ep_out;
             let mut buffer = core::mem::take(&mut self.buffer);
             buffer.clear();
             buffer.extend_from_slice(buf);
-            let (n, buffer) = blocking(move || {
+            let (n, buffer) = R::run_blocking(move || {
                 let n = bulk_write(&handle, ep, &buffer)?;
-                Ok((n, buffer))
+                Ok::<_, UsbError>((n, buffer))
             })
-            .await?;
+            .await
+            .map_err(|_| UsbError::BlockingTaskFailed)??;
             self.buffer = buffer;
             Ok(n)
-        }
-
-        /// Write to the bulk OUT endpoint.
-        #[cfg(not(any(feature = "tokio", feature = "smol")))]
-        pub async fn write(&mut self, buf: &[u8]) -> Result<usize, UsbError> {
-            bulk_write(&self.handle, self.ep_out, buf)
         }
     }
 
@@ -158,17 +150,17 @@ mod inner {
             .map_err(UsbError::Transfer)
     }
 
-    impl embedded_io::ErrorType for UsbTransport {
+    impl<R> embedded_io::ErrorType for UsbTransport<R> {
         type Error = UsbError;
     }
 
-    impl embedded_io_async::Read for UsbTransport {
+    impl<R: Runtime> embedded_io_async::Read for UsbTransport<R> {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
             UsbTransport::read(self, buf).await
         }
     }
 
-    impl embedded_io_async::Write for UsbTransport {
+    impl<R: Runtime> embedded_io_async::Write for UsbTransport<R> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             UsbTransport::write(self, buf).await
         }
@@ -178,9 +170,9 @@ mod inner {
         }
     }
 
-    impl crate::transport::Splittable for UsbTransport {
-        type ReadHalf = UsbTransport;
-        type WriteHalf = UsbTransport;
+    impl<R: Runtime> crate::transport::Splittable for UsbTransport<R> {
+        type ReadHalf = UsbTransport<R>;
+        type WriteHalf = UsbTransport<R>;
         fn split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), UsbError> {
             let clone = self.clone();
             Ok((self, clone))
@@ -269,11 +261,13 @@ mod inner {
     /// `any::connect::<Tokio, Rusb>("usb://")`.
     pub struct Rusb;
 
-    impl crate::transport::UsbBackend for Rusb {
-        type Transport = UsbTransport;
+    impl<R: Runtime> crate::transport::UsbBackend<R> for Rusb {
+        type Transport = UsbTransport<R>;
         type Error = UsbConnectError;
 
-        fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, UsbConnectError> {
+        fn connect_by_selector(
+            selector: UsbSelector<'_>,
+        ) -> Result<UsbTransport<R>, UsbConnectError> {
             connect_by_selector(selector)
         }
     }
@@ -282,7 +276,9 @@ mod inner {
     /// ADB interface, and build a [`UsbTransport`].
     ///
     /// Synchronous: libusb enumerate/open/claim are blocking calls.
-    pub fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, UsbConnectError> {
+    pub fn connect_by_selector<R: Runtime>(
+        selector: UsbSelector<'_>,
+    ) -> Result<UsbTransport<R>, UsbConnectError> {
         let context = Context::new().map_err(UsbConnectError::Context)?;
         let devices = context.devices().map_err(UsbConnectError::Enumerate)?;
 
@@ -307,11 +303,11 @@ mod inner {
         Err(first_err.unwrap_or(UsbConnectError::NotFound))
     }
 
-    fn try_open_device(
+    fn try_open_device<R: Runtime>(
         device: rusb::Device<Context>,
         selector: UsbSelector<'_>,
         hard_fail: bool,
-    ) -> Result<Option<UsbTransport>, UsbConnectError> {
+    ) -> Result<Option<UsbTransport<R>>, UsbConnectError> {
         let desc = device
             .device_descriptor()
             .map_err(UsbConnectError::Descriptor)?;
@@ -398,57 +394,38 @@ mod inner {
             .read_serial_number_string(lang, desc, CONTROL_TIMEOUT)
             .map(Some)
     }
+}
+
+#[cfg(all(test, feature = "rusb"))]
+mod tests {
+    use crate::transport::runtime::Inline;
+    use crate::transport::rusb::Rusb;
+    use crate::transport::UsbBackend;
+
+    #[test]
+    fn the_backend_serves_every_runtime() {
+        // Compiling this is the assertion: one marker, and the
+        // transport it yields follows whichever runtime is asked for.
+        fn takes_backend<R, B: UsbBackend<R>>() {}
+        takes_backend::<Inline, Rusb>();
+
+        #[cfg(feature = "tokio")]
+        takes_backend::<crate::transport::runtime::Tokio, Rusb>();
+        #[cfg(feature = "smol")]
+        takes_backend::<crate::transport::runtime::Smol, Rusb>();
+    }
 
     #[cfg(feature = "tokio")]
-    async fn blocking<T, F>(f: F) -> Result<T, UsbError>
-    where
-        F: FnOnce() -> Result<T, UsbError> + Send + 'static,
-        T: Send + 'static,
-    {
-        // Outside a tokio runtime (e.g. the blocking `libadb-ffi`
-        // executor) `spawn_blocking` would panic — run inline instead,
-        // blocking the caller like the no-runtime build does.
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return f();
-        };
-        match handle.spawn_blocking(f).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("rusb blocking task failed: {e}");
-                Err(UsbError::BlockingTaskFailed)
-            }
-        }
-    }
+    #[test]
+    fn transports_of_different_runtimes_are_different_types() {
+        use crate::transport::rusb::UsbTransport;
+        use core::any::TypeId;
 
-    #[cfg(all(feature = "smol", not(feature = "tokio")))]
-    async fn blocking<T, F>(f: F) -> Result<T, UsbError>
-    where
-        F: FnOnce() -> Result<T, UsbError> + Send + 'static,
-        T: Send + 'static,
-    {
-        // smol re-raises panics on await; catch them so libusb
-        // misbehaviour maps to `BlockingTaskFailed` — symmetric with
-        // the tokio branch's `JoinError` handling above.
-        let caught =
-            smol::unblock(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))).await;
-        match caught {
-            Ok(r) => r,
-            Err(payload) => {
-                let msg = panic_message(&payload);
-                log::warn!("rusb blocking task panicked: {msg}");
-                Err(UsbError::BlockingTaskFailed)
-            }
-        }
-    }
-
-    #[cfg(all(feature = "smol", not(feature = "tokio")))]
-    fn panic_message(payload: &alloc::boxed::Box<dyn core::any::Any + Send>) -> &str {
-        if let Some(s) = payload.downcast_ref::<&'static str>() {
-            s
-        } else if let Some(s) = payload.downcast_ref::<alloc::string::String>() {
-            s.as_str()
-        } else {
-            "<non-string panic payload>"
-        }
+        // Would pass on trait conformance alone even if the runtime
+        // parameter were erased, so compare the types themselves.
+        assert_ne!(
+            TypeId::of::<UsbTransport<Inline>>(),
+            TypeId::of::<UsbTransport<crate::transport::runtime::Tokio>>(),
+        );
     }
 }

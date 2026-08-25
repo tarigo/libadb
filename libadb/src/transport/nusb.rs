@@ -163,7 +163,7 @@ mod inner {
     /// `any::connect::<Tokio, Nusb>("usb://")`.
     pub struct Nusb;
 
-    impl crate::transport::UsbBackend for Nusb {
+    impl<R> crate::transport::UsbBackend<R> for Nusb {
         type Transport = UsbTransport;
         type Error = UsbConnectError;
 
