@@ -1,0 +1,11 @@
+# cargo-mutants configuration; see the `mutants` recipe in the justfile.
+
+# `Vec::with_capacity` takes a hint, so arithmetic that only sizes the
+# allocation produces mutants no test can tell apart from the original.
+exclude_re = [
+    'replace \+ with \* in build_nul_destination',
+    # The adapters that read device metadata out of a USB backend have
+    # no stand-in on the test side — they only prove themselves against
+    # a bus, so mutating them is never caught here.
+    'impl Enumerated for nusb::DeviceInfo',
+]
