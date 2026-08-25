@@ -2,6 +2,17 @@
 ///
 /// ADB uses USB class 0xFF (vendor-specific), subclass 0x42, protocol 0x01.
 /// Communication goes through two bulk endpoints (IN and OUT).
+///
+/// # Cancellation
+///
+/// Dropping a read future cancels the bulk transfer, and whatever the
+/// device already wrote into it is discarded rather than kept for the
+/// next read — enough to take the middle out of a packet. The transport
+/// says so through
+/// [`ReadCancelSafety`](crate::transport::ReadCancelSafety), and
+/// [`select_channel`](crate::Connection::select_channel) responds by
+/// checking its interrupt between reads instead of racing it against
+/// one.
 #[cfg(feature = "nusb")]
 pub use self::inner::*;
 
@@ -93,6 +104,16 @@ mod inner {
         }
     }
 
+    // Dropping a bulk transfer discards what the device already put
+    // in it, so the bytes are gone rather than waiting to be re-read.
+    impl crate::transport::ReadCancelSafety for UsbTransport {
+        fn read_cancel_safe(&self) -> bool {
+            false
+        }
+    }
+
+    // Dropping a bulk transfer discards whatever the device already
+    // put in it: those bytes are gone, not waiting to be re-read.
     impl crate::transport::Splittable for UsbTransport {
         type ReadHalf = UsbTransport;
         type WriteHalf = UsbTransport;

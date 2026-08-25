@@ -12,7 +12,14 @@ mod tokio_split {
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::net::TcpStream;
 
-    use crate::transport::Splittable;
+    use crate::transport::{ReadCancelSafety, Splittable};
+
+    // A dropped socket read leaves its bytes in the kernel buffer.
+    impl<T> ReadCancelSafety for FromTokio<T> {
+        fn read_cancel_safe(&self) -> bool {
+            true
+        }
+    }
 
     impl Splittable for FromTokio<TcpStream> {
         type ReadHalf = FromTokio<OwnedReadHalf>;
@@ -29,7 +36,13 @@ mod smol_split {
     use embedded_io_adapters::futures_03::FromFutures;
     use smol::net::TcpStream;
 
-    use crate::transport::Splittable;
+    use crate::transport::{ReadCancelSafety, Splittable};
+
+    impl<T> ReadCancelSafety for FromFutures<T> {
+        fn read_cancel_safe(&self) -> bool {
+            true
+        }
+    }
 
     impl Splittable for FromFutures<TcpStream> {
         type ReadHalf = FromFutures<TcpStream>;

@@ -298,7 +298,10 @@ where
     pub async fn pump<F: Future>(
         &mut self,
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
+    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
+    where
+        T: crate::transport::ReadCancelSafety,
+    {
         self.ensure_writable()?;
         let result = self
             .channel

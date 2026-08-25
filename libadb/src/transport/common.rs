@@ -55,6 +55,25 @@ impl<R> crate::transport::UsbBackend<R> for NoUsb {
     }
 }
 
+impl crate::transport::ReadCancelSafety for NoUsb {
+    fn read_cancel_safe(&self) -> bool {
+        match *self {}
+    }
+}
+
+impl<T, U> crate::transport::ReadCancelSafety for Transport<T, U>
+where
+    T: crate::transport::ReadCancelSafety,
+    U: crate::transport::ReadCancelSafety,
+{
+    fn read_cancel_safe(&self) -> bool {
+        match self {
+            Self::Tcp(t) => t.read_cancel_safe(),
+            Self::Usb(u) => u.read_cancel_safe(),
+        }
+    }
+}
+
 /// [`NoUsb`] was chosen as the backend, so `usb://` cannot be served.
 ///
 /// Says nothing about what the build contains: a call site may pick

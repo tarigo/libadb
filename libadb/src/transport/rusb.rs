@@ -39,7 +39,13 @@ mod inner {
     /// may still complete on the device. Subsequent calls on the same
     /// transport may then observe wire-framing corruption. Avoid
     /// cancelling read/write futures; use the connection-level
-    /// timeout/error paths to terminate transfers cleanly.
+    /// timeout/error paths to terminate transfers cleanly. A cancelled
+    /// write marks the connection desynchronized
+    /// ([`Error::Desynchronized`](crate::Error::Desynchronized)), and
+    /// reads report themselves as unsafe to cancel through
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety), so
+    /// [`select_channel`](crate::Connection::select_channel) checks its
+    /// interrupt between reads rather than racing it against one.
     pub struct UsbTransport<R> {
         handle: Arc<rusb::DeviceHandle<Context>>,
         ep_in: u8,
@@ -167,6 +173,14 @@ mod inner {
 
         async fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
+        }
+    }
+
+    // Dropping a bulk transfer discards whatever the device already
+    // put in it: those bytes are gone, not waiting to be re-read.
+    impl<R> crate::transport::ReadCancelSafety for UsbTransport<R> {
+        fn read_cancel_safe(&self) -> bool {
+            false
         }
     }
 

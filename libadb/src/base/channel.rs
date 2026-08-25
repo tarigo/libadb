@@ -68,6 +68,7 @@ pub(crate) fn dispatch_packet<E>(
 }
 
 /// Result of [`Channel::select`] / [`Connection::select_channel`].
+#[derive(Debug)]
 pub enum SelectResult<T> {
     /// The channel produced data — value is the number of bytes read.
     Data(usize),
@@ -288,8 +289,17 @@ where
     ///
     /// This is the primary way to combine channel reads with other async
     /// event sources (e.g. stdin, signals) without raw packet manipulation.
-    /// The read is cancellation-safe: if `interrupt` wins, the channel
-    /// state is unchanged and the next call will resume normally.
+    /// If `interrupt` wins, the channel state is unchanged and the next
+    /// call resumes normally.
+    ///
+    /// How quickly `interrupt` can win depends on the transport. Over
+    /// TCP it is raced against the read itself, so a pending read is
+    /// dropped the moment the interrupt is due. A transport that would
+    /// lose data that way — USB, where cancelling a bulk transfer
+    /// discards what the device already wrote into it — has the
+    /// interrupt checked between reads instead, so it takes effect once
+    /// the read in flight has finished. See
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// ```ignore
     /// loop {
@@ -305,7 +315,10 @@ where
         &mut self,
         buf: &mut [u8],
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
+    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
+    where
+        T: crate::transport::ReadCancelSafety,
+    {
         self.conn.select_channel(self.id, buf, interrupt).await
     }
 
