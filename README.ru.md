@@ -231,6 +231,21 @@ libadb-ffi/                # C ABI (cdylib + staticlib + rlib)
 fuzz/                      цели cargo-fuzz (вне воркспейса)
 ```
 
+## Разработка
+
+Задачи собраны в [`justfile`](justfile); CI гоняет те же рецепты,
+поэтому зелёный `just ci` локально означает те же команды и наборы
+фич, что и в workflow.
+
+```sh
+just                      # список рецептов
+just ci                   # fmt, clippy, тесты, доки, MSRV, no_std, all-features
+just clippy-one tokio,smol   # одна конфигурация
+just doc                  # доки по узким комбинациям фич
+just ffi-example          # сборка C-примера поверх cdylib
+just fuzz packet_decode 60
+```
+
 ## Лицензия
 
 MIT License.

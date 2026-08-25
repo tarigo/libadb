@@ -225,6 +225,21 @@ libadb-ffi/                # C ABI (cdylib + staticlib + rlib)
 fuzz/                      cargo-fuzz targets (excluded from workspace)
 ```
 
+## Development
+
+Tasks live in a [`justfile`](justfile); CI drives the same recipes, so a
+green `just ci` locally means the same commands and feature sets the
+workflow runs.
+
+```sh
+just                      # list recipes
+just ci                   # fmt, clippy, tests, docs, MSRV, no_std, all-features
+just clippy-one tokio,smol   # one configuration
+just doc                  # docs per narrow feature combination
+just ffi-example          # build the C example against the cdylib
+just fuzz packet_decode 60
+```
+
 ## License
 
 MIT License.
