@@ -224,6 +224,15 @@ mod tests {
     }
 
     #[test]
+    fn a_blocking_failure_says_what_it_was() {
+        assert_eq!(
+            std::format!("{BlockingError}"),
+            "blocking task failed",
+            "the message is what a caller sees when a pool drops the work"
+        );
+    }
+
+    #[test]
     fn inline_defers_the_closure_until_the_future_is_polled() {
         use core::sync::atomic::{AtomicBool, Ordering};
         let ran = std::sync::Arc::new(AtomicBool::new(false));
