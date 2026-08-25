@@ -49,6 +49,21 @@ pub enum Error<E> {
     Decode(DecodeError),
     /// Device does not advertise a feature required by the attempted operation.
     MissingFeature(Feature),
+    /// A packet may have been left half-written, so the byte stream can
+    /// no longer be trusted to line up with what the device expects.
+    ///
+    /// Raised by every later operation on the connection. A packet
+    /// reaches the wire as a header write followed by a payload write;
+    /// dropping that future in between leaves the device reading the
+    /// next bytes we send as the rest of the abandoned packet.
+    ///
+    /// The judgement is deliberately conservative: it also covers a
+    /// write that was polled and then dropped or failed before any byte
+    /// was acknowledged, because a transport that took bytes and then
+    /// returned `Pending` or an error is indistinguishable from one
+    /// that took none. Nothing can recover the framing from this side —
+    /// close the connection and open a new one.
+    Desynchronized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +192,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                     feature.wire_name()
                 )
             }
+            Self::Desynchronized => f.write_str("connection desynchronized by a cancelled write"),
         }
     }
 }
@@ -204,6 +220,7 @@ where
             | Self::UnexpectedEof
             | Self::ReceiveBufferFull
             | Self::ChannelRxOverflow
+            | Self::Desynchronized
             | Self::MissingFeature(_) => None,
         }
     }

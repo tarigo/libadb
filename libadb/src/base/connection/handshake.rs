@@ -11,7 +11,7 @@ use crate::base::protocol::command::{self, Command};
 use crate::base::protocol::features::{self, Feature};
 use crate::base::protocol::packet::Packet;
 use crate::base::protocol::Checksum;
-use crate::base::wire::{recv_pkt, send_pkt};
+use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
 
 pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
     let mut banner = Vec::from(b"host::features=".as_ref());
@@ -120,7 +120,11 @@ where
         );
         // The device has not told us its version yet, so stay on the
         // conservative side: a pre-0x0100_0001 peer verifies this packet.
-        send_pkt(&mut transport, &pkt, Checksum::Compute).await?;
+        // The flag outlives the handshake: it moves into the
+        // `Connection` that this builds, carrying over an abandoned
+        // write from the handshake itself.
+        let desync = DesyncFlag::new();
+        send_pkt(&mut transport, &desync, &pkt, Checksum::Compute).await?;
 
         let mut recv_buf = BytesMut::new();
         let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf, config.max_payload()).await?;
@@ -128,7 +132,15 @@ where
         let cnxn = match pkt.command {
             Command::Connect => pkt,
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                Self::do_auth(&mut transport, &mut auth, &mut recv_buf, pkt.data, &config).await?
+                Self::do_auth(
+                    &mut transport,
+                    &desync,
+                    &mut auth,
+                    &mut recv_buf,
+                    pkt.data,
+                    &config,
+                )
+                .await?
             }
             other => return Err(ProtocolError::UnexpectedCommand(other).into()),
         };
@@ -149,11 +161,13 @@ where
             local_id_counter: 1,
             delayed_ack,
             recv_buf,
+            desync,
         })
     }
 
     async fn do_auth<A: Authenticator>(
         transport: &mut T,
+        desync: &DesyncFlag,
         auth: &mut A,
         recv_buf: &mut BytesMut,
         token: Bytes,
@@ -166,6 +180,7 @@ where
 
         send_pkt(
             transport,
+            desync,
             &Packet::auth_signature(signature),
             Checksum::Compute,
         )
@@ -180,6 +195,7 @@ where
             let pubkey = auth.public_key();
             send_pkt(
                 transport,
+                desync,
                 &Packet::auth_public_key(pubkey.to_vec()),
                 Checksum::Compute,
             )

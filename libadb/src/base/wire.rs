@@ -1,3 +1,5 @@
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
 
@@ -42,6 +44,51 @@ impl Drop for Staged<'_> {
     }
 }
 
+/// Tracks whether a packet was left half-written.
+///
+/// A packet goes out as a header write followed by a payload write. Drop
+/// the future in between — a cancelled `write_channel`, a `select!` that
+/// lost the race — and the device is left waiting for a payload it will
+/// take from whatever we send next. Nothing on this side can put the
+/// framing back, so the flag is one-way: once raised, every operation on
+/// the connection fails with [`Error::Desynchronized`].
+pub(crate) struct DesyncFlag(AtomicBool);
+
+impl DesyncFlag {
+    pub(crate) const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// Fail if a packet was already abandoned mid-write.
+    pub(crate) fn check<E>(&self) -> Result<(), Error<E>> {
+        if self.0.load(Ordering::Relaxed) {
+            return Err(Error::Desynchronized);
+        }
+        Ok(())
+    }
+
+    fn arm(&self) -> ArmedWrite<'_> {
+        ArmedWrite(Some(self))
+    }
+}
+
+/// Raises its flag if dropped before the packet is fully written.
+struct ArmedWrite<'a>(Option<&'a DesyncFlag>);
+
+impl ArmedWrite<'_> {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ArmedWrite<'_> {
+    fn drop(&mut self) {
+        if let Some(flag) = self.0 {
+            flag.0.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Error<T::Error>> {
     let mut pos = 0;
     while pos < buf.len() {
@@ -61,10 +108,20 @@ pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Err
 /// overflows its endpoint and knocks the device off the bus.
 pub(crate) async fn send_pkt<T: Write>(
     t: &mut T,
+    desync: &DesyncFlag,
     pkt: &Packet,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
-    send_raw(t, pkt.command, pkt.arg0, pkt.arg1, &pkt.data, checksum).await
+    send_raw(
+        t,
+        desync,
+        pkt.command,
+        pkt.arg0,
+        pkt.arg1,
+        &pkt.data,
+        checksum,
+    )
+    .await
 }
 
 /// Rejects any packet whose announced payload exceeds `max_payload`.
@@ -113,22 +170,27 @@ fn encode_header(
 
 pub(crate) async fn send_raw<T: Write>(
     t: &mut T,
+    desync: &DesyncFlag,
     command: Command,
     arg0: u32,
     arg1: u32,
     payload: &[u8],
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
+    desync.check()?;
     let header = encode_header(command, arg0, arg1, payload, checksum)?;
+    let armed = desync.arm();
     write_all(t, &header).await?;
     if !payload.is_empty() {
         write_all(t, payload).await?;
     }
+    armed.disarm();
     Ok(())
 }
 
 pub(crate) async fn send_okay_to<T: Write>(
     transport: &mut T,
+    desync: &DesyncFlag,
     delayed_ack: bool,
     local_id: u32,
     remote_id: u32,
@@ -139,6 +201,7 @@ pub(crate) async fn send_okay_to<T: Write>(
     let payload: &[u8] = if delayed_ack { &ack } else { &[] };
     send_raw(
         transport,
+        desync,
         Command::Ready,
         local_id,
         remote_id,
@@ -270,7 +333,13 @@ mod tests {
         let mut t = WriteLog::default();
         let pkt = Packet::new(Command::Connect, 1, 2, &b"host::features=shell_v2\0"[..]);
 
-        block_on(send_pkt(&mut t, &pkt, Checksum::Compute)).unwrap();
+        block_on(send_pkt(
+            &mut t,
+            &DesyncFlag::new(),
+            &pkt,
+            Checksum::Compute,
+        ))
+        .unwrap();
 
         assert_eq!(
             t.writes,
@@ -284,7 +353,13 @@ mod tests {
         let mut t = WriteLog::default();
         let pkt = Packet::close(1, 2);
 
-        block_on(send_pkt(&mut t, &pkt, Checksum::Compute)).unwrap();
+        block_on(send_pkt(
+            &mut t,
+            &DesyncFlag::new(),
+            &pkt,
+            Checksum::Compute,
+        ))
+        .unwrap();
 
         assert_eq!(t.writes, std::vec![MESSAGE_SIZE]);
     }
