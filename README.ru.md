@@ -31,17 +31,18 @@
 | Флаг    | Что включает                                                            |
 |---------|-------------------------------------------------------------------------|
 | `tokio` | Транспорт поверх `tokio::net::TcpStream` (по умолчанию)                 |
-| `smol`  | Транспорт поверх `smol::net::TcpStream`; взаимоисключающий с `tokio`    |
+| `smol`  | Транспорт поверх `smol::net::TcpStream`; сочетается с `tokio`           |
 | `nusb`  | USB-транспорт на базе `nusb` (чистый Rust); сочетается с `rusb`         |
 | `rusb`  | USB-транспорт на базе `rusb` (libusb); сочетается с `nusb`              |
 | `usb`   | Удобный алиас — включает USB-бэкенд по умолчанию (`nusb`)               |
 | `split` | Полнодуплексная пара `Reader`/`Writer` без встроенного рантайма (подтягивает `std`); включается всеми фичами выше |
 
-`tokio` и `smol` нельзя включать одновременно. А вот оба USB-бэкенда —
-можно: конкретный выбирается типом-параметром (`transport::UsbBackend`)
-в месте вызова, а не набором фич, поэтому соседний крейт, включивший
-`rusb`, не подменит бэкенд вашему коду. Чтобы использовать libusb,
-отключите дефолты и включите `rusb` напрямую:
+Фичи аддитивны: собирается любая комбинация. Какой рантайм открывает
+сокет и какой бэкенд — USB-устройство, задаётся типами-параметрами
+(`transport::runtime::Runtime`, `transport::UsbBackend`), а не фичами,
+поэтому соседний крейт, включивший `smol` или `rusb`, не подменит
+ничего вашему коду. Чтобы использовать libusb, отключите дефолты и
+включите `rusb` напрямую:
 
 ```toml
 libadb = { version = "0.1", default-features = false, features = ["tokio", "rusb"] }
@@ -149,7 +150,7 @@ let conn = Connection::<_>::connect_with_config(
   USB-транспорты с поиском устройства по VID:PID или серийнику, по
   одному на бэкенд. Оба реализуют `embedded_io_async::{Read, Write}` +
   `libadb::Splittable` и открываются одной точкой входа
-  `connect::<Backend>("usb://…")` (энумерация вынесена в blocking-пул
+  `connect::<Runtime, Backend>("usb://…")` (энумерация вынесена в blocking-пул
   рантайма, чтобы не блокировать executor). Отличаются компромиссами —
   чисто-Rust `nusb` делает асинхронные bulk-передачи через собственный
   IO-бэкенд, `rusb`/libusb оборачивает блокирующие — и enum'ами ошибок
@@ -159,21 +160,23 @@ let conn = Connection::<_>::connect_with_config(
 - Любой тип, реализующий `embedded_io_async::{Read, Write}` +
   `libadb::Splittable`, работает как свой транспорт
 
-USB-бэкенд выбирается в месте вызова, поэтому в сборке могут жить оба:
+Рантайм и бэкенд выбираются в месте вызова, поэтому в сборке могут
+жить сразу все:
 
 ```rust,ignore
-use libadb::transport::{any, nusb::Nusb, rusb::Rusb, common::NoUsb};
+use libadb::transport::{any, common::NoUsb, nusb::Nusb, rusb::Rusb};
+use libadb::transport::runtime::{Smol, Tokio};
 
-let a = any::connect::<Nusb>("usb://18d1:4ee7").await?;
-let b = any::connect::<Rusb>("usb://serial/ABC123").await?;
+let a = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
+let b = any::connect::<Smol, Rusb>("usb://serial/ABC123").await?;
 
 // Если бэкенда в сборке нет, `usb://` всё равно компилируется —
 // и падает уже в рантайме.
-let Err(err) = any::connect::<NoUsb>("usb://").await else {
+let Err(err) = any::connect::<Tokio, NoUsb>("usb://").await else {
     unreachable!("NoUsb не может обслужить usb://")
 };
 // tcp:// работает независимо от параметра бэкенда.
-let tcp = any::connect::<NoUsb>("tcp://127.0.0.1:5555").await?;
+let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 ```
 
 `Connection::split()` возвращает полнодуплексную пару `Reader` /

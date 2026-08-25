@@ -64,7 +64,7 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "tokio")]
     let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
 
     eprintln!("[*] connecting to {addr} ...");
@@ -83,7 +83,7 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "tokio")]
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(16);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let (stdin_tx, stdin_rx) = smol::channel::bounded::<Vec<u8>>(16);
 
     std::thread::spawn(move || {
@@ -97,7 +97,7 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(n) => {
                     #[cfg(feature = "tokio")]
                     let result = stdin_tx.blocking_send(buf[..n].to_vec());
-                    #[cfg(feature = "smol")]
+                    #[cfg(all(feature = "smol", not(feature = "tokio")))]
                     let result = stdin_tx.send_blocking(buf[..n].to_vec());
                     if result.is_err() {
                         break;
@@ -110,7 +110,7 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         #[cfg(feature = "tokio")]
         let interrupt = stdin_rx.recv();
-        #[cfg(feature = "smol")]
+        #[cfg(all(feature = "smol", not(feature = "tokio")))]
         let interrupt = async { stdin_rx.recv().await.ok() };
 
         match shell.select(&mut rx, interrupt).await {
@@ -139,7 +139,7 @@ async fn run_command(addr: &str, command: &str) -> Result<(), Box<dyn std::error
 
     #[cfg(feature = "tokio")]
     let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
 
     eprintln!("[*] connecting to {addr} ...");
@@ -195,7 +195,7 @@ async fn main() {
     async_main().await;
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 fn main() {
     smol::block_on(async_main());
 }

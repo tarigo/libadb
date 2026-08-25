@@ -28,7 +28,7 @@ use libadb::{Connection, Feature};
 
 #[cfg(feature = "tokio")]
 type Tcp = libadb::TokioTcp;
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 type Tcp = libadb::SmolTcp;
 
 #[path = "common/adb_key_auth.rs"]
@@ -39,7 +39,7 @@ async fn connect(addr: &str) -> Result<Connection<Tcp>, Box<dyn std::error::Erro
 
     #[cfg(feature = "tokio")]
     let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
 
     eprintln!("[*] connecting to {addr} ...");
@@ -271,7 +271,7 @@ async fn main() {
     async_main().await;
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 fn main() {
     smol::block_on(async_main());
 }

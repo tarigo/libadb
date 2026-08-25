@@ -1,37 +1,26 @@
 //! Transport that unifies TCP and USB behind a single concrete type,
 //! and a [`connect`] helper that builds one from a URI.
 //!
-//! Compiled when one of `tokio` / `smol` is enabled, since TCP needs an
-//! async runtime. The USB half is a type parameter: pass a backend
-//! marker such as `nusb::Nusb` or `rusb::Rusb`, or
-//! [`NoUsb`] when a build has none —
-//! then `usb://` URIs fail with [`ConnectError::Usb`] instead of not
-//! compiling.
+//! Both halves are type parameters: the runtime comes from
+//! [`Runtime`] and the USB backend
+//! from [`UsbBackend`], so a build may
+//! carry `tokio` and `smol`, `nusb` and `rusb`, and each call site says
+//! which it wants.
 
 use embedded_io::ErrorType;
 
-#[cfg(feature = "tokio")]
-use crate::transport::tcp::TokioTcp;
-
-#[cfg(feature = "smol")]
-use crate::transport::tcp::SmolTcp;
-
 use crate::transport::common::{NoUsb, Transport, TransportError};
+use crate::transport::runtime::Runtime;
 use crate::transport::UsbBackend;
 use crate::uri::{self, Uri, UsbSelector};
 
-#[cfg(feature = "tokio")]
-type Tcp = TokioTcp;
-#[cfg(feature = "smol")]
-type Tcp = SmolTcp;
-
-/// TCP-or-USB transport over the compiled-in runtime. `U` is the USB
-/// transport; it defaults to [`NoUsb`] for TCP-only builds.
-pub type AnyTransport<U = NoUsb> = Transport<Tcp, U>;
+/// TCP-or-USB transport for runtime `R`. `U` is the USB transport; it
+/// defaults to [`NoUsb`] for TCP-only builds.
+pub type AnyTransport<R, U = NoUsb> = Transport<<R as Runtime>::Tcp, U>;
 
 /// Error type of [`AnyTransport`].
-pub type AnyTransportError<U = NoUsb> =
-    TransportError<<Tcp as ErrorType>::Error, <U as ErrorType>::Error>;
+pub type AnyTransportError<R, U = NoUsb> =
+    TransportError<<<R as Runtime>::Tcp as ErrorType>::Error, <U as ErrorType>::Error>;
 
 /// Why [`connect`] failed. `E` is the backend's own connect error.
 #[derive(Debug)]
@@ -39,9 +28,8 @@ pub enum ConnectError<E> {
     Uri(uri::UriError),
     Tcp(std::io::Error),
     Usb(E),
-    /// The runtime's blocking-task pool failed to deliver the USB
-    /// connect result — typically cancelled or panicked during runtime
-    /// shutdown.
+    /// The runtime's blocking pool failed to deliver the USB connect
+    /// result — typically cancelled or panicked during shutdown.
     UsbBlockingTaskFailed,
 }
 
@@ -58,41 +46,33 @@ impl<E: core::fmt::Display> core::fmt::Display for ConnectError<E> {
 
 impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ConnectError<E> {}
 
-/// Parse `uri_str` and open a transport to the referenced endpoint,
-/// using `B` for `usb://` URIs.
+/// Parse `uri_str` and open a transport, dialling with runtime `R` and
+/// serving `usb://` with backend `B`.
 ///
 /// ```ignore
-/// let t = any::connect::<Nusb>("usb://18d1:4ee7").await?;
-/// let t = any::connect::<NoUsb>("tcp://127.0.0.1:5555").await?;
+/// let t = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
+/// let t = any::connect::<Smol, NoUsb>("tcp://127.0.0.1:5555").await?;
 /// ```
-pub async fn connect<B>(uri_str: &str) -> Result<AnyTransport<B::Transport>, ConnectError<B::Error>>
+pub async fn connect<R, B>(
+    uri_str: &str,
+) -> Result<AnyTransport<R, B::Transport>, ConnectError<B::Error>>
 where
+    R: Runtime,
     B: UsbBackend,
     B::Transport: Send + 'static,
     B::Error: Send + 'static,
 {
     let uri = uri::parse(uri_str).map_err(ConnectError::Uri)?;
     match uri {
-        Uri::Tcp { host, port } => {
-            #[cfg(feature = "tokio")]
-            {
-                let stream = tokio::net::TcpStream::connect((host, port))
-                    .await
-                    .map_err(ConnectError::Tcp)?;
-                Ok(Transport::Tcp(TokioTcp::new(stream)))
-            }
-            #[cfg(feature = "smol")]
-            {
-                let stream = smol::net::TcpStream::connect((host, port))
-                    .await
-                    .map_err(ConnectError::Tcp)?;
-                Ok(Transport::Tcp(SmolTcp::new(stream)))
-            }
-        }
+        Uri::Tcp { host, port } => R::connect_tcp(host, port)
+            .await
+            .map(Transport::Tcp)
+            .map_err(ConnectError::Tcp),
         Uri::Usb(selector) => {
             let owned = OwnedUsbSelector::from_borrowed(selector);
-            run_blocking(move || B::connect_by_selector(owned.as_borrowed()))
-                .await?
+            R::run_blocking(move || B::connect_by_selector(owned.as_borrowed()))
+                .await
+                .map_err(|_| ConnectError::UsbBlockingTaskFailed)?
                 .map(Transport::Usb)
                 .map_err(ConnectError::Usb)
         }
@@ -127,39 +107,6 @@ impl OwnedUsbSelector {
     }
 }
 
-#[cfg(feature = "tokio")]
-async fn run_blocking<T, E>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError<E>>
-where
-    T: Send + 'static,
-{
-    // Outside a tokio runtime `spawn_blocking` would panic — run
-    // inline instead, blocking the caller.
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return Ok(f());
-    };
-    handle.spawn_blocking(f).await.map_err(|e| {
-        log::warn!("usb connect blocking task failed: {e}");
-        ConnectError::UsbBlockingTaskFailed
-    })
-}
-
-#[cfg(all(feature = "smol", not(feature = "tokio")))]
-async fn run_blocking<T, E>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError<E>>
-where
-    T: Send + 'static,
-{
-    // smol re-raises panics on await; catch them so libusb
-    // misbehaviour maps to `UsbBlockingTaskFailed` — symmetric with
-    // the tokio branch's `JoinError` handling above.
-    match smol::unblock(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))).await {
-        Ok(t) => Ok(t),
-        Err(_) => {
-            log::warn!("usb connect blocking task panicked");
-            Err(ConnectError::UsbBlockingTaskFailed)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{connect, AnyTransport, ConnectError};
@@ -173,6 +120,12 @@ mod tests {
     /// TCP URIs never touch it.
     type NoBackendChosen = NoUsb;
 
+    /// Whichever runtime this build has; the tests do not care which.
+    #[cfg(feature = "tokio")]
+    type TestRuntime = crate::transport::runtime::Tokio;
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
+    type TestRuntime = crate::transport::runtime::Smol;
+
     fn block_on<F: Future>(fut: F) -> F::Output {
         #[cfg(feature = "tokio")]
         {
@@ -182,7 +135,7 @@ mod tests {
                 .unwrap()
                 .block_on(fut)
         }
-        #[cfg(feature = "smol")]
+        #[cfg(all(feature = "smol", not(feature = "tokio")))]
         {
             smol::block_on(fut)
         }
@@ -194,14 +147,14 @@ mod tests {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap().port()
         }
-        #[cfg(feature = "smol")]
+        #[cfg(all(feature = "smol", not(feature = "tokio")))]
         {
             let l = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             l.local_addr().unwrap().port()
         }
     }
 
-    fn assert_matches_tcp_transport(t: AnyTransport) {
+    fn assert_matches_tcp_transport(t: AnyTransport<TestRuntime>) {
         match t {
             Transport::Tcp(_) => {}
             Transport::Usb(never) => match never {},
@@ -209,7 +162,7 @@ mod tests {
     }
 
     fn unwrap_err<E: core::fmt::Debug>(
-        r: Result<AnyTransport, ConnectError<E>>,
+        r: Result<AnyTransport<TestRuntime>, ConnectError<E>>,
     ) -> ConnectError<E> {
         match r {
             Ok(_) => panic!("expected Err, got Ok"),
@@ -238,19 +191,25 @@ mod tests {
 
     #[test]
     fn connect_missing_scheme_returns_uri_error() {
-        let err = unwrap_err(block_on(connect::<NoBackendChosen>("127.0.0.1:5555")));
+        let err = unwrap_err(block_on(connect::<TestRuntime, NoBackendChosen>(
+            "127.0.0.1:5555",
+        )));
         assert!(matches!(err, ConnectError::Uri(UriError::MissingScheme)));
     }
 
     #[test]
     fn connect_unknown_scheme_returns_uri_error() {
-        let err = unwrap_err(block_on(connect::<NoBackendChosen>("ftp://host:21")));
+        let err = unwrap_err(block_on(connect::<TestRuntime, NoBackendChosen>(
+            "ftp://host:21",
+        )));
         assert!(matches!(err, ConnectError::Uri(UriError::UnknownScheme)));
     }
 
     #[test]
     fn connect_malformed_tcp_uri_returns_uri_error() {
-        let err = unwrap_err(block_on(connect::<NoBackendChosen>("tcp://host")));
+        let err = unwrap_err(block_on(connect::<TestRuntime, NoBackendChosen>(
+            "tcp://host",
+        )));
         assert!(matches!(err, ConnectError::Uri(UriError::InvalidPort)));
     }
 
@@ -259,7 +218,7 @@ mod tests {
         // The point of NoUsb: `usb://` still compiles, and fails with a
         // clear error instead of a missing feature.
         for uri in ["usb://", "usb://18d1:4ee7", "usb://serial/ABC123"] {
-            let err = unwrap_err(block_on(connect::<NoUsb>(uri)));
+            let err = unwrap_err(block_on(connect::<TestRuntime, NoUsb>(uri)));
             assert!(
                 matches!(err, ConnectError::Usb(NoBackend)),
                 "{uri}: got {err:?}",
@@ -285,12 +244,12 @@ mod tests {
         block_on(async {
             #[cfg(feature = "tokio")]
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            #[cfg(feature = "smol")]
+            #[cfg(all(feature = "smol", not(feature = "tokio")))]
             let listener = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 
             let port = listener.local_addr().unwrap().port();
             let uri = format!("tcp://127.0.0.1:{}", port);
-            let transport = connect::<NoBackendChosen>(&uri)
+            let transport = connect::<TestRuntime, NoBackendChosen>(&uri)
                 .await
                 .expect("connect to open port");
             assert_matches_tcp_transport(transport);
@@ -303,11 +262,31 @@ mod tests {
         block_on(async {
             let port = reserve_free_port().await;
             let uri = format!("tcp://127.0.0.1:{}", port);
-            let err = connect::<NoBackendChosen>(&uri)
+            let err = connect::<TestRuntime, NoBackendChosen>(&uri)
                 .await
                 .err()
                 .expect("connect to closed port");
             assert!(matches!(err, ConnectError::Tcp(_)));
         });
+    }
+
+    #[cfg(all(feature = "tokio", feature = "smol"))]
+    #[test]
+    fn both_runtimes_can_be_selected_in_one_build() {
+        use crate::transport::runtime::{Runtime, Smol, Tokio};
+
+        // Compiling this is the assertion: two runtimes, one build,
+        // chosen per call site rather than per feature set.
+        fn takes_runtime<R: Runtime>() {}
+        takes_runtime::<Tokio>();
+        takes_runtime::<Smol>();
+    }
+
+    #[test]
+    fn run_blocking_delivers_the_closure_result() {
+        let n =
+            block_on(<TestRuntime as crate::transport::runtime::Runtime>::run_blocking(|| 6 * 7))
+                .expect("blocking pool");
+        assert_eq!(n, 42);
     }
 }

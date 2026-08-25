@@ -17,7 +17,7 @@
 //! | Flag    | Enables                                                                    |
 //! |---------|----------------------------------------------------------------------------|
 //! | `tokio` | TCP transport over `tokio::net::TcpStream` (default)                       |
-//! | `smol`  | TCP transport over `smol::net::TcpStream`; mutually exclusive with `tokio` |
+//! | `smol`  | TCP transport over `smol::net::TcpStream`; may be combined with `tokio`    |
 //! | `nusb`  | USB transport via `nusb` (pure-Rust); may be combined with `rusb`          |
 //! | `rusb`  | USB transport via `rusb` (libusb); may be combined with `nusb`             |
 //! | `usb`   | Convenience alias enabling the default USB backend (`nusb`)                |
@@ -94,9 +94,6 @@
 #![no_std]
 #![deny(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-
-#[cfg(all(feature = "tokio", feature = "smol"))]
-compile_error!("features `tokio` and `smol` are mutually exclusive; enable only one");
 
 extern crate alloc;
 

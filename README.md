@@ -28,17 +28,18 @@ handler). The `libadb-ffi` crate is where those live.
 | Flag    | What it enables                                                         |
 |---------|-------------------------------------------------------------------------|
 | `tokio` | `tokio::net::TcpStream` transport (default)                             |
-| `smol`  | `smol::net::TcpStream` transport; mutually exclusive with `tokio`       |
+| `smol`  | `smol::net::TcpStream` transport; combinable with `tokio`               |
 | `nusb`  | USB transport via `nusb` (pure-Rust); combinable with `rusb`            |
 | `rusb`  | USB transport via `rusb` (libusb); combinable with `nusb`               |
 | `usb`   | Convenience alias — enables the default USB backend (`nusb`)            |
 | `split` | Full-duplex `Reader`/`Writer` pair with no bundled runtime (pulls in `std`); implied by every feature above |
 
-`tokio` and `smol` cannot be enabled together. Both USB backends may
-be, though: which one a call site uses is a type argument
-(`transport::UsbBackend`), not a feature, so an unrelated crate turning
-on `rusb` cannot change what your code talks to. To use the libusb
-backend, disable defaults and enable `rusb` directly:
+Features are additive: any combination compiles. Which runtime dials a
+socket and which backend opens a USB device are type arguments
+(`transport::runtime::Runtime`, `transport::UsbBackend`), not features,
+so an unrelated crate enabling `smol` or `rusb` cannot change what your
+code talks to. To use the libusb backend, disable defaults and enable
+`rusb` directly:
 
 ```toml
 libadb = { version = "0.1", default-features = false, features = ["tokio", "rusb"] }
@@ -144,7 +145,7 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
   USB transports with device discovery by VID:PID or serial, one per
   backend. Both implement `embedded_io_async::{Read, Write}` +
   `libadb::Splittable` and are reached through the same
-  `connect::<Backend>("usb://…")` entry point (enumeration is offloaded
+  `connect::<Runtime, Backend>("usb://…")` entry point (enumeration is offloaded
   to the runtime's blocking pool so it never stalls the executor). They
   differ in trade-offs — pure-Rust `nusb` does async bulk transfers via
   its own IO backend, `rusb`/libusb wraps blocking ones — and in their
@@ -154,21 +155,23 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 - Any type implementing `embedded_io_async::{Read, Write}` +
   `libadb::Splittable` works as a custom transport
 
-The USB backend is chosen per call site, so a build may carry both:
+Runtime and backend are chosen per call site, so a build may carry all
+of them at once:
 
 ```rust,ignore
-use libadb::transport::{any, nusb::Nusb, rusb::Rusb, common::NoUsb};
+use libadb::transport::{any, common::NoUsb, nusb::Nusb, rusb::Rusb};
+use libadb::transport::runtime::{Smol, Tokio};
 
-let a = any::connect::<Nusb>("usb://18d1:4ee7").await?;
-let b = any::connect::<Rusb>("usb://serial/ABC123").await?;
+let a = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
+let b = any::connect::<Smol, Rusb>("usb://serial/ABC123").await?;
 
 // With no backend compiled in, `usb://` still builds; it fails at
 // runtime instead.
-let Err(err) = any::connect::<NoUsb>("usb://").await else {
+let Err(err) = any::connect::<Tokio, NoUsb>("usb://").await else {
     unreachable!("NoUsb cannot serve usb://")
 };
 // tcp:// works regardless of the backend parameter.
-let tcp = any::connect::<NoUsb>("tcp://127.0.0.1:5555").await?;
+let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 ```
 
 `Connection::split()` gives you a full-duplex `Reader` / `Writer` pair

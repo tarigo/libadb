@@ -30,6 +30,7 @@ jobs:
           - tokio,usb
           - tokio,rusb
           - tokio,nusb,rusb
+          - tokio,smol
           - smol,usb
           - smol,rusb
     steps:
@@ -78,7 +79,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [tokio, smol, "tokio,nusb,rusb"]
+        features: [tokio, smol, "tokio,nusb,rusb", "tokio,smol"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,6 +90,19 @@ jobs:
         with:
           key: test-${{ matrix.features }}
       - run: cargo test -p libadb --no-default-features --features ${{ matrix.features }}
+
+  all_features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libusb + libudev
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: all-features
+      # Features must be additive: every combination has to compile.
+      - run: cargo build -p libadb --all-features --all-targets
 
   doc:
     runs-on: ubuntu-latest
