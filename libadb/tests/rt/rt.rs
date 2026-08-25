@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 #[cfg(feature = "tokio")]
 pub use tokio_rt::*;
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 pub use smol_rt::*;
 
 pub async fn connect(addr: SocketAddr) -> TcpStream {
@@ -86,7 +86,7 @@ mod tokio_rt {
     }
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 mod smol_rt {
     use std::time::Duration;
 

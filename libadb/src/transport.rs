@@ -8,6 +8,8 @@
 //! # Submodules
 //!
 //! * [`tcp`] — `TokioTcp` / `SmolTcp` aliases (features `tokio` / `smol`).
+//! * `runtime` — the [`Runtime`](runtime::Runtime) trait and its `Tokio`
+//!   / `Smol` markers, so both runtimes can be compiled in at once.
 //! * `nusb` — `UsbTransport` and the [`UsbBackend`] marker `Nusb`
 //!   (feature `nusb`, also enabled by the `usb` convenience alias).
 //! * `rusb` — the same via libusb (feature `rusb`). Both backends can be
@@ -20,6 +22,9 @@
 
 pub mod split;
 pub mod tcp;
+
+#[cfg(any(feature = "tokio", feature = "smol"))]
+pub mod runtime;
 
 #[cfg(feature = "nusb")]
 pub mod nusb;
