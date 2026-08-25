@@ -52,7 +52,13 @@ use libadb::split::{Reader, Writer};
 use transport::FfiTransport;
 
 pub use auth::{adb_authenticator_t, AdbSignFn};
+// Also reachable through the C ABI; re-exported so Rust consumers of the
+// rlib — the crate's own integration tests among them — can name them.
 pub use error::{adb_last_error, AdbStatus};
+pub use shell::{
+    adb_shell_close, adb_shell_close_stdin, adb_shell_free, adb_shell_open, adb_shell_read_frame,
+    adb_shell_set_window_size, adb_shell_t, adb_shell_write_stdin,
+};
 
 pub(crate) type FfiReader = Reader<FfiTransport, FfiTransport>;
 pub(crate) type FfiWriter = Writer<FfiTransport>;

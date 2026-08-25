@@ -109,6 +109,27 @@ jobs:
           key: test-${{ matrix.features }}
       - run: just test-one "${{ matrix.features }}"
 
+  test_ffi:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", usb, rusb]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libusb + libudev (USB rows)
+        if: contains(matrix.features, 'usb')
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-ffi-${{ matrix.features }}
+      - run: just test-ffi-one "${{ matrix.features }}"
+
   all_features:
     runs-on: ubuntu-latest
     steps:

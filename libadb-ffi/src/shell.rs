@@ -84,6 +84,9 @@ pub struct adb_shell_t {
     writer: FfiWriter,
     channel_id: ChannelId,
     parse_state: Mutex<ParseState>,
+    /// Held for the whole of one frame, so concurrent senders take
+    /// turns instead of interleaving: see [`send_frame_async`].
+    send_lock: Mutex<()>,
     closed: AtomicBool,
 }
 
@@ -113,8 +116,21 @@ async fn read_frame_async(
     }
 }
 
+/// Send one shell_v2 frame.
+///
+/// The C ABI hands the same session to any number of threads, and a
+/// frame is a header plus a payload that the channel splits into
+/// `max_payload` chunks. Written without coordination, two threads
+/// produce header A, header B, payload A — and the far side reads the
+/// middle of one payload as the next header.
+///
+/// The lock is held across both writes rather than the frame being
+/// assembled into one buffer: copying the caller's payload would make
+/// every write allocate up to the 4 GiB a shell_v2 length field allows,
+/// and the session would hold on to that high-water mark afterwards.
 async fn send_frame_async(
     writer: &FfiWriter,
+    send_lock: &Mutex<()>,
     channel_id: ChannelId,
     id: u8,
     payload: &[u8],
@@ -123,6 +139,7 @@ async fn send_frame_async(
         .map_err(|_| Error::Protocol(ProtocolError::PayloadTooLarge))?;
     let b = len.to_le_bytes();
     let hdr = [id, b[0], b[1], b[2], b[3]];
+    let _turn = lock_poisoned(send_lock);
     writer.write_channel(channel_id, &hdr).await?;
     if !payload.is_empty() {
         writer.write_channel(channel_id, payload).await?;
@@ -189,11 +206,13 @@ pub unsafe extern "C" fn adb_shell_open(
         let mut r = lock_poisoned(&reader_arc);
         ffi_try!(r.open_channel(dest.as_bytes()))
     };
+    let send_lock = Mutex::new(());
 
     if pty && (rows != 0 || cols != 0) {
         let payload = encode_window_size(rows, cols);
         let res = block_on::block_on(send_frame_async(
             &writer,
+            &send_lock,
             channel_id,
             WINDOW_SIZE_CHANGE,
             &payload,
@@ -209,6 +228,7 @@ pub unsafe extern "C" fn adb_shell_open(
         writer,
         channel_id,
         parse_state: Mutex::new(ParseState::new()),
+        send_lock,
         closed: AtomicBool::new(false),
     });
     *out_sh = Box::into_raw(boxed);
@@ -280,6 +300,10 @@ pub unsafe extern "C" fn adb_shell_read_frame(
 }
 
 /// Send a `STDIN` frame.
+///
+/// Safe to call from several threads on one session: each frame is
+/// assembled and written under a lock, so frames arrive whole rather
+/// than interleaved with another sender's.
 ///
 /// # Safety
 /// `sh` must be a valid handle. `data` must be NULL or point to at least
@@ -357,6 +381,12 @@ unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: u8, payload: &[u8]) -> Ad
         return AdbStatus::ChannelClosed;
     }
     let ch = (*sh).channel_id;
-    ffi_try!(send_frame_async(&(*sh).writer, ch, id, payload));
+    ffi_try!(send_frame_async(
+        &(*sh).writer,
+        &(*sh).send_lock,
+        ch,
+        id,
+        payload
+    ));
     AdbStatus::Ok
 }
