@@ -5,9 +5,10 @@ use crate::transport::Splittable;
 
 /// A transport that is either TCP or USB.
 ///
-/// Both halves are type parameters, so any TCP transport pairs with any
-/// USB backend and a build may carry several backends at once. Use
-/// [`NoUsb`] for `U` when none is compiled in.
+/// Both halves are type parameters, so a build may carry several
+/// runtimes and several USB backends at once and each call site says
+/// which pair it wants. Use [`NoUsb`] for `U` when no backend is
+/// compiled in.
 pub enum Transport<T, U> {
     Tcp(T),
     Usb(U),

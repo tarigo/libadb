@@ -31,6 +31,13 @@ use std::{env, process};
 use libadb::channel::SelectResult;
 use libadb::shell::v2::{self as shell_v2, Frame};
 use libadb::transport::any::{self, AnyTransport};
+
+// The example picks one runtime at build time; the library itself no
+// longer cares which features are on.
+#[cfg(feature = "tokio")]
+type Rt = libadb::transport::runtime::Tokio;
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
+type Rt = libadb::transport::runtime::Smol;
 // The example picks one USB backend at build time; the library itself
 // no longer cares which features are on.
 #[cfg(feature = "nusb")]
@@ -40,7 +47,7 @@ type Usb = libadb::transport::rusb::Rusb;
 #[cfg(not(any(feature = "nusb", feature = "rusb")))]
 type Usb = libadb::transport::common::NoUsb;
 
-type ExampleTransport = AnyTransport<<Usb as libadb::UsbBackend>::Transport>;
+type ExampleTransport = AnyTransport<Rt, <Usb as libadb::UsbBackend>::Transport>;
 use libadb::{Connection, Feature};
 
 #[cfg(feature = "tokio")]
@@ -90,7 +97,7 @@ fn get_terminal_size() -> (u16, u16) {
     }
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 fn spawn_sigwinch_thread() -> smol::channel::Receiver<()> {
     unsafe {
         let mut set: libc::sigset_t = core::mem::zeroed();
@@ -131,7 +138,7 @@ async fn open_connection(
     let uri = to_uri(target);
 
     eprintln!("[*] connecting to {uri} ...");
-    let transport = any::connect::<Usb>(&uri)
+    let transport = any::connect::<Rt, Usb>(&uri)
         .await
         .map_err(|e| format!("transport: {e}"))?;
 
@@ -164,7 +171,7 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
 
     #[cfg(feature = "tokio")]
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(16);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let (stdin_tx, stdin_rx) = smol::channel::bounded::<Vec<u8>>(16);
 
     std::thread::spawn(move || {
@@ -178,7 +185,7 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
                 Ok(n) => {
                     #[cfg(feature = "tokio")]
                     let result = stdin_tx.blocking_send(buf[..n].to_vec());
-                    #[cfg(feature = "smol")]
+                    #[cfg(all(feature = "smol", not(feature = "tokio")))]
                     let result = stdin_tx.send_blocking(buf[..n].to_vec());
                     if result.is_err() {
                         break;
@@ -190,7 +197,7 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
 
     #[cfg(feature = "tokio")]
     let mut sigwinch = signal(SignalKind::window_change())?;
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let sigwinch_rx = spawn_sigwinch_thread();
 
     let exit_code: u8;
@@ -222,7 +229,7 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
             }
         };
 
-        #[cfg(feature = "smol")]
+        #[cfg(all(feature = "smol", not(feature = "tokio")))]
         let interrupt = smol::future::race(
             async {
                 match stdin_rx.recv().await {
@@ -327,7 +334,7 @@ async fn main() {
     async_main().await;
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 fn main() {
     smol::block_on(async_main());
 }

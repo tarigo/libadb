@@ -31,7 +31,7 @@ async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::E
 
     #[cfg(feature = "tokio")]
     let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
 
     eprintln!("[*] connecting to {addr} ...");
@@ -61,7 +61,7 @@ async fn run_stream(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error:
 
     #[cfg(feature = "tokio")]
     let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
-    #[cfg(feature = "smol")]
+    #[cfg(all(feature = "smol", not(feature = "tokio")))]
     let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
 
     eprintln!("[*] connecting to {addr} ...");
@@ -162,7 +162,7 @@ async fn main() {
     async_main().await;
 }
 
-#[cfg(feature = "smol")]
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
 fn main() {
     smol::block_on(async_main());
 }

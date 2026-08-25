@@ -160,7 +160,7 @@ mod inner {
     ///
     /// Zero-sized marker for [`UsbBackend`](crate::transport::UsbBackend);
     /// pass it where a backend is required, e.g.
-    /// `any::connect::<Nusb>("usb://")`.
+    /// `any::connect::<Tokio, Nusb>("usb://")`.
     pub struct Nusb;
 
     impl crate::transport::UsbBackend for Nusb {
