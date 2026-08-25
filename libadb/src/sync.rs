@@ -248,7 +248,13 @@ where
         let mut entries = Vec::new();
         loop {
             if self.read_next_id(&[ID_DENT, ID_DONE]).await? == ID_DONE {
-                self.rx.head += HEADER_SIZE;
+                // adbd closes a listing with a whole `dent` record whose
+                // id is DONE, not a bare header — consuming only the
+                // head would leave its tail in the stream.
+                self.rx
+                    .fill_at_least(&mut self.channel, DENT_V1_SIZE)
+                    .await?;
+                self.rx.head += DENT_V1_SIZE;
                 return Ok(entries);
             }
 
@@ -289,7 +295,11 @@ where
         let mut entries = Vec::new();
         loop {
             if self.read_next_id(&[ID_DNT2, ID_DONE]).await? == ID_DONE {
-                self.rx.head += HEADER_SIZE;
+                // Same as `list`, with the v2 record size.
+                self.rx
+                    .fill_at_least(&mut self.channel, DENT_V2_SIZE)
+                    .await?;
+                self.rx.head += DENT_V2_SIZE;
                 return Ok(entries);
             }
 
