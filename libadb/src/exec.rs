@@ -14,6 +14,13 @@
 //! * `exec:<command>` — run a single command via `sh -c`; the channel
 //!   closes when the command exits.
 //!
+//! `command` is shell source and reaches the device verbatim, so
+//! metacharacters in it keep their meaning and anything interpolated
+//! into it is the caller's to quote. The argv-shaped APIs quote for
+//! you, but they run one program each: [`cmd`](crate::cmd) and
+//! [`abb`](crate::abb) run Android's `cmd`, [`logcat`](crate::logcat)
+//! runs `logcat`.
+//!
 //! Zero-alloc: [`Exec`] wraps an open [`Channel`] and all destination
 //! strings and output bytes land in caller-provided byte slices. Use
 //! [`open`] for streaming use and [`run`] for a one-shot command that
@@ -27,10 +34,10 @@ use crate::base::channel::{Channel, SelectResult};
 use crate::base::connection::{
     Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
 };
-use crate::base::destination;
+use crate::base::destination::{self, DestinationError};
 use crate::base::error::Error;
 
-fn write_destination(buf: &mut [u8], command: &str) -> Option<usize> {
+fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"exec:", command.as_bytes()], &[])
 }
 
@@ -112,7 +119,7 @@ pub async fn open<'a, T, const MC: usize, const MP: usize, const MF: usize>(
 where
     T: Read + Write,
 {
-    let dest_len = write_destination(dest_buf, command).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_destination(dest_buf, command)?;
     let channel = conn.open(&dest_buf[..dest_len]).await?;
     Ok(Exec { channel })
 }
@@ -138,7 +145,7 @@ pub async fn run<T, const MC: usize, const MP: usize, const MF: usize>(
 where
     T: Read + Write,
 {
-    let dest_len = write_destination(buf, command).ok_or(Error::ReceiveBufferFull)?;
+    let dest_len = write_destination(buf, command)?;
     let channel = conn.open(&buf[..dest_len]).await?;
     let mut session = Exec { channel };
 
@@ -186,6 +193,9 @@ mod tests {
     #[test]
     fn destination_buffer_too_small() {
         let mut buf = [0u8; 6];
-        assert_eq!(write_destination(&mut buf, "x"), None);
+        assert_eq!(
+            write_destination(&mut buf, "x"),
+            Err(DestinationError::TooLong)
+        );
     }
 }
