@@ -358,16 +358,16 @@ mod inner {
         #[test]
         fn any_walks_past_a_device_without_an_adb_interface() {
             let devices = vec![
-                Dev::new(0x1d6b, 0x0002, None),
-                Dev::new(0x04f2, 0xb75c, None),
-                Dev::new(0x18d1, 0x4ee7, Some(1)),
+                Dev::new(0xf00d, 0x0001, None),
+                Dev::new(0xf00d, 0x0002, None),
+                Dev::new(0xbeef, 0x0001, Some(1)),
             ];
-            assert_eq!(pick(devices, UsbSelector::Any).unwrap(), (0x4ee7, 1));
+            assert_eq!(pick(devices, UsbSelector::Any).unwrap(), (0x0001, 1));
         }
 
         #[test]
         fn any_finds_nothing_when_no_device_speaks_adb() {
-            let devices = vec![Dev::new(0x1d6b, 0x0002, None)];
+            let devices = vec![Dev::new(0xf00d, 0x0001, None)];
             assert!(matches!(
                 pick(devices, UsbSelector::Any),
                 Err(UsbConnectError::NotFound)
@@ -377,14 +377,14 @@ mod inner {
         #[test]
         fn vid_pid_ignores_other_devices() {
             let devices = vec![
-                Dev::new(0x1d6b, 0x0002, Some(0)),
-                Dev::new(0x18d1, 0x4ee7, Some(2)),
+                Dev::new(0xf00d, 0x0001, Some(0)),
+                Dev::new(0xbeef, 0x0001, Some(2)),
             ];
             let selector = UsbSelector::VidPid {
-                vid: 0x18d1,
-                pid: 0x4ee7,
+                vid: 0xbeef,
+                pid: 0x0001,
             };
-            assert_eq!(pick(devices, selector).unwrap(), (0x4ee7, 2));
+            assert_eq!(pick(devices, selector).unwrap(), (0x0001, 2));
         }
 
         #[test]
@@ -407,10 +407,10 @@ mod inner {
 
         #[test]
         fn a_named_device_without_an_adb_interface_says_so() {
-            let devices = vec![Dev::new(0x18d1, 0x4ee7, None)];
+            let devices = vec![Dev::new(0xbeef, 0x0001, None)];
             let selector = UsbSelector::VidPid {
-                vid: 0x18d1,
-                pid: 0x4ee7,
+                vid: 0xbeef,
+                pid: 0x0001,
             };
             assert!(matches!(
                 pick(devices, selector),
@@ -421,37 +421,37 @@ mod inner {
         #[test]
         fn a_serial_picks_its_own_device() {
             let devices = vec![
-                Dev::new(0x18d1, 0x4ee7, Some(0)).with_serial("OTHER"),
-                Dev::new(0x18d1, 0x4ee7, Some(1)).with_serial("WANTED"),
+                Dev::new(0xbeef, 0x0001, Some(0)).with_serial("OTHER"),
+                Dev::new(0xbeef, 0x0001, Some(1)).with_serial("WANTED"),
             ];
             assert_eq!(
                 pick(devices, UsbSelector::Serial("WANTED")).unwrap(),
-                (0x4ee7, 1)
+                (0x0001, 1)
             );
         }
 
         #[test]
         fn an_unclaimable_device_does_not_end_an_any_scan() {
             let devices = vec![
-                Dev::new(0x18d1, 0x4ee7, Some(0)),
-                Dev::new(0x18d1, 0x4ee8, Some(1)),
+                Dev::new(0xbeef, 0x0001, Some(0)),
+                Dev::new(0xbeef, 0x0002, Some(1)),
             ];
             let mut seen = 0;
             let picked = scan(devices, UsbSelector::Any, |d, iface| {
                 seen += 1;
-                if d.pid == 0x4ee7 {
+                if d.pid == 0x0001 {
                     Err(UsbConnectError::NoBulkEndpoints)
                 } else {
                     Ok((d.pid, iface))
                 }
             });
-            assert_eq!(picked.unwrap(), (0x4ee8, 1));
+            assert_eq!(picked.unwrap(), (0x0002, 1));
             assert_eq!(seen, 2);
         }
 
         #[test]
         fn the_first_failure_is_reported_when_the_scan_finds_nothing_else() {
-            let devices = vec![Dev::new(0x18d1, 0x4ee7, Some(0))];
+            let devices = vec![Dev::new(0xbeef, 0x0001, Some(0))];
             let picked: Result<(), _> = scan(devices, UsbSelector::Any, |_, _| {
                 Err(UsbConnectError::NoBulkEndpoints)
             });
@@ -461,12 +461,12 @@ mod inner {
         #[test]
         fn a_named_device_surfaces_its_failure_at_once() {
             let devices = vec![
-                Dev::new(0x18d1, 0x4ee7, Some(0)),
-                Dev::new(0x18d1, 0x4ee7, Some(1)),
+                Dev::new(0xbeef, 0x0001, Some(0)),
+                Dev::new(0xbeef, 0x0001, Some(1)),
             ];
             let selector = UsbSelector::VidPid {
-                vid: 0x18d1,
-                pid: 0x4ee7,
+                vid: 0xbeef,
+                pid: 0x0001,
             };
             let mut seen = 0;
             let picked: Result<(), _> = scan(devices, selector, |_, _| {
