@@ -228,7 +228,8 @@ where
         self.rx
             .fill_at_least(&mut self.channel, STAT_V2_SIZE)
             .await?;
-        let stat = parse_stat_v2_body(&self.rx.buf[self.rx.head + 4..]);
+        let body = &self.rx.buf[self.rx.head + 4..self.rx.head + STAT_V2_SIZE];
+        let stat = parse_stat_v2_body(body.try_into().expect("checked STAT_V2_SIZE bytes"));
         self.rx.head += STAT_V2_SIZE;
 
         if stat.error != 0 {
@@ -306,7 +307,8 @@ where
             self.rx
                 .fill_at_least(&mut self.channel, DENT_V2_SIZE)
                 .await?;
-            let stat = parse_stat_v2_body(&self.rx.buf[self.rx.head + 4..]);
+            let body = &self.rx.buf[self.rx.head + 4..self.rx.head + STAT_V2_SIZE];
+            let stat = parse_stat_v2_body(body.try_into().expect("checked STAT_V2_SIZE bytes"));
             let namelen = self.peek_u32(72) as usize;
             self.rx.head += DENT_V2_SIZE;
 

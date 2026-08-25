@@ -23,14 +23,14 @@ pub(crate) fn payload_checksum(payload: &[u8]) -> u32 {
 /// The receive path is unaffected: a non-zero `data_check` is still
 /// verified, so a legacy peer keeps working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Checksum {
+pub enum Checksum {
     /// The peer predates `0x0100_0001`, or its version is not known yet.
     Compute,
     Skip,
 }
 
 impl Checksum {
-    pub(crate) const fn for_version(version: u32) -> Self {
+    pub const fn for_version(version: u32) -> Self {
         if version >= ADB_VERSION_SKIP_CHECKSUM {
             Self::Skip
         } else {
@@ -38,7 +38,7 @@ impl Checksum {
         }
     }
 
-    pub(crate) fn of(self, payload: &[u8]) -> u32 {
+    pub fn of(self, payload: &[u8]) -> u32 {
         match self {
             Self::Skip => 0,
             Self::Compute => payload_checksum(payload),

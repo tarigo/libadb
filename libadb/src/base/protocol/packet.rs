@@ -10,12 +10,25 @@ use super::Checksum;
 #[cfg(test)]
 use bytes::BufMut;
 
-/// An ADB packet (message + payload).
+/// An ADB packet: a 24-byte message header and its payload.
+///
+/// What the two argument fields mean depends on the command — channel
+/// ids for `OPEN`/`WRTE`/`OKAY`/`CLSE`, protocol version and maximum
+/// payload for `CNXN`. See [`Command`].
+///
+/// [`decode`](Self::decode) is the entry point for reading packets off
+/// a stream; there is no matching whole-buffer encoder, because a
+/// packet has to leave as a separate header write and payload write —
+/// adbd reads the header with an exact-size read.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Packet {
+    /// What the packet asks for.
     pub command: Command,
+    /// First argument; meaning depends on `command`.
     pub arg0: u32,
+    /// Second argument; meaning depends on `command`.
     pub arg1: u32,
+    /// Payload, empty for commands that carry none.
     pub data: Bytes,
 }
 
