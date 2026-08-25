@@ -165,8 +165,9 @@ use libadb::transport::runtime::{Smol, Tokio};
 let a = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
 let b = any::connect::<Smol, Rusb>("usb://serial/ABC123").await?;
 
-// With no backend compiled in, `usb://` still builds; it fails at
-// runtime instead.
+// `NoUsb` is a choice, not a statement about the build: both
+// backends above are compiled in, and this call still fails at
+// runtime because it asked for neither.
 let Err(err) = any::connect::<Tokio, NoUsb>("usb://").await else {
     unreachable!("NoUsb cannot serve usb://")
 };

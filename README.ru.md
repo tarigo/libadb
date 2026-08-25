@@ -170,8 +170,9 @@ use libadb::transport::runtime::{Smol, Tokio};
 let a = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
 let b = any::connect::<Smol, Rusb>("usb://serial/ABC123").await?;
 
-// Если бэкенда в сборке нет, `usb://` всё равно компилируется —
-// и падает уже в рантайме.
+// `NoUsb` — это выбор, а не свойство сборки: оба бэкенда выше
+// скомпилированы, и вызов всё равно падает в рантайме, потому что
+// запрошен ни один из них.
 let Err(err) = any::connect::<Tokio, NoUsb>("usb://").await else {
     unreachable!("NoUsb не может обслужить usb://")
 };
