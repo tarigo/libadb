@@ -45,7 +45,7 @@ use crate::base::error::Error;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::packet::Packet;
 use crate::base::protocol::Checksum;
-use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw};
+use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag};
 use crate::device_banner::DeviceBanner;
 
 pub(crate) struct FlowSignal {
@@ -78,6 +78,7 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) delayed_ack: bool,
     pub(crate) device_banner: Option<DeviceBanner<MP, MF>>,
     pub(crate) local_id_counter: AtomicU32,
+    pub(crate) desync: DesyncFlag,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -266,6 +267,7 @@ where
         &mut self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
         let (slot_idx, local_id) = {
             let mut chs = self.shared.lock_channels();
             let idx = chs
@@ -286,7 +288,7 @@ where
         let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
         {
             let mut wh = self.shared.write_half.lock().await;
-            send_pkt(&mut *wh, &pkt, self.shared.checksum()).await?;
+            send_pkt(&mut *wh, &self.shared.desync, &pkt, self.shared.checksum()).await?;
         }
 
         let result = self.await_open_ack(local_id, slot_idx, &mut guard).await;
@@ -295,6 +297,7 @@ where
                 let mut wh = self.shared.write_half.lock().await;
                 let _ = send_raw(
                     &mut *wh,
+                    &self.shared.desync,
                     Command::Close,
                     local_id,
                     0,
@@ -356,6 +359,7 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
         {
             let mut chs = self.shared.lock_channels();
             let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
@@ -386,6 +390,7 @@ where
                         let mut wh = self.shared.write_half.lock().await;
                         send_okay_to(
                             &mut *wh,
+                            &self.shared.desync,
                             self.shared.delayed_ack,
                             local_id,
                             remote_id,
@@ -447,6 +452,7 @@ where
                 let mut wh = self.shared.write_half.lock().await;
                 send_okay_to(
                     &mut *wh,
+                    &self.shared.desync,
                     self.shared.delayed_ack,
                     local_id,
                     remote_id,
@@ -537,15 +543,28 @@ where
     /// Write `data` to the given channel.
     ///
     /// Splits `data` into chunks bounded by `max_payload` and the
-    /// currently-granted send budget. Cancellation-safe: if the future
-    /// is dropped, any reserved-but-unsent credit is refunded.
-    /// Concurrent writers on the same channel never consume the same
-    /// credit.
+    /// currently-granted send budget. Concurrent writers on the same
+    /// channel never consume the same credit.
+    ///
+    /// **Not cancellation-safe.** Reserved-but-unsent credit is
+    /// refunded when the future is dropped, but a packet goes out as a
+    /// header write followed by a payload write, and dropping the
+    /// future between them leaves the device reading whatever we send
+    /// next as the rest of that packet. The connection is marked
+    /// desynchronized instead: this and every other operation on it
+    /// then fails with [`Error::Desynchronized`], including on the
+    /// paired [`Reader`]. Close it and open a new one.
+    ///
+    /// The mark goes up from the moment the header write is first
+    /// polled, not only between the two writes — a transport that took
+    /// bytes before returning `Pending` looks no different from one
+    /// that took none.
     pub async fn write_channel(
         &self,
         ch: ChannelId,
         data: &[u8],
     ) -> Result<(), Error<<WH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
         if data.is_empty() {
             return Ok(());
         }
@@ -565,6 +584,7 @@ where
                 let mut wh = self.shared.write_half.lock().await;
                 send_raw(
                     &mut *wh,
+                    &self.shared.desync,
                     Command::Write,
                     local_id,
                     remote_id,
@@ -589,11 +609,13 @@ where
         &self,
         ch: ChannelId,
     ) -> Result<(), Error<<WH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
         let (local_id, remote_id) = self.channel_ids(ch)?;
         {
             let mut wh = self.shared.write_half.lock().await;
             send_pkt(
                 &mut *wh,
+                &self.shared.desync,
                 &Packet::close(local_id, remote_id),
                 self.shared.checksum(),
             )
@@ -649,5 +671,44 @@ where
             return Some(Err(Error::ChannelClosed));
         }
         slot.try_reserve_send(want, self.shared.delayed_ack).map(Ok)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::mock::{abandon, now, split_with_channel};
+
+    #[test]
+    fn a_cancelled_write_stops_both_halves() {
+        // Index 1: the header is out, the payload write hangs.
+        let (mut reader, writer, ch) = split_with_channel(Some(1));
+        abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+
+        let err = now(writer.write_channel(ch, b"more")).unwrap_err();
+        assert!(
+            matches!(err, Error::Desynchronized),
+            "writer: expected Desynchronized, got {err:?}"
+        );
+
+        let mut buf = [0u8; 16];
+        let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(
+            matches!(err, Error::Desynchronized),
+            "reader: expected Desynchronized, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn writes_that_complete_leave_both_halves_working() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        now(writer.write_channel(ch, b"payload")).unwrap();
+        let mut buf = [0u8; 16];
+        // Nothing left to read, but the call is refused for that reason
+        // rather than for a broken stream.
+        assert!(!matches!(
+            now(reader.read_channel(ch, &mut buf)),
+            Err(Error::Desynchronized)
+        ));
     }
 }

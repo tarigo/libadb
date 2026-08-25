@@ -13,7 +13,7 @@ use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::packet::Packet;
 use super::protocol::Checksum;
-use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, Staged, MIN_READ};
+use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag, Staged, MIN_READ};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 pub const DEFAULT_MAX_CHANNELS: usize = 32;
@@ -38,10 +38,12 @@ pub struct Connection<
     local_id_counter: u32,
     delayed_ack: bool,
     recv_buf: BytesMut,
+    pub(crate) desync: DesyncFlag,
 }
 
 async fn dispatch_to<T: Write>(
     transport: &mut T,
+    desync: &DesyncFlag,
     channels: &mut [Option<ChannelSlot>],
     delayed_ack: bool,
     rx_cap: usize,
@@ -54,7 +56,16 @@ async fn dispatch_to<T: Write>(
         len,
     } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap)?
     {
-        send_okay_to(transport, delayed_ack, local_id, remote_id, len, checksum).await?;
+        send_okay_to(
+            transport,
+            desync,
+            delayed_ack,
+            local_id,
+            remote_id,
+            len,
+            checksum,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -195,6 +206,7 @@ where
             delayed_ack: self.delayed_ack,
             device_banner: self.device_banner,
             local_id_counter: AtomicU32::new(self.local_id_counter),
+            desync: self.desync,
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
@@ -232,11 +244,13 @@ where
     /// packet has been sent leaves the device-side channel half-open
     /// until the connection is closed — async Drop cannot send the
     /// matching CLSE. If the call returns `Err`, a best-effort CLSE is
-    /// sent before the error propagates.
+    /// sent before the error propagates. Dropping it mid-packet is
+    /// worse: see [`write_channel`](Self::write_channel).
     pub async fn open_channel(
         &mut self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
+        self.desync.check()?;
         let slot_idx = self
             .channels
             .iter()
@@ -251,13 +265,14 @@ where
         };
         let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
         let checksum = self.checksum();
-        send_pkt(&mut self.transport, &pkt, checksum).await?;
+        send_pkt(&mut self.transport, &self.desync, &pkt, checksum).await?;
 
         let result = self.await_open_ack(local_id, slot_idx).await;
         if let Err(ref e) = result {
             if !matches!(e, Error::ChannelClosed) {
                 let _ = send_raw(
                     &mut self.transport,
+                    &self.desync,
                     Command::Close,
                     local_id,
                     0,
@@ -311,6 +326,7 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<T as ErrorType>::Error>> {
+        self.desync.check()?;
         {
             let slot = self.slot_mut(ch)?;
             if !slot.rx_buf.is_empty() {
@@ -366,11 +382,24 @@ where
     /// Splits `data` into chunks bounded by `max_payload` and the
     /// currently-granted send budget, waiting for flow-control
     /// acknowledgements between chunks.
+    ///
+    /// **Not cancellation-safe.** A packet goes out as a header write
+    /// followed by a payload write, and dropping the future between
+    /// them leaves the device reading whatever we send next as the rest
+    /// of that packet. The connection is marked desynchronized instead:
+    /// every later operation on it fails with
+    /// [`Error::Desynchronized`].
+    ///
+    /// The mark goes up from the moment the header write is first
+    /// polled, not only between the two writes — a transport that took
+    /// bytes before returning `Pending` looks no different from one
+    /// that took none.
     pub async fn write_channel(
         &mut self,
         ch: ChannelId,
         data: &[u8],
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
+        self.desync.check()?;
         if data.is_empty() {
             return Ok(());
         }
@@ -394,6 +423,7 @@ where
             let (local_id, remote_id) = self.channel_ids(ch)?;
             send_raw(
                 &mut self.transport,
+                &self.desync,
                 Command::Write,
                 local_id,
                 remote_id,
@@ -419,10 +449,12 @@ where
         &mut self,
         ch: ChannelId,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
+        self.desync.check()?;
         let (local_id, remote_id) = self.channel_ids(ch)?;
         let checksum = self.checksum();
         send_pkt(
             &mut self.transport,
+            &self.desync,
             &Packet::close(local_id, remote_id),
             checksum,
         )
@@ -445,6 +477,7 @@ where
     where
         F: Future,
     {
+        self.desync.check()?;
         {
             let slot = self.slot_mut(ch)?;
             if !slot.rx_buf.is_empty() {
@@ -472,6 +505,7 @@ where
                         let payload_len = pkt.data.len();
                         send_okay_to(
                             &mut self.transport,
+                            &self.desync,
                             delayed_ack,
                             local_id,
                             remote_id,
@@ -498,6 +532,7 @@ where
                     _ => {
                         dispatch_to(
                             &mut self.transport,
+                            &self.desync,
                             &mut self.channels,
                             delayed_ack,
                             rx_cap,
@@ -585,6 +620,7 @@ where
         let delayed_ack = self.delayed_ack;
         send_okay_to(
             &mut self.transport,
+            &self.desync,
             delayed_ack,
             local_id,
             remote_id,
@@ -600,6 +636,7 @@ where
         let checksum = self.checksum();
         dispatch_to(
             &mut self.transport,
+            &self.desync,
             &mut self.channels,
             delayed_ack,
             rx_cap,
@@ -659,3 +696,6 @@ where
 
 mod config;
 mod handshake;
+
+#[cfg(test)]
+mod tests;

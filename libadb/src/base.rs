@@ -29,9 +29,12 @@
 pub mod auth;
 pub mod channel;
 pub mod connection;
+
 pub(crate) mod destination;
 pub mod device_banner;
 pub mod error;
+#[cfg(test)]
+pub(crate) mod mock;
 pub(crate) mod protobuf;
 pub mod protocol;
 pub(crate) mod recv_buf;
