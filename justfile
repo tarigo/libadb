@@ -12,8 +12,17 @@ ffi_features := "usb rusb nusb,rusb"
 doc_features := "tokio smol tokio,rusb smol,nusb tokio,smol,nusb,rusb"
 msrv_version := "1.87.0"
 no_std_target := "thumbv7m-none-eabi"
-# What the bottom of a stack sits on; see the `restack` recipe.
+# What the bottom of a stack sits on; see the `restack` and `mutants`
+# recipes.
 restack_base := "origin/main"
+# Feature set mutants are hunted under. It has to cover the code being
+# mutated: a mutant inside a `cfg`-ed out module compiles away, the
+# tests pass, and it is reported as surviving when nothing was tested at
+# all. One runtime plus both USB backends covers the crate.
+mutants_features := "tokio,nusb,rusb"
+# Seconds a single mutant may take before it counts as a timeout. A
+# mutant that loops forever would otherwise hold the run open.
+mutants_timeout := "120"
 
 # The warning policy every recipe runs under, CI included: clippy takes
 # `-D warnings` on its own command line, but rustc warnings from tests,
@@ -160,6 +169,39 @@ restack +stack:
     done
     git switch --quiet "$started_on"
     echo "stack re-based; GitHub retargets the PRs itself once the base branch is deleted on merge"
+
+# Mutation testing: change the code in small ways and see whether the
+# tests notice. Needs cargo-mutants (`cargo install cargo-mutants
+# --locked`).
+#
+#     just mutants                                 # what this branch changed
+#     just mutants libadb/src/base/destination.rs  # named files
+#
+# With no arguments it only looks at code this branch touched against
+# `restack_base`, which keeps a run to minutes; naming files widens it
+# deliberately. Surviving mutants are gaps in the tests, not build
+# failures, so this is not part of `ci`. Mutants that no test could
+# ever tell apart are listed in `.cargo/mutants.toml`.
+#
+# Hunt for code the tests do not actually pin down.
+mutants *files:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    common=(--package libadb --features "{{mutants_features}}" \
+            --timeout {{mutants_timeout}} --jobs "$(nproc)")
+    if [ -n "{{files}}" ]; then
+        args=()
+        for f in {{files}}; do args+=(--file "$f"); done
+        exec cargo mutants "${common[@]}" "${args[@]}"
+    fi
+    diff=$(mktemp)
+    trap 'rm -f "$diff"' EXIT
+    git diff --merge-base "{{restack_base}}" -- '*.rs' > "$diff"
+    if [ ! -s "$diff" ]; then
+        echo "no Rust changes against {{restack_base}} — name files to widen the hunt" >&2
+        exit 0
+    fi
+    cargo mutants "${common[@]}" --in-diff "$diff"
 
 # Fuzz one target for `seconds` (needs nightly and cargo-fuzz).
 fuzz target seconds="60":
