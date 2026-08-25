@@ -281,7 +281,7 @@ where
         let mut guard = SlotGuard::new(Arc::clone(&self.shared), slot_idx);
 
         let open_arg1 = if self.shared.delayed_ack {
-            self.shared.config.initial_ack_bytes()
+            self.shared.config.advertised_ack_bytes()
         } else {
             0
         };
@@ -360,21 +360,40 @@ where
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
-        {
+        let delayed_ack = self.shared.delayed_ack;
+        let watermark = self.shared.config.rx_watermark();
+        let buffered = {
             let mut chs = self.shared.lock_channels();
             let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
             if !slot.rx_buf.is_empty() {
                 let n = buf.len().min(slot.rx_buf.len());
                 buf[..n].copy_from_slice(&slot.rx_buf[..n]);
                 let _ = slot.rx_buf.split_to(n);
-                return Ok(n);
-            }
-            if slot.is_closed() {
+                Some((n, slot.consume(n, delayed_ack, watermark)))
+            } else if slot.is_closed() {
                 return Err(Error::ChannelClosed);
+            } else {
+                None
             }
+        };
+        if let Some((n, ack)) = buffered {
+            if let Some((local_id, remote_id, len)) = ack {
+                let mut wh = self.shared.write_half.lock().await;
+                send_okay_to(
+                    &mut *wh,
+                    &self.shared.desync,
+                    delayed_ack,
+                    local_id,
+                    remote_id,
+                    len,
+                    self.shared.checksum(),
+                )
+                .await?;
+            }
+            return Ok(n);
         }
 
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let (local_id, _) = self.channel_ids(ch)?;
 
         loop {
             let pkt = recv_pkt(
@@ -385,28 +404,33 @@ where
             .await?;
             match pkt.command {
                 Command::Write if pkt.arg1 == local_id => {
-                    let payload_len = pkt.data.len();
-                    {
+                    let n = buf.len().min(pkt.data.len());
+                    buf[..n].copy_from_slice(&pkt.data[..n]);
+                    let ack = {
+                        let mut chs = self.shared.lock_channels();
+                        match slot_for_mut(&mut *chs, ch) {
+                            Some(slot) => slot.deliver(
+                                &pkt.data,
+                                n,
+                                self.shared.config.rx_cap(),
+                                delayed_ack,
+                                watermark,
+                            )?,
+                            None => None,
+                        }
+                    };
+                    if let Some((local_id, remote_id, len)) = ack {
                         let mut wh = self.shared.write_half.lock().await;
                         send_okay_to(
                             &mut *wh,
                             &self.shared.desync,
-                            self.shared.delayed_ack,
+                            delayed_ack,
                             local_id,
                             remote_id,
-                            payload_len,
+                            len,
                             self.shared.checksum(),
                         )
                         .await?;
-                    }
-
-                    let n = buf.len().min(pkt.data.len());
-                    buf[..n].copy_from_slice(&pkt.data[..n]);
-                    if n < pkt.data.len() {
-                        let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = slot_for_mut(&mut *chs, ch) {
-                            slot.push_rx(&pkt.data[n..], self.shared.config.rx_cap())?;
-                        }
                     }
                     return Ok(n);
                 }
@@ -440,6 +464,7 @@ where
                 &pkt,
                 self.shared.delayed_ack,
                 self.shared.config.rx_cap(),
+                self.shared.config.rx_watermark(),
             )?
         };
 
@@ -710,5 +735,27 @@ mod tests {
             now(reader.read_channel(ch, &mut buf)),
             Err(Error::Desynchronized)
         ));
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use crate::base::mock::{now, split_two_channels_delayed_ack, wrte};
+
+    #[test]
+    fn a_split_reader_returns_credit_only_for_what_was_read() {
+        let (mut reader, a, b, seen) =
+            split_two_channels_delayed_ack(&[wrte(2, b"for-b"), wrte(1, b"for-a")]);
+
+        let mut buf = [0u8; 32];
+        now(reader.read_channel(a, &mut buf)).unwrap();
+        assert!(
+            seen.acks_for(2).is_empty(),
+            "channel B was buffered, not read: its credit stays with us"
+        );
+
+        let n = now(reader.read_channel(b, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"for-b");
+        assert_eq!(seen.acks_for(2), alloc::vec![5]);
     }
 }

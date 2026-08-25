@@ -20,7 +20,16 @@ pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
     }
 }
 
-#[allow(dead_code)] // `idx` only read by split::Reader::dispatch
+/// Whether an inbound WRTE is acknowledged now or once it is read.
+pub(crate) enum AckDecision {
+    Now {
+        local_id: u32,
+        remote_id: u32,
+        len: usize,
+    },
+    Hold,
+}
+
 pub(crate) enum DispatchOutcome {
     AckWrite {
         local_id: u32,
@@ -28,6 +37,7 @@ pub(crate) enum DispatchOutcome {
         len: usize,
     },
     SlotUpdated {
+        #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
     Unmatched,
@@ -41,17 +51,26 @@ pub(crate) fn dispatch_packet<E>(
     pkt: &Packet,
     delayed_ack: bool,
     rx_cap: usize,
+    watermark: usize,
 ) -> Result<DispatchOutcome, Error<E>> {
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {
             Command::Write if pkt.arg1 == slot.local_id => {
-                let (local_id, remote_id, len) = slot.apply_write(&pkt.data, rx_cap)?;
-                return Ok(DispatchOutcome::AckWrite {
-                    local_id,
-                    remote_id,
-                    len,
-                });
+                return Ok(
+                    match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark)? {
+                        AckDecision::Now {
+                            local_id,
+                            remote_id,
+                            len,
+                        } => DispatchOutcome::AckWrite {
+                            local_id,
+                            remote_id,
+                            len,
+                        },
+                        AckDecision::Hold => DispatchOutcome::SlotUpdated { idx },
+                    },
+                );
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
                 slot.apply_ready(&pkt.data, delayed_ack)?;
@@ -124,6 +143,9 @@ pub(crate) struct ChannelSlot {
     pub rx_buf: BytesMut,
     pub wrte_acked: bool,
     pub send_budget: i64,
+    /// Bytes received for this channel that the peer has not been
+    /// acknowledged for yet — the backpressure the device feels.
+    pub unacked: usize,
 }
 
 impl ChannelSlot {
@@ -135,6 +157,7 @@ impl ChannelSlot {
             rx_buf: BytesMut::new(),
             wrte_acked: true,
             send_budget: 0,
+            unacked: 0,
         }
     }
 
@@ -169,13 +192,87 @@ impl ChannelSlot {
         Ok(())
     }
 
+    /// Take an inbound WRTE and say whether to acknowledge it now.
+    ///
+    /// Acknowledging is what re-opens the sender's window, so doing it
+    /// on arrival means the device may keep writing to a channel the
+    /// application never reads — the buffer then grows without bound.
+    ///
+    /// With delayed-ack the answer is always "later": credit is returned
+    /// as the application consumes bytes, and the budget we advertised
+    /// bounds what can pile up meanwhile. Without it the window is a
+    /// single packet, so waiting for the read on every packet would turn
+    /// the channel into a ping-pong; the acknowledgement goes out at
+    /// once while little is buffered, and is held back once `watermark`
+    /// bytes are waiting to be read.
     pub fn apply_write(
         &mut self,
         payload: &[u8],
         cap: usize,
-    ) -> Result<(u32, u32, usize), RxOverflow> {
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Result<AckDecision, RxOverflow> {
         self.push_rx(payload, cap)?;
-        Ok((self.local_id, self.remote_id, payload.len()))
+        self.unacked = self.unacked.saturating_add(payload.len());
+        if !delayed_ack && self.rx_buf.len() < watermark {
+            self.unacked = 0;
+            return Ok(AckDecision::Now {
+                local_id: self.local_id,
+                remote_id: self.remote_id,
+                len: payload.len(),
+            });
+        }
+        Ok(AckDecision::Hold)
+    }
+
+    /// Hand `taken` bytes of a freshly arrived packet to the caller,
+    /// buffer whatever is left of it, and say what to acknowledge.
+    pub fn deliver(
+        &mut self,
+        payload: &[u8],
+        taken: usize,
+        cap: usize,
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Result<Option<(u32, u32, usize)>, RxOverflow> {
+        if taken < payload.len() {
+            self.push_rx(&payload[taken..], cap)?;
+            self.unacked = self.unacked.saturating_add(payload.len() - taken);
+        }
+        if delayed_ack {
+            return Ok((taken > 0).then_some((self.local_id, self.remote_id, taken)));
+        }
+        if self.rx_buf.len() >= watermark {
+            return Ok(None);
+        }
+        let len = core::mem::take(&mut self.unacked);
+        Ok(Some((self.local_id, self.remote_id, len)))
+    }
+
+    /// Record that the application took `n` bytes, and say what to
+    /// acknowledge as a result.
+    pub fn consume(
+        &mut self,
+        n: usize,
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Option<(u32, u32, usize)> {
+        if self.unacked == 0 {
+            return None;
+        }
+        if delayed_ack {
+            let len = n.min(self.unacked);
+            if len == 0 {
+                return None;
+            }
+            self.unacked -= len;
+            return Some((self.local_id, self.remote_id, len));
+        }
+        if self.rx_buf.len() >= watermark {
+            return None;
+        }
+        let len = core::mem::take(&mut self.unacked);
+        Some((self.local_id, self.remote_id, len))
     }
 
     pub fn push_rx(&mut self, payload: &[u8], cap: usize) -> Result<(), RxOverflow> {

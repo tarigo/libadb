@@ -157,6 +157,11 @@ pub(crate) struct SharedMock(alloc::sync::Arc<std::sync::Mutex<Mock>>);
 
 #[cfg(feature = "split")]
 impl SharedMock {
+    /// Acknowledgements the split halves sent for `local_id`.
+    pub(crate) fn acks_for(&self, local_id: u32) -> Vec<u32> {
+        self.lock().acks_for(local_id)
+    }
+
     fn new(mock: Mock) -> Self {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(mock)))
     }
@@ -201,6 +206,48 @@ impl crate::transport::Splittable for SharedMock {
 
     fn split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), MockError> {
         Ok((self.clone(), self))
+    }
+}
+
+impl Mock {
+    /// Packets handed to the transport, rejoined from the header and
+    /// payload writes each one takes.
+    pub(crate) fn sent(&self) -> Vec<(Command, u32, u32, Vec<u8>)> {
+        let mut stream: Vec<u8> = Vec::new();
+        for w in &self.writes {
+            stream.extend_from_slice(w);
+        }
+        let mut out = Vec::new();
+        let mut pos = 0;
+        while pos + 24 <= stream.len() {
+            let word = |at: usize| {
+                u32::from_le_bytes([stream[at], stream[at + 1], stream[at + 2], stream[at + 3]])
+            };
+            let command = Command::try_from(word(pos)).expect("valid command");
+            let (arg0, arg1) = (word(pos + 4), word(pos + 8));
+            let len = word(pos + 12) as usize;
+            pos += 24;
+            let payload = stream[pos..pos + len].to_vec();
+            pos += len;
+            out.push((command, arg0, arg1, payload));
+        }
+        out
+    }
+
+    /// Acknowledgements sent for `local_id`, as byte counts (zero for a
+    /// plain OKAY).
+    pub(crate) fn acks_for(&self, local_id: u32) -> Vec<u32> {
+        self.sent()
+            .into_iter()
+            .filter(|(cmd, arg0, _, _)| *cmd == Command::Ready && *arg0 == local_id)
+            .map(|(_, _, _, payload)| {
+                if payload.len() >= 4 {
+                    u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])
+                } else {
+                    0
+                }
+            })
+            .collect()
     }
 }
 
@@ -296,6 +343,21 @@ pub(crate) fn split_with_channel(
     (reader, writer, ch)
 }
 
+pub(crate) fn cnxn_with(features: &str) -> Packet {
+    Packet::new(
+        Command::Connect,
+        command::ADB_VERSION,
+        256 * 1024,
+        alloc::format!("device::features={features}").into_bytes(),
+    )
+}
+
+/// OKAY answering an OPEN, carrying the initial send budget the device
+/// grants us when delayed-ack is on.
+pub(crate) fn okay_with_budget(local_id: u32, budget: u32) -> Packet {
+    Packet::new(Command::Ready, 42, local_id, budget.to_le_bytes().to_vec())
+}
+
 pub(crate) fn wrte(local_id: u32, payload: &[u8]) -> Packet {
     Packet::new(Command::Write, 42, local_id, payload.to_vec())
 }
@@ -314,4 +376,87 @@ pub(crate) fn connected_for_select(
     transport.feed(&wrte(1, b"hello"));
     configure(transport);
     (conn, ch)
+}
+
+/// A delayed-ack connection with two open channels, the second of which
+/// nobody has read yet. `pushes` are queued for the transport to hand
+/// over in order.
+pub(crate) fn two_channels_delayed_ack(
+    budget: u32,
+    pushes: &[Packet],
+) -> (Connection<Mock>, ChannelId, ChannelId) {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn_with("shell_v2,delayed_ack"))
+        .feed(&okay_with_budget(1, budget))
+        .feed(&okay_with_budget(2, budget));
+    for pkt in pushes {
+        mock.feed(pkt);
+    }
+    let mut conn = now(Connection::<_>::connect_with_raw_banner(
+        mock,
+        NoAuth,
+        b"host::features=shell_v2,delayed_ack",
+    ))
+    .unwrap();
+    let a = now(conn.open_channel(b"shell:a\0")).unwrap();
+    let b = now(conn.open_channel(b"shell:b\0")).unwrap();
+    (conn, a, b)
+}
+
+/// A connection without delayed-ack, two open channels, and a config
+/// whose watermark the caller picks.
+pub(crate) fn two_channels_classic(
+    config: crate::base::connection::ConnectionConfig,
+    pushes: &[Packet],
+) -> (Connection<Mock>, ChannelId, ChannelId) {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn_with("shell_v2"))
+        .feed(&okay(1))
+        .feed(&okay(2));
+    for pkt in pushes {
+        mock.feed(pkt);
+    }
+    let mut conn = now(Connection::<_>::connect_with_raw_banner_and_config(
+        mock,
+        NoAuth,
+        b"host::features=shell_v2",
+        config,
+    ))
+    .unwrap();
+    let a = now(conn.open_channel(b"shell:a\0")).unwrap();
+    let b = now(conn.open_channel(b"shell:b\0")).unwrap();
+    (conn, a, b)
+}
+
+/// A split, delayed-ack connection with two channels; the returned
+/// handle sees everything the halves write.
+#[cfg(feature = "split")]
+#[allow(clippy::type_complexity)]
+pub(crate) fn split_two_channels_delayed_ack(
+    pushes: &[Packet],
+) -> (
+    crate::split::Reader<SharedMock, SharedMock>,
+    ChannelId,
+    ChannelId,
+    SharedMock,
+) {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn_with("shell_v2,delayed_ack"))
+        .feed(&okay_with_budget(1, 64 * 1024))
+        .feed(&okay_with_budget(2, 64 * 1024));
+    for pkt in pushes {
+        mock.feed(pkt);
+    }
+    let transport = SharedMock::new(mock);
+    let seen = transport.clone();
+    let conn = now(Connection::<_>::connect_with_raw_banner(
+        transport,
+        NoAuth,
+        b"host::features=shell_v2,delayed_ack",
+    ))
+    .unwrap();
+    let (mut reader, _writer) = conn.split().unwrap();
+    let a = now(reader.open_channel(b"shell:a\0")).unwrap();
+    let b = now(reader.open_channel(b"shell:b\0")).unwrap();
+    (reader, a, b, seen)
 }
