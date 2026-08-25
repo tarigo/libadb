@@ -85,7 +85,10 @@ where
         &mut self,
         buf: &mut [u8],
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
+    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
+    where
+        T: crate::transport::ReadCancelSafety,
+    {
         self.channel.select(buf, interrupt).await
     }
 

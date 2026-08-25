@@ -476,8 +476,10 @@ where
     ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
     where
         F: Future,
+        T: crate::transport::ReadCancelSafety,
     {
         self.desync.check()?;
+        let cancel_safe = self.transport.read_cancel_safe();
         {
             let slot = self.slot_mut(ch)?;
             if !slot.rx_buf.is_empty() {
@@ -556,7 +558,7 @@ where
                 let mut staged = Staged::new(&mut this.recv_buf, want);
                 let transport = &mut this.transport;
 
-                let wakeup = {
+                let wakeup = if cancel_safe {
                     let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
 
                     core::future::poll_fn(|cx| {
@@ -571,6 +573,21 @@ where
                         }
                     })
                     .await?
+                } else {
+                    // The transport loses whatever it has already been
+                    // handed if a read is dropped, so `interrupt` only
+                    // gets its answer between reads: due now, or once
+                    // this read has run its course.
+                    let due =
+                        core::future::poll_fn(|cx| Poll::Ready(interrupt.as_mut().poll(cx))).await;
+                    if let Poll::Ready(val) = due {
+                        return Ok(SelectResult::Interrupted(val));
+                    }
+                    match transport.read(staged.spare()).await {
+                        Ok(0) => return Err(Error::UnexpectedEof),
+                        Ok(n) => Wakeup::Read(n),
+                        Err(e) => return Err(Error::Io(e)),
+                    }
                 };
                 match wakeup {
                     // `staged` trims the untouched tail as it drops, in

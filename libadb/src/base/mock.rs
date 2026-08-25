@@ -37,6 +37,9 @@ pub(crate) struct Mock {
     inbound: VecDeque<u8>,
     writes: Vec<Vec<u8>>,
     stall_write: Option<usize>,
+    /// Reads that report `Pending` before any data comes back.
+    slow_reads: usize,
+    cancel_safe: bool,
 }
 
 impl Mock {
@@ -45,6 +48,8 @@ impl Mock {
             inbound: VecDeque::new(),
             writes: Vec::new(),
             stall_write: None,
+            slow_reads: 0,
+            cancel_safe: true,
         }
     }
 
@@ -52,6 +57,20 @@ impl Mock {
         let mut buf = BytesMut::new();
         pkt.encode(&mut buf, Checksum::Compute).unwrap();
         self.inbound.extend(buf.iter().copied());
+        self
+    }
+
+    /// Park the next `n` reads once each before answering, so an
+    /// interrupt can become ready while a read is in flight.
+    pub(crate) fn slow_reads(&mut self, n: usize) -> &mut Self {
+        self.slow_reads = n;
+        self
+    }
+
+    /// Claim that dropping a read loses whatever the peer already sent,
+    /// the way a USB bulk transfer does.
+    pub(crate) fn loses_cancelled_reads(&mut self) -> &mut Self {
+        self.cancel_safe = false;
         self
     }
 
@@ -88,8 +107,33 @@ impl Mock {
 
 impl embedded_io_async::Read for Mock {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, MockError> {
+        if self.slow_reads > 0 {
+            self.slow_reads -= 1;
+            park_once().await;
+        }
         Ok(self.pull(buf))
     }
+}
+
+impl crate::transport::ReadCancelSafety for Mock {
+    fn read_cancel_safe(&self) -> bool {
+        self.cancel_safe
+    }
+}
+
+/// Report `Pending` once, waking immediately, then complete.
+async fn park_once() {
+    let mut done = false;
+    core::future::poll_fn(move |cx| {
+        if done {
+            core::task::Poll::Ready(())
+        } else {
+            done = true;
+            cx.waker().wake_by_ref();
+            core::task::Poll::Pending
+        }
+    })
+    .await
 }
 
 impl embedded_io_async::Write for Mock {
@@ -250,4 +294,24 @@ pub(crate) fn split_with_channel(
     let (mut reader, writer) = conn.split().unwrap();
     let ch = now(reader.open_channel(b"shell:\0")).unwrap();
     (reader, writer, ch)
+}
+
+pub(crate) fn wrte(local_id: u32, payload: &[u8]) -> Packet {
+    Packet::new(Command::Write, 42, local_id, payload.to_vec())
+}
+
+/// A connection with one open channel and one WRTE waiting to be read,
+/// with the transport configured after the handshake so that its
+/// slowness only affects the read under test.
+pub(crate) fn connected_for_select(
+    configure: impl FnOnce(&mut Mock),
+) -> (Connection<Mock>, ChannelId) {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn()).feed(&okay(1));
+    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let ch = now(conn.open_channel(b"shell:\0")).unwrap();
+    let transport = conn.transport_mut();
+    transport.feed(&wrte(1, b"hello"));
+    configure(transport);
+    (conn, ch)
 }
