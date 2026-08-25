@@ -8,7 +8,7 @@ use super::connection::{
 };
 use super::error::{Error, ProtocolError, RxOverflow};
 use super::protocol::command::Command;
-use super::protocol::packet::Packet;
+use super::protocol::Packet;
 
 pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
     if payload.len() >= 4 {

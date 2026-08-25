@@ -6,7 +6,7 @@ use embedded_io_async::{Read, Write};
 use super::error::{Error, ProtocolError};
 use super::protocol::command::Command;
 use super::protocol::constant::MAX_PAYLOAD;
-use super::protocol::packet::Packet;
+use super::protocol::Packet;
 use super::protocol::{Checksum, MESSAGE_SIZE};
 
 /// Floor on how much to ask the transport for. A request smaller than

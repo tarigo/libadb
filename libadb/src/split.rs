@@ -43,8 +43,8 @@ use crate::base::connection::{
 };
 use crate::base::error::Error;
 use crate::base::protocol::command::Command;
-use crate::base::protocol::packet::Packet;
 use crate::base::protocol::Checksum;
+use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag};
 use crate::device_banner::DeviceBanner;
 

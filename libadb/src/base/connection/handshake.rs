@@ -9,8 +9,8 @@ use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
 use crate::base::protocol::features::{self, Feature};
-use crate::base::protocol::packet::Packet;
 use crate::base::protocol::Checksum;
+use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
 
 pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {

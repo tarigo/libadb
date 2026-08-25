@@ -13,7 +13,7 @@ use bytes::BytesMut;
 use crate::base::channel::ChannelId;
 use crate::base::connection::Connection;
 use crate::base::protocol::command::Command;
-use crate::base::protocol::packet::Packet;
+use crate::base::protocol::Packet;
 use crate::base::protocol::{command, Checksum};
 
 #[derive(Debug, PartialEq, Eq)]

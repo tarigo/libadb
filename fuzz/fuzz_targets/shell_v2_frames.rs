@@ -14,7 +14,7 @@ extern crate alloc;
 use alloc::vec;
 
 use arbitrary::Arbitrary;
-use libadb::shell_v2::{FrameDecoder, HEADER_SIZE};
+use libadb::shell::v2::{FrameDecoder, HEADER_SIZE};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
