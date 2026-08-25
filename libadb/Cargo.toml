@@ -48,7 +48,7 @@ default-features = false
 version = "1"
 optional = true
 default-features = false
-features = ["net", "io-util"]
+features = ["net", "io-util", "rt"]
 
 [dependencies.smol]
 version = "2"
@@ -69,20 +69,12 @@ default = ["tokio"]
 # Implied by every runtime feature below; enable it directly only for
 # runtime-less consumers (e.g. `libadb-ffi`'s blocking executor).
 split = ["dep:async-lock", "dep:event-listener", "event-listener/std"]
-# Internal feature: any USB backend (nusb or rusb) is active. Used to
-# gate the shared `Transport::Usb` variant and related glue code.
-# Pulls `tokio/rt` (if tokio is on) because `any::connect` offloads the
-# blocking USB connect/enumerate path to `tokio::task::spawn_blocking`.
-# Enabled implicitly by `nusb` or `rusb` — do not enable directly
-# (enforced by a compile_error in `lib.rs`).
-_usb = ["tokio?/rt"]
 tokio = ["split", "dep:tokio", "dep:embedded-io-adapters", "embedded-io-adapters/tokio-1"]
 smol = ["split", "dep:smol", "dep:embedded-io-adapters", "embedded-io-adapters/futures-03"]
-nusb = ["split", "_usb", "dep:nusb"]
-rusb = ["split", "_usb", "dep:rusb"]
-# Convenience alias: enables the default USB backend (`nusb`). Switch to
-# the libusb-based backend by disabling default features and enabling
-# `rusb` instead. `nusb` and `rusb` are mutually exclusive.
+nusb = ["split", "dep:nusb"]
+rusb = ["split", "dep:rusb"]
+# Convenience alias for the default USB backend. Both backends may be
+# enabled at once; pick one per call site via `transport::UsbBackend`.
 usb = ["nusb"]
 
 [dev-dependencies]

@@ -31,6 +31,16 @@ use std::{env, process};
 use libadb::channel::SelectResult;
 use libadb::shell::v2::{self as shell_v2, Frame};
 use libadb::transport::any::{self, AnyTransport};
+// The example picks one USB backend at build time; the library itself
+// no longer cares which features are on.
+#[cfg(feature = "nusb")]
+type Usb = libadb::transport::nusb::Nusb;
+#[cfg(all(feature = "rusb", not(feature = "nusb")))]
+type Usb = libadb::transport::rusb::Rusb;
+#[cfg(not(any(feature = "nusb", feature = "rusb")))]
+type Usb = libadb::transport::common::NoUsb;
+
+type ExampleTransport = AnyTransport<<Usb as libadb::UsbBackend>::Transport>;
 use libadb::{Connection, Feature};
 
 #[cfg(feature = "tokio")]
@@ -116,12 +126,12 @@ fn to_uri(target: &str) -> String {
 
 async fn open_connection(
     target: &str,
-) -> Result<Connection<AnyTransport>, Box<dyn std::error::Error>> {
+) -> Result<Connection<ExampleTransport>, Box<dyn std::error::Error>> {
     let auth = AdbKeyAuth::load()?;
     let uri = to_uri(target);
 
     eprintln!("[*] connecting to {uri} ...");
-    let transport = any::connect(&uri)
+    let transport = any::connect::<Usb>(&uri)
         .await
         .map_err(|e| format!("transport: {e}"))?;
 

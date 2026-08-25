@@ -7,11 +7,22 @@ use libadb::transport::common::{Transport, TransportError};
 use libadb::uri::{self, Uri};
 use libadb::Splittable;
 
+// The C ABI has a single `adb_connect(uri)`, so when both backends are
+// compiled in one of them has to win: nusb, matching the `usb` alias.
 #[cfg(feature = "nusb")]
 use libadb::transport::nusb::{connect_by_selector, UsbConnectError};
 
 #[cfg(all(feature = "rusb", not(feature = "nusb")))]
 use libadb::transport::rusb::{connect_by_selector, UsbConnectError};
+
+#[cfg(feature = "nusb")]
+type Usb = libadb::transport::nusb::UsbTransport;
+
+#[cfg(all(feature = "rusb", not(feature = "nusb")))]
+type Usb = libadb::transport::rusb::UsbTransport;
+
+#[cfg(not(any(feature = "nusb", feature = "rusb")))]
+type Usb = libadb::transport::common::NoUsb;
 
 pub(crate) struct BlockingTcp(TcpStream);
 
@@ -44,8 +55,9 @@ impl Splittable for BlockingTcp {
     }
 }
 
-pub(crate) type FfiTransport = Transport<BlockingTcp>;
-pub(crate) type FfiTransportError = TransportError<io::Error>;
+pub(crate) type FfiTransport = Transport<BlockingTcp, Usb>;
+pub(crate) type FfiTransportError =
+    TransportError<io::Error, <Usb as embedded_io::ErrorType>::Error>;
 
 #[derive(Debug)]
 pub(crate) enum FfiConnectError {

@@ -1,13 +1,12 @@
-//! Runtime-polymorphic transport that unifies TCP and USB behind a
-//! single concrete type, and a [`connect`] helper that builds one from
-//! a URI.
+//! Transport that unifies TCP and USB behind a single concrete type,
+//! and a [`connect`] helper that builds one from a URI.
 //!
-//! `AnyTransport` is compiled when one of `tokio` / `smol` is enabled
-//! (TCP requires an async runtime), optionally combined with a USB
-//! backend (`nusb` or `rusb`). The `tokio` and `smol` features are
-//! mutually exclusive — enabling both fails at compile time. [`connect`]
-//! returns [`ConnectError::UnsupportedScheme`] for `usb://` URIs when no
-//! USB backend is compiled in.
+//! Compiled when one of `tokio` / `smol` is enabled, since TCP needs an
+//! async runtime. The USB half is a type parameter: pass a backend
+//! marker such as `nusb::Nusb` or `rusb::Rusb`, or
+//! [`NoUsb`] when a build has none —
+//! then `usb://` URIs fail with [`ConnectError::Usb`] instead of not
+//! compiling.
 
 use embedded_io::ErrorType;
 
@@ -17,61 +16,61 @@ use crate::transport::tcp::TokioTcp;
 #[cfg(feature = "smol")]
 use crate::transport::tcp::SmolTcp;
 
-#[cfg(feature = "nusb")]
-use crate::transport::nusb::{connect_by_selector, UsbConnectError};
-
-#[cfg(all(feature = "rusb", not(feature = "nusb")))]
-use crate::transport::rusb::{connect_by_selector, UsbConnectError};
-
-use crate::transport::common::{Transport, TransportError};
-use crate::uri::{self, Uri};
-
-#[cfg(feature = "_usb")]
-use crate::uri::UsbSelector;
+use crate::transport::common::{NoUsb, Transport, TransportError};
+use crate::transport::UsbBackend;
+use crate::uri::{self, Uri, UsbSelector};
 
 #[cfg(feature = "tokio")]
 type Tcp = TokioTcp;
 #[cfg(feature = "smol")]
 type Tcp = SmolTcp;
 
-pub type AnyTransport = Transport<Tcp>;
+/// TCP-or-USB transport over the compiled-in runtime. `U` is the USB
+/// transport; it defaults to [`NoUsb`] for TCP-only builds.
+pub type AnyTransport<U = NoUsb> = Transport<Tcp, U>;
 
-pub type AnyTransportError = TransportError<<Tcp as ErrorType>::Error>;
+/// Error type of [`AnyTransport`].
+pub type AnyTransportError<U = NoUsb> =
+    TransportError<<Tcp as ErrorType>::Error, <U as ErrorType>::Error>;
 
+/// Why [`connect`] failed. `E` is the backend's own connect error.
 #[derive(Debug)]
-pub enum ConnectError {
+pub enum ConnectError<E> {
     Uri(uri::UriError),
-    /// URI scheme recognised but its transport feature is disabled at
-    /// compile time (e.g. `usb://…` without any USB backend enabled).
-    UnsupportedScheme,
     Tcp(std::io::Error),
-    #[cfg(feature = "_usb")]
-    Usb(UsbConnectError),
+    Usb(E),
     /// The runtime's blocking-task pool failed to deliver the USB
     /// connect result — typically cancelled or panicked during runtime
     /// shutdown.
-    #[cfg(feature = "_usb")]
     UsbBlockingTaskFailed,
 }
 
-impl core::fmt::Display for ConnectError {
+impl<E: core::fmt::Display> core::fmt::Display for ConnectError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Uri(e) => write!(f, "uri: {e}"),
-            Self::UnsupportedScheme => f.write_str("transport not compiled in"),
             Self::Tcp(e) => write!(f, "tcp: {e}"),
-            #[cfg(feature = "_usb")]
             Self::Usb(e) => write!(f, "usb: {e}"),
-            #[cfg(feature = "_usb")]
             Self::UsbBlockingTaskFailed => f.write_str("usb: blocking task failed"),
         }
     }
 }
 
-impl std::error::Error for ConnectError {}
+impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ConnectError<E> {}
 
-/// Parse `uri_str` and open a transport to the referenced endpoint.
-pub async fn connect(uri_str: &str) -> Result<AnyTransport, ConnectError> {
+/// Parse `uri_str` and open a transport to the referenced endpoint,
+/// using `B` for `usb://` URIs.
+///
+/// ```ignore
+/// let t = any::connect::<Nusb>("usb://18d1:4ee7").await?;
+/// let t = any::connect::<NoUsb>("tcp://127.0.0.1:5555").await?;
+/// ```
+pub async fn connect<B>(uri_str: &str) -> Result<AnyTransport<B::Transport>, ConnectError<B::Error>>
+where
+    B: UsbBackend,
+    B::Transport: Send + 'static,
+    B::Error: Send + 'static,
+{
     let uri = uri::parse(uri_str).map_err(ConnectError::Uri)?;
     match uri {
         Uri::Tcp { host, port } => {
@@ -80,38 +79,33 @@ pub async fn connect(uri_str: &str) -> Result<AnyTransport, ConnectError> {
                 let stream = tokio::net::TcpStream::connect((host, port))
                     .await
                     .map_err(ConnectError::Tcp)?;
-                Ok(AnyTransport::Tcp(TokioTcp::new(stream)))
+                Ok(Transport::Tcp(TokioTcp::new(stream)))
             }
             #[cfg(feature = "smol")]
             {
                 let stream = smol::net::TcpStream::connect((host, port))
                     .await
                     .map_err(ConnectError::Tcp)?;
-                Ok(AnyTransport::Tcp(SmolTcp::new(stream)))
+                Ok(Transport::Tcp(SmolTcp::new(stream)))
             }
         }
         Uri::Usb(selector) => {
-            #[cfg(feature = "_usb")]
-            {
-                usb_connect_blocking(OwnedUsbSelector::from_borrowed(selector)).await
-            }
-            #[cfg(not(feature = "_usb"))]
-            {
-                let _ = selector;
-                Err(ConnectError::UnsupportedScheme)
-            }
+            let owned = OwnedUsbSelector::from_borrowed(selector);
+            run_blocking(move || B::connect_by_selector(owned.as_borrowed()))
+                .await?
+                .map(Transport::Usb)
+                .map_err(ConnectError::Usb)
         }
     }
 }
 
-#[cfg(feature = "_usb")]
+/// Owned form of [`UsbSelector`], so the blocking pool can take it.
 enum OwnedUsbSelector {
     Any,
     VidPid { vid: u16, pid: u16 },
     Serial(alloc::string::String),
 }
 
-#[cfg(feature = "_usb")]
 impl OwnedUsbSelector {
     fn from_borrowed(s: UsbSelector<'_>) -> Self {
         match s {
@@ -133,16 +127,8 @@ impl OwnedUsbSelector {
     }
 }
 
-#[cfg(feature = "_usb")]
-async fn usb_connect_blocking(owned: OwnedUsbSelector) -> Result<AnyTransport, ConnectError> {
-    run_blocking(move || connect_by_selector(owned.as_borrowed()))
-        .await?
-        .map(AnyTransport::Usb)
-        .map_err(ConnectError::Usb)
-}
-
-#[cfg(all(feature = "_usb", feature = "tokio"))]
-async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError>
+#[cfg(feature = "tokio")]
+async fn run_blocking<T, E>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError<E>>
 where
     T: Send + 'static,
 {
@@ -157,8 +143,8 @@ where
     })
 }
 
-#[cfg(all(feature = "_usb", feature = "smol", not(feature = "tokio")))]
-async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError>
+#[cfg(all(feature = "smol", not(feature = "tokio")))]
+async fn run_blocking<T, E>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ConnectError<E>>
 where
     T: Send + 'static,
 {
@@ -177,11 +163,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::{connect, AnyTransport, ConnectError};
-    use crate::transport::common::Transport;
+    use crate::transport::common::{NoBackend, NoUsb, Transport};
     use crate::uri::UriError;
     use alloc::format;
     use core::future::Future;
     use std::io;
+
+    /// The backend under test everywhere except the `usb://` cases:
+    /// TCP URIs never touch it.
+    type NoBackendChosen = NoUsb;
 
     fn block_on<F: Future>(fut: F) -> F::Output {
         #[cfg(feature = "tokio")]
@@ -214,12 +204,13 @@ mod tests {
     fn assert_matches_tcp_transport(t: AnyTransport) {
         match t {
             Transport::Tcp(_) => {}
-            #[cfg(feature = "_usb")]
-            Transport::Usb(_) => panic!("expected Tcp transport, got Usb"),
+            Transport::Usb(never) => match never {},
         }
     }
 
-    fn unwrap_err(r: Result<AnyTransport, ConnectError>) -> ConnectError {
+    fn unwrap_err<E: core::fmt::Debug>(
+        r: Result<AnyTransport, ConnectError<E>>,
+    ) -> ConnectError<E> {
         match r {
             Ok(_) => panic!("expected Err, got Ok"),
             Err(e) => e,
@@ -228,66 +219,65 @@ mod tests {
 
     #[test]
     fn connect_error_display_uri_wraps_inner() {
-        let e = ConnectError::Uri(UriError::InvalidHost);
+        let e: ConnectError<NoBackend> = ConnectError::Uri(UriError::InvalidHost);
         assert_eq!(format!("{}", e), "uri: invalid host");
-    }
-
-    #[test]
-    fn connect_error_display_unsupported_scheme_is_static_message() {
-        let e = ConnectError::UnsupportedScheme;
-        assert_eq!(format!("{}", e), "transport not compiled in");
     }
 
     #[test]
     fn connect_error_display_tcp_wraps_inner_io_error() {
         let io_err = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
-        let e = ConnectError::Tcp(io_err);
+        let e: ConnectError<NoBackend> = ConnectError::Tcp(io_err);
         assert_eq!(format!("{}", e), "tcp: refused");
     }
 
     #[test]
     fn connect_error_implements_std_error_trait() {
         fn takes_std_err<E: std::error::Error>(_: &E) {}
-        takes_std_err(&ConnectError::UnsupportedScheme);
+        takes_std_err(&ConnectError::<NoBackend>::UsbBlockingTaskFailed);
     }
 
     #[test]
     fn connect_missing_scheme_returns_uri_error() {
-        let err = unwrap_err(block_on(connect("127.0.0.1:5555")));
+        let err = unwrap_err(block_on(connect::<NoBackendChosen>("127.0.0.1:5555")));
         assert!(matches!(err, ConnectError::Uri(UriError::MissingScheme)));
     }
 
     #[test]
     fn connect_unknown_scheme_returns_uri_error() {
-        let err = unwrap_err(block_on(connect("ftp://host:21")));
+        let err = unwrap_err(block_on(connect::<NoBackendChosen>("ftp://host:21")));
         assert!(matches!(err, ConnectError::Uri(UriError::UnknownScheme)));
     }
 
     #[test]
     fn connect_malformed_tcp_uri_returns_uri_error() {
-        let err = unwrap_err(block_on(connect("tcp://host")));
+        let err = unwrap_err(block_on(connect::<NoBackendChosen>("tcp://host")));
         assert!(matches!(err, ConnectError::Uri(UriError::InvalidPort)));
     }
 
-    #[cfg(not(feature = "_usb"))]
     #[test]
-    fn connect_usb_any_without_usb_feature_returns_unsupported_scheme() {
-        let err = unwrap_err(block_on(connect("usb://")));
-        assert!(matches!(err, ConnectError::UnsupportedScheme));
+    fn connect_usb_without_a_backend_reports_it_at_runtime() {
+        // The point of NoUsb: `usb://` still compiles, and fails with a
+        // clear error instead of a missing feature.
+        for uri in ["usb://", "usb://18d1:4ee7", "usb://serial/ABC123"] {
+            let err = unwrap_err(block_on(connect::<NoUsb>(uri)));
+            assert!(
+                matches!(err, ConnectError::Usb(NoBackend)),
+                "{uri}: got {err:?}",
+            );
+            assert_eq!(format!("{}", err), "usb: no usb backend compiled in");
+        }
     }
 
-    #[cfg(not(feature = "_usb"))]
+    #[cfg(all(feature = "nusb", feature = "rusb"))]
     #[test]
-    fn connect_usb_vidpid_without_usb_feature_returns_unsupported_scheme() {
-        let err = unwrap_err(block_on(connect("usb://18d1:4ee7")));
-        assert!(matches!(err, ConnectError::UnsupportedScheme));
-    }
+    fn both_usb_backends_can_be_selected_in_one_build() {
+        use crate::transport::{nusb::Nusb, rusb::Rusb, UsbBackend};
 
-    #[cfg(not(feature = "_usb"))]
-    #[test]
-    fn connect_usb_serial_without_usb_feature_returns_unsupported_scheme() {
-        let err = unwrap_err(block_on(connect("usb://serial/ABC123")));
-        assert!(matches!(err, ConnectError::UnsupportedScheme));
+        // Compiling this is the assertion: two backends, one build,
+        // chosen per call site rather than per feature set.
+        fn takes_backend<B: UsbBackend>() {}
+        takes_backend::<Nusb>();
+        takes_backend::<Rusb>();
     }
 
     #[test]
@@ -300,7 +290,9 @@ mod tests {
 
             let port = listener.local_addr().unwrap().port();
             let uri = format!("tcp://127.0.0.1:{}", port);
-            let transport = connect(&uri).await.expect("connect to open port");
+            let transport = connect::<NoBackendChosen>(&uri)
+                .await
+                .expect("connect to open port");
             assert_matches_tcp_transport(transport);
             drop(listener);
         });
@@ -311,7 +303,10 @@ mod tests {
         block_on(async {
             let port = reserve_free_port().await;
             let uri = format!("tcp://127.0.0.1:{}", port);
-            let err = connect(&uri).await.err().expect("connect to closed port");
+            let err = connect::<NoBackendChosen>(&uri)
+                .await
+                .err()
+                .expect("connect to closed port");
             assert!(matches!(err, ConnectError::Tcp(_)));
         });
     }

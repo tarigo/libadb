@@ -156,6 +156,22 @@ mod inner {
         }
     }
 
+    /// The `nusb` backend: pure-Rust, async bulk transfers.
+    ///
+    /// Zero-sized marker for [`UsbBackend`](crate::transport::UsbBackend);
+    /// pass it where a backend is required, e.g.
+    /// `any::connect::<Nusb>("usb://")`.
+    pub struct Nusb;
+
+    impl crate::transport::UsbBackend for Nusb {
+        type Transport = UsbTransport;
+        type Error = UsbConnectError;
+
+        fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, UsbConnectError> {
+            connect_by_selector(selector)
+        }
+    }
+
     /// Enumerate USB devices, pick one matching `selector`, claim its ADB
     /// interface, and build a [`UsbTransport`].
     ///

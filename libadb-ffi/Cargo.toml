@@ -32,7 +32,8 @@ signature = { version = "2", default-features = false, features = ["alloc"] }
 
 # TCP support is always compiled in and runs on the crate's own
 # blocking executor — no async runtime is linked. USB backends are
-# opt-in and mutually exclusive, mirroring `libadb`.
+# opt-in and may both be enabled; the C ABI has a single
+# `adb_connect(uri)`, so it prefers `nusb` when both are on.
 [features]
 default = []
 nusb = ["libadb/nusb"]
