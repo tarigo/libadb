@@ -46,7 +46,7 @@ impl Splittable for NoUsb {
     }
 }
 
-impl crate::transport::UsbBackend for NoUsb {
+impl<R> crate::transport::UsbBackend<R> for NoUsb {
     type Transport = NoUsb;
     type Error = NoBackend;
 

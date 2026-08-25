@@ -47,7 +47,7 @@ type Usb = libadb::transport::rusb::Rusb;
 #[cfg(not(any(feature = "nusb", feature = "rusb")))]
 type Usb = libadb::transport::common::NoUsb;
 
-type ExampleTransport = AnyTransport<Rt, <Usb as libadb::UsbBackend>::Transport>;
+type ExampleTransport = AnyTransport<Rt, <Usb as libadb::UsbBackend<Rt>>::Transport>;
 use libadb::{Connection, Feature};
 
 #[cfg(feature = "tokio")]
