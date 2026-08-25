@@ -20,6 +20,7 @@ use crate::transport::Splittable;
 /// behind its own feature. Plain code spans rather than links on
 /// purpose: a doc build with only one runtime enabled cannot resolve
 /// the other.
+///
 /// Every method returns `impl Future + Send` rather than being an
 /// `async fn`, so generic callers keep the `Send` bound they need to
 /// spawn the resulting future.
@@ -61,10 +62,11 @@ impl core::error::Error for BlockingError {}
 ///
 /// The fallback for builds with no async runtime — `libadb-ffi` drives
 /// its transports on a blocking executor, where offloading would be
-/// pointless. Also what a `rusb` transport defaults to when no runtime
-/// feature is on.
+/// pointless. A `rusb` transport can name it the same way
+/// (`UsbTransport<Inline>`); nothing defaults to it.
 pub struct Inline;
 
+#[allow(clippy::manual_async_fn)]
 impl Runtime for Inline {
     type Tcp = NoTcp;
 
@@ -83,7 +85,9 @@ impl Runtime for Inline {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        core::future::ready(Ok(f()))
+        // Deferred like the other runtimes: a future nobody polls must
+        // not have run the closure.
+        async move { Ok(f()) }
     }
 }
 
@@ -123,9 +127,6 @@ impl Splittable for NoTcp {
 #[cfg(feature = "tokio")]
 pub struct Tokio;
 
-// `async fn` in a trait impl would drop the `Send` bound the trait
-// promises, and generic callers need it to spawn the future. Hence the
-// explicit `impl Future + Send` here.
 #[allow(clippy::manual_async_fn)]
 #[cfg(feature = "tokio")]
 impl Runtime for Tokio {
@@ -165,9 +166,6 @@ impl Runtime for Tokio {
 #[cfg(feature = "smol")]
 pub struct Smol;
 
-// `async fn` in a trait impl would drop the `Send` bound the trait
-// promises, and generic callers need it to spawn the future. Hence the
-// explicit `impl Future + Send` here.
 #[allow(clippy::manual_async_fn)]
 #[cfg(feature = "smol")]
 impl Runtime for Smol {
@@ -223,6 +221,19 @@ mod tests {
         let here = std::thread::current().id();
         let ran_on = block_on(Inline::run_blocking(std::thread::current)).unwrap();
         assert_eq!(ran_on.id(), here);
+    }
+
+    #[test]
+    fn inline_defers_the_closure_until_the_future_is_polled() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        let ran = std::sync::Arc::new(AtomicBool::new(false));
+        let fut = Inline::run_blocking({
+            let ran = ran.clone();
+            move || ran.store(true, Ordering::SeqCst)
+        });
+        assert!(!ran.load(Ordering::SeqCst), "ran before the first poll");
+        block_on(fut).unwrap();
+        assert!(ran.load(Ordering::SeqCst));
     }
 
     #[test]
