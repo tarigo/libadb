@@ -54,14 +54,17 @@ pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Err
     Ok(())
 }
 
+/// Send a packet as a header write followed by a payload write.
+///
+/// The split is required, not cosmetic: adbd reads the 24-byte header
+/// with an exact-size read, so on USB a single transfer carrying both
+/// overflows its endpoint and knocks the device off the bus.
 pub(crate) async fn send_pkt<T: Write>(
     t: &mut T,
     pkt: &Packet,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
-    let mut buf = BytesMut::with_capacity(MESSAGE_SIZE + pkt.data.len());
-    pkt.encode(&mut buf, checksum)?;
-    write_all(t, &buf).await
+    send_raw(t, pkt.command, pkt.arg0, pkt.arg1, &pkt.data, checksum).await
 }
 
 /// Rejects any packet whose announced payload exceeds `max_payload`.
@@ -236,6 +239,54 @@ mod tests {
         let mut buf = BytesMut::new();
         pkt.encode(&mut buf, Checksum::Compute).unwrap();
         buf.to_vec()
+    }
+
+    /// Records the size of every `write` it is handed.
+    #[derive(Default)]
+    struct WriteLog {
+        writes: Vec<usize>,
+    }
+
+    impl embedded_io::ErrorType for WriteLog {
+        type Error = MockErr;
+    }
+
+    impl Write for WriteLog {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, MockErr> {
+            self.writes.push(buf.len());
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), MockErr> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_packet_is_written_as_header_then_payload() {
+        // adbd reads the 24-byte header with an exact-size read, so on
+        // USB a single transfer carrying header + payload overflows its
+        // endpoint and drops the device off the bus.
+        let mut t = WriteLog::default();
+        let pkt = Packet::new(Command::Connect, 1, 2, &b"host::features=shell_v2\0"[..]);
+
+        block_on(send_pkt(&mut t, &pkt, Checksum::Compute)).unwrap();
+
+        assert_eq!(
+            t.writes,
+            std::vec![MESSAGE_SIZE, 24],
+            "header and payload must go out as separate writes",
+        );
+    }
+
+    #[test]
+    fn an_empty_packet_is_a_single_header_write() {
+        let mut t = WriteLog::default();
+        let pkt = Packet::close(1, 2);
+
+        block_on(send_pkt(&mut t, &pkt, Checksum::Compute)).unwrap();
+
+        assert_eq!(t.writes, std::vec![MESSAGE_SIZE]);
     }
 
     #[test]
