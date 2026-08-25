@@ -35,11 +35,13 @@ pub enum Error<E> {
     /// A channel buffered more unread data than
     /// [`ConnectionConfig::max_rx_per_channel`] allows.
     ///
-    /// Raised when the device keeps writing to a channel the application
-    /// is not draining. The connection is left intact but the offending
-    /// packet was dropped unacknowledged, so that channel now has a gap
-    /// in its byte stream and the device stalls on it — treat it as
-    /// fatal for that channel.
+    /// The last line of defence, not the usual brake: unread data now
+    /// holds back acknowledgements, so a device that respects flow
+    /// control stops on its own well before this. Reaching it means the
+    /// peer kept writing without its window being re-opened. The
+    /// connection is left intact but the offending packet was dropped
+    /// unacknowledged, so that channel now has a gap in its byte stream
+    /// — treat it as fatal for that channel.
     ///
     /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
     ChannelRxOverflow,

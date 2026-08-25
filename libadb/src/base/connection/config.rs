@@ -89,8 +89,12 @@ impl ConnectionConfig {
         self
     }
 
-    /// Cap on bytes buffered for a single channel that nobody is
+    /// Hard cap on bytes buffered for a single channel that nobody is
     /// currently reading.
+    ///
+    /// Backpressure normally keeps a channel well under this: see
+    /// [`rx_watermark`](Self::rx_watermark). Hitting the cap means the
+    /// device wrote past a window that was never re-opened.
     ///
     /// A fuse, not flow control. Crossing it drops the WRTE that did
     /// not fit and fails the call that observed it with
@@ -124,6 +128,34 @@ impl ConnectionConfig {
         self.max_rx_per_channel
     }
 
+    /// How much unread data a channel may hold before acknowledgements
+    /// start waiting for the application to read.
+    ///
+    /// Acknowledging an inbound write is what re-opens the sender's
+    /// window, so acknowledging on arrival lets a device keep writing to
+    /// a channel nobody reads. The ceiling comes from what was already
+    /// promised: the device was told it may send
+    /// [`initial_ack_bytes`](Self::initial_ack_bytes) before waiting, so
+    /// that is the natural bound on what may pile up — clamped to the
+    /// enforced per-channel cap, and never below `max_payload`, which a
+    /// single packet would otherwise trip.
+    ///
+    /// Only consulted without delayed-ack. With it, credit is returned
+    /// as bytes are read and the advertised budget is the bound.
+    pub const fn rx_watermark(&self) -> usize {
+        let want = if self.initial_ack_bytes as usize > self.max_payload as usize {
+            self.initial_ack_bytes as usize
+        } else {
+            self.max_payload as usize
+        };
+        let ceiling = self.rx_cap();
+        if want > ceiling {
+            ceiling
+        } else {
+            want
+        }
+    }
+
     /// Per-channel buffering cap actually enforced: never smaller than
     /// one full payload.
     pub(crate) const fn rx_cap(&self) -> usize {
@@ -131,6 +163,20 @@ impl ConnectionConfig {
             self.max_payload as usize
         } else {
             self.max_rx_per_channel
+        }
+    }
+
+    /// Delayed-ACK credit OPEN actually advertises:
+    /// [`initial_ack_bytes`](Self::initial_ack_bytes) clamped to
+    /// [`rx_cap`](Self::rx_cap). Advertising more would invite a
+    /// compliant device to overflow the buffer it was promised.
+    pub(crate) const fn advertised_ack_bytes(&self) -> u32 {
+        let cap = self.rx_cap();
+        if self.initial_ack_bytes as usize > cap {
+            // `cap` fits: it is below a u32 here.
+            cap as u32
+        } else {
+            self.initial_ack_bytes
         }
     }
 }
@@ -160,6 +206,17 @@ mod tests {
         assert_eq!(c.max_payload(), 8 * 1024);
         assert_eq!(c.initial_ack_bytes(), 32 * 1024);
         assert_eq!(c.max_rx_per_channel(), 64 * 1024);
+    }
+
+    #[test]
+    fn advertised_credit_never_exceeds_the_enforced_cap() {
+        let c = ConnectionConfig::new()
+            .with_initial_ack_bytes(32 * 1024 * 1024)
+            .with_max_rx_per_channel(1024 * 1024);
+        assert_eq!(c.advertised_ack_bytes(), 1024 * 1024);
+
+        let unbounded = ConnectionConfig::new().with_initial_ack_bytes(32 * 1024 * 1024);
+        assert_eq!(unbounded.advertised_ack_bytes(), 32 * 1024 * 1024);
     }
 
     #[test]

@@ -41,12 +41,14 @@ pub struct Connection<
     pub(crate) desync: DesyncFlag,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
     channels: &mut [Option<ChannelSlot>],
     delayed_ack: bool,
     rx_cap: usize,
+    watermark: usize,
     checksum: Checksum,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
@@ -54,7 +56,7 @@ async fn dispatch_to<T: Write>(
         local_id,
         remote_id,
         len,
-    } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap)?
+    } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark)?
     {
         send_okay_to(
             transport,
@@ -259,7 +261,7 @@ where
 
         let local_id = self.next_local_id();
         let open_arg1 = if self.delayed_ack {
-            self.config.initial_ack_bytes()
+            self.config.advertised_ack_bytes()
         } else {
             0
         };
@@ -321,26 +323,46 @@ where
     ///
     /// If data is already buffered, returns immediately. Otherwise blocks until
     /// a WRTE message arrives for this channel (buffering messages for others).
+    ///
+    /// Reading is what re-opens the sender's window. With delayed ACK,
+    /// credit is returned for exactly the bytes taken here, and what
+    /// was advertised in OPEN bounds the rest. Without it, an inbound
+    /// write is still acknowledged on arrival while the channel holds
+    /// less than [`ConnectionConfig::rx_watermark`] unread bytes; past
+    /// that, the acknowledgement waits for the read. Either way a
+    /// channel nobody reads stops the device writing to it rather than
+    /// growing without bound.
+    ///
+    /// [`ConnectionConfig::rx_watermark`]: crate::ConnectionConfig::rx_watermark
     pub async fn read_channel(
         &mut self,
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        {
+        let delayed_ack = self.delayed_ack;
+        let watermark = self.config.rx_watermark();
+        let ack = {
             let slot = self.slot_mut(ch)?;
             if !slot.rx_buf.is_empty() {
                 let n = buf.len().min(slot.rx_buf.len());
                 buf[..n].copy_from_slice(&slot.rx_buf[..n]);
                 let _ = slot.rx_buf.split_to(n);
-                return Ok(n);
-            }
-            if slot.is_closed() {
+                Some((n, slot.consume(n, delayed_ack, watermark)))
+            } else if slot.is_closed() {
                 return Err(Error::ChannelClosed);
+            } else {
+                None
             }
+        };
+        if let Some((n, ack)) = ack {
+            if let Some((local_id, remote_id, len)) = ack {
+                self.send_okay(local_id, remote_id, len).await?;
+            }
+            return Ok(n);
         }
 
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let (local_id, _) = self.channel_ids(ch)?;
         let rx_cap = self.config.rx_cap();
 
         loop {
@@ -352,15 +374,14 @@ where
             .await?;
             match pkt.command {
                 Command::Write if pkt.arg1 == local_id => {
-                    let payload_len = pkt.data.len();
-                    self.send_okay(local_id, remote_id, payload_len).await?;
-
                     let n = buf.len().min(pkt.data.len());
                     buf[..n].copy_from_slice(&pkt.data[..n]);
-                    if n < pkt.data.len() {
-                        if let Some(slot) = self.channels[ch.slot].as_mut() {
-                            slot.push_rx(&pkt.data[n..], rx_cap)?;
-                        }
+                    let ack = match self.channels[ch.slot].as_mut() {
+                        Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
+                        None => None,
+                    };
+                    if let Some((local_id, remote_id, len)) = ack {
+                        self.send_okay(local_id, remote_id, len).await?;
                     }
                     return Ok(n);
                 }
@@ -480,22 +501,33 @@ where
     {
         self.desync.check()?;
         let cancel_safe = self.transport.read_cancel_safe();
-        {
+        let delayed_ack_now = self.delayed_ack;
+        let watermark_now = self.config.rx_watermark();
+        let buffered = {
             let slot = self.slot_mut(ch)?;
             if !slot.rx_buf.is_empty() {
                 let n = buf.len().min(slot.rx_buf.len());
                 buf[..n].copy_from_slice(&slot.rx_buf[..n]);
                 let _ = slot.rx_buf.split_to(n);
-                return Ok(SelectResult::Data(n));
-            }
-            if slot.is_closed() {
+                let ack = slot.consume(n, delayed_ack_now, watermark_now);
+                Some((n, ack))
+            } else if slot.is_closed() {
                 return Err(Error::ChannelClosed);
+            } else {
+                None
             }
+        };
+        if let Some((n, ack)) = buffered {
+            if let Some((local_id, remote_id, len)) = ack {
+                self.send_okay(local_id, remote_id, len).await?;
+            }
+            return Ok(SelectResult::Data(n));
         }
 
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let (local_id, _) = self.channel_ids(ch)?;
         let delayed_ack = self.delayed_ack;
         let rx_cap = self.config.rx_cap();
+        let watermark = self.config.rx_watermark();
         let checksum = self.checksum();
 
         let mut interrupt = core::pin::pin!(interrupt);
@@ -504,24 +536,25 @@ where
             if let Some(pkt) = Packet::decode(&mut self.recv_buf, self.config.max_payload())? {
                 match pkt.command {
                     Command::Write if pkt.arg1 == local_id => {
-                        let payload_len = pkt.data.len();
-                        send_okay_to(
-                            &mut self.transport,
-                            &self.desync,
-                            delayed_ack,
-                            local_id,
-                            remote_id,
-                            payload_len,
-                            checksum,
-                        )
-                        .await?;
-
                         let n = buf.len().min(pkt.data.len());
                         buf[..n].copy_from_slice(&pkt.data[..n]);
-                        if n < pkt.data.len() {
-                            if let Some(slot) = self.channels[ch.slot].as_mut() {
-                                slot.push_rx(&pkt.data[n..], rx_cap)?;
+                        let ack = match self.channels[ch.slot].as_mut() {
+                            Some(slot) => {
+                                slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?
                             }
+                            None => None,
+                        };
+                        if let Some((local_id, remote_id, len)) = ack {
+                            send_okay_to(
+                                &mut self.transport,
+                                &self.desync,
+                                delayed_ack,
+                                local_id,
+                                remote_id,
+                                len,
+                                checksum,
+                            )
+                            .await?;
                         }
                         return Ok(SelectResult::Data(n));
                     }
@@ -538,6 +571,7 @@ where
                             &mut self.channels,
                             delayed_ack,
                             rx_cap,
+                            watermark,
                             checksum,
                             pkt,
                         )
@@ -648,6 +682,7 @@ where
     }
 
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
+        let watermark = self.config.rx_watermark();
         let delayed_ack = self.delayed_ack;
         let rx_cap = self.config.rx_cap();
         let checksum = self.checksum();
@@ -657,6 +692,7 @@ where
             &mut self.channels,
             delayed_ack,
             rx_cap,
+            watermark,
             checksum,
             pkt,
         )

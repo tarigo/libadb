@@ -1,10 +1,14 @@
 //! What a dropped write leaves behind on the wire.
 
+use alloc::vec;
 use core::future::Future;
 use core::task::Poll;
 
 use super::*;
-use crate::base::mock::{abandon, connected_for_select, connected_with_channel, now};
+use crate::base::mock::{
+    abandon, connected_for_select, connected_with_channel, now, two_channels_classic,
+    two_channels_delayed_ack, wrte,
+};
 
 #[test]
 fn a_write_cancelled_between_header_and_payload_desyncs_the_connection() {
@@ -123,4 +127,118 @@ fn an_interrupt_that_is_already_due_wins_on_either_transport() {
             "lossy={lossy}: expected the interrupt, got {out:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Acknowledging what was consumed, not what arrived
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_write_nobody_has_read_is_not_acknowledged() {
+    // The device writes to channel B, then to A. Reading A dispatches
+    // B's packet into its buffer along the way.
+    let (mut conn, a, _b) =
+        two_channels_delayed_ack(64 * 1024, &[wrte(2, b"for-b"), wrte(1, b"for-a")]);
+
+    let mut buf = [0u8; 32];
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"for-a");
+
+    assert_eq!(
+        conn.transport().acks_for(1),
+        vec![5],
+        "the channel that was read is acknowledged"
+    );
+    assert!(
+        conn.transport().acks_for(2).is_empty(),
+        "the channel nobody read must not have its credit returned"
+    );
+}
+
+#[test]
+fn reading_a_buffered_write_acknowledges_it() {
+    let (mut conn, a, b) =
+        two_channels_delayed_ack(64 * 1024, &[wrte(2, b"for-b"), wrte(1, b"for-a")]);
+
+    let mut buf = [0u8; 32];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+    let n = now(conn.read_channel(b, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"for-b");
+
+    assert_eq!(
+        conn.transport().acks_for(2),
+        vec![5],
+        "credit is returned once the application takes the bytes"
+    );
+}
+
+#[test]
+fn a_partial_read_acknowledges_only_what_was_taken() {
+    let (mut conn, a, _b) = two_channels_delayed_ack(64 * 1024, &[wrte(1, b"0123456789")]);
+
+    let mut buf = [0u8; 4];
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(n, 4);
+    assert_eq!(conn.transport().acks_for(1), vec![4]);
+
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(n, 4);
+    assert_eq!(conn.transport().acks_for(1), vec![4, 4]);
+}
+
+#[test]
+fn a_classic_channel_is_acknowledged_until_the_watermark() {
+    // Watermark lands at 1 KiB: max_payload and the advertised budget
+    // are both 1 KiB, and the hard cap is above both.
+    let config = ConnectionConfig::new()
+        .with_max_payload(1024)
+        .with_initial_ack_bytes(1024)
+        .with_max_rx_per_channel(8 * 1024);
+    assert_eq!(config.rx_watermark(), 1024);
+
+    let (mut conn, a, _b) = two_channels_classic(
+        config,
+        &[
+            wrte(2, &[b'x'; 700]),
+            wrte(2, &[b'y'; 700]),
+            wrte(1, b"done"),
+        ],
+    );
+
+    let mut buf = [0u8; 16];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+
+    assert_eq!(
+        conn.transport().acks_for(2).len(),
+        1,
+        "the first write fits under the watermark and is acknowledged; \
+         the second takes the channel over it and waits for a reader"
+    );
+}
+
+#[test]
+fn reading_past_the_watermark_releases_the_held_ack() {
+    let config = ConnectionConfig::new()
+        .with_max_payload(1024)
+        .with_initial_ack_bytes(1024)
+        .with_max_rx_per_channel(8 * 1024);
+    let (mut conn, a, b) = two_channels_classic(
+        config,
+        &[
+            wrte(2, &[b'x'; 700]),
+            wrte(2, &[b'y'; 700]),
+            wrte(1, b"done"),
+        ],
+    );
+
+    let mut buf = [0u8; 16];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+    let mut big = [0u8; 1400];
+    now(conn.read_channel(b, &mut big)).unwrap();
+
+    assert_eq!(
+        conn.transport().acks_for(2).len(),
+        2,
+        "draining the channel lets the held acknowledgement out"
+    );
 }
