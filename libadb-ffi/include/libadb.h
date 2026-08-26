@@ -22,7 +22,9 @@ extern "C" {
 #endif
 
 typedef struct adb_connection adb_connection_t;
-typedef uint32_t adb_channel_id_t;
+/* 64-bit: the implementation packs the protocol id and a table slot
+ * into one value and writes all eight bytes through out-pointers. */
+typedef uint64_t adb_channel_id_t;
 
 typedef enum {
     ADB_OK                  = 0,
@@ -35,6 +37,9 @@ typedef enum {
     ADB_ERR_CHANNEL_CLOSED  = 7,
     ADB_ERR_NO_FREE_CHANNELS = 8,
     ADB_ERR_DESYNCHRONIZED  = 9,
+    /* The device's reverse rule service refused the request; the
+     * device's own message is in adb_last_error(). */
+    ADB_ERR_REVERSE         = 10,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
 
@@ -237,6 +242,82 @@ adb_status_t adb_write_channel(
 adb_status_t adb_close_channel(
     adb_connection_t *conn,
     adb_channel_id_t  id);
+
+/* ---- reverse forwards ---------------------------------------------- */
+
+/*
+ * Establish a reverse forward: the device listens on device_spec and
+ * opens a channel toward the host per connection, with host_spec as the
+ * destination. Receive those channels with adb_accept_channel().
+ *
+ * The service reply is written to (data, data_cap, out_data_len) with
+ * the same truncate-and-report-full-length convention as
+ * adb_connection_features(): for a "tcp:" device_spec it is the bound
+ * port in decimal ("tcp:0" lets the device choose). Either data-side
+ * pointer may be NULL.
+ */
+adb_status_t adb_reverse_forward(
+    adb_connection_t *conn,
+    const char       *device_spec,
+    const char       *host_spec,
+    uint8_t          *data,
+    size_t            data_cap,
+    size_t           *out_data_len);
+
+/* Remove the reverse rule listening on device_spec. */
+adb_status_t adb_reverse_remove(
+    adb_connection_t *conn,
+    const char       *device_spec);
+
+/* Remove every reverse rule this connection established. */
+adb_status_t adb_reverse_remove_all(adb_connection_t *conn);
+
+/*
+ * List the device's reverse rules as "<serial> <remote> <local>\n"
+ * lines into (buf, buf_len, out_len), same convention as
+ * adb_connection_features().
+ */
+adb_status_t adb_reverse_list(
+    adb_connection_t *conn,
+    uint8_t          *buf,
+    size_t            buf_len,
+    size_t           *out_len);
+
+/*
+ * Report the staged device-initiated channel (reverse traffic), waiting
+ * for one to arrive if none is staged, and copy its destination into
+ * (dest, dest_cap, out_dest_len), same convention as
+ * adb_connection_features(). The request stays staged on the handle
+ * until adb_incoming_accept() or adb_incoming_reject() consumes exactly
+ * it — repeated calls report the same request again, so the
+ * truncate-and-report convention works here: probe with (NULL, 0,
+ * &len), allocate, call again for the bytes.
+ *
+ * With nothing staged this blocks until a channel arrives, as
+ * adb_read_channel() blocks for data, and holds the read lock while
+ * waiting. The staged request stays locked for the whole call, so
+ * concurrent reports and verdicts serialize against it rather than
+ * racing for the queue. There is no way to interrupt it yet; in
+ * particular the handle must stay alive until the call returns —
+ * adb_connection_free() from another thread while a call is blocked is
+ * undefined behaviour, not an interruption mechanism.
+ */
+adb_status_t adb_accept_channel(
+    adb_connection_t *conn,
+    uint8_t          *dest,
+    size_t            dest_cap,
+    size_t           *out_dest_len);
+
+/*
+ * Accept the channel staged by adb_accept_channel(), returning its id
+ * through out_id.
+ */
+adb_status_t adb_incoming_accept(
+    adb_connection_t *conn,
+    adb_channel_id_t *out_id);
+
+/* Reject the channel staged by adb_accept_channel(). */
+adb_status_t adb_incoming_reject(adb_connection_t *conn);
 
 /*
  * Thread-local description of the last error, or NULL if none.
