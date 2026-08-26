@@ -172,7 +172,7 @@ impl SharedMock {
         self.lock().feed(pkt);
     }
 
-    fn new(mock: Mock) -> Self {
+    pub(crate) fn new(mock: Mock) -> Self {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(mock)))
     }
 

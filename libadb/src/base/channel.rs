@@ -82,6 +82,14 @@ pub(crate) struct PendingOpen {
     pub destination: Bytes,
 }
 
+/// Does a CLSE with these args close the channel `(local_id,
+/// remote_id)`? The ordinary form names our id in `arg1`; a
+/// zero-`arg1` withdrawal whose OPEN we already accepted — it crossed
+/// our READY in flight — names the device's id in `arg0`.
+pub(crate) fn clse_closes(arg0: u32, arg1: u32, local_id: u32, remote_id: u32) -> bool {
+    arg1 == local_id || (arg1 == 0 && arg0 == remote_id)
+}
+
 /// `rx_cap` bounds how much unread data a single channel may accumulate;
 /// a WRTE that would push it past the cap fails with
 /// [`Error::ChannelRxOverflow`] instead of growing the buffer.
@@ -100,6 +108,19 @@ pub(crate) fn dispatch_packet<E>(
         });
     }
     if pkt.command == Command::Close && pkt.arg1 == 0 {
+        // The withdrawal may have crossed our READY in flight: the
+        // request is then no longer queued but an accepted slot, and
+        // has to close like any remote CLSE — the cancel handlers only
+        // reach requests still awaiting a verdict.
+        if pkt.arg0 != 0 {
+            for (idx, slot_opt) in channels.iter_mut().enumerate() {
+                let Some(slot) = slot_opt else { continue };
+                if slot.remote_id == pkt.arg0 {
+                    slot.apply_close();
+                    return Ok(DispatchOutcome::SlotClosed { idx });
+                }
+            }
+        }
         return Ok(DispatchOutcome::CancelPendingOpen {
             remote_id: pkt.arg0,
         });
