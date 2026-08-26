@@ -159,6 +159,7 @@ where
             config,
             device_banner,
             local_id_counter: 1,
+            incoming: alloc::collections::VecDeque::new(),
             delayed_ack,
             recv_buf,
             desync,

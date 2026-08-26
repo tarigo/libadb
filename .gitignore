@@ -5,3 +5,4 @@ fuzz/target
 fuzz/corpus
 fuzz/artifacts
 fuzz/coverage
+rustc-ice-*.txt

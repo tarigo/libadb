@@ -118,13 +118,13 @@ pub mod uri;
 pub use base::{auth, channel, connection, device_banner, error, protocol};
 
 // Core types used in every non-trivial caller.
-pub use base::connection::{Connection, ConnectionConfig};
+pub use base::connection::{Connection, ConnectionConfig, Incoming};
 pub use base::error::{Error, ProtocolError};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
 pub use transport::Splittable;
 
 #[cfg(feature = "split")]
-pub use split::{Reader, Writer};
+pub use split::{Reader, SplitIncoming, Writer};
 
 #[cfg(feature = "tokio")]
 pub use transport::tcp::TokioTcp;

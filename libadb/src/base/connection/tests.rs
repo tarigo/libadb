@@ -242,3 +242,156 @@ fn reading_past_the_watermark_releases_the_held_ack() {
         "draining the channel lets the held acknowledgement out"
     );
 }
+
+mod incoming {
+    use super::*;
+    use crate::base::mock::{cnxn_with, now, wrte, Mock, NoAuth};
+
+    fn connected(host: &'static [u8], device: &str) -> Connection<Mock> {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with(device));
+        now(Connection::<_>::connect_with_raw_banner(mock, NoAuth, host)).unwrap()
+    }
+
+    fn open_pkt(remote_id: u32, credit: u32, dest: &[u8]) -> Packet {
+        Packet::new(Command::Open, remote_id, credit, dest.to_vec())
+    }
+
+    #[test]
+    fn a_device_open_is_queued_accepted_and_serves_data() {
+        let mut conn = connected(
+            b"host::features=shell_v2,delayed_ack",
+            "shell_v2,delayed_ack",
+        );
+        conn.transport.feed(&open_pkt(77, 4096, b"tcp:9090\0"));
+
+        let incoming = now(conn.accept_incoming()).unwrap();
+        assert_eq!(incoming.destination(), b"tcp:9090\0");
+        let ch = now(incoming.accept()).unwrap();
+
+        // READY named our id and carried our receive credit.
+        let (cmd, local, remote, payload) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Ready);
+        assert_eq!(remote, 77);
+        assert_ne!(local, 0);
+        assert_eq!(payload.len(), 4);
+
+        // Their WRTE reaches the accepted channel...
+        conn.transport.feed(&wrte(local, b"ping"));
+        let mut buf = [0u8; 16];
+        let n = now(conn.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        // ...and our write spends the budget the OPEN granted.
+        now(conn.write_channel(ch, b"pong")).unwrap();
+        let (cmd, l, r, payload) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Write);
+        assert_eq!((l, r), (local, 77));
+        assert_eq!(payload, b"pong");
+    }
+
+    #[test]
+    fn a_rejected_open_answers_clse_with_no_local_id() {
+        let mut conn = connected(b"host::features=shell_v2", "shell_v2");
+        conn.transport.feed(&open_pkt(88, 0, b"tcp:1\0"));
+
+        let incoming = now(conn.accept_incoming()).unwrap();
+        now(incoming.reject()).unwrap();
+
+        let (cmd, local, remote, _) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Close);
+        assert_eq!((local, remote), (0, 88));
+    }
+
+    #[test]
+    fn a_dropped_verdict_returns_the_request_to_the_queue() {
+        let mut conn = connected(b"host::features=shell_v2", "shell_v2");
+        conn.transport.feed(&open_pkt(99, 0, b"tcp:2\0"));
+
+        let incoming = now(conn.accept_incoming()).unwrap();
+        drop(incoming);
+
+        let incoming = conn.try_accept_incoming().expect("request lost on drop");
+        assert_eq!(incoming.destination(), b"tcp:2\0");
+    }
+
+    #[test]
+    fn a_full_queue_refuses_new_opens_on_arrival() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2"));
+        let mut conn = now(Connection::<_, 2, 64, 24>::connect_with_raw_banner(
+            mock,
+            NoAuth,
+            b"host::features=shell_v2",
+        ))
+        .unwrap();
+
+        now(conn.dispatch(open_pkt(1, 0, b"tcp:1\0"))).unwrap();
+        now(conn.dispatch(open_pkt(2, 0, b"tcp:2\0"))).unwrap();
+        now(conn.dispatch(open_pkt(3, 0, b"tcp:3\0"))).unwrap();
+
+        let (cmd, local, remote, _) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Close, "the third OPEN must be refused");
+        assert_eq!((local, remote), (0, 3));
+
+        // Undecided handles bounce back on drop, so resolve them.
+        now(conn.try_accept_incoming().unwrap().reject()).unwrap();
+        now(conn.try_accept_incoming().unwrap().reject()).unwrap();
+        assert!(conn.try_accept_incoming().is_none());
+    }
+
+    #[test]
+    fn a_device_cancel_removes_the_pending_request() {
+        let mut conn = connected(b"host::features=shell_v2", "shell_v2");
+        now(conn.dispatch(open_pkt(55, 0, b"tcp:5\0"))).unwrap();
+        now(conn.dispatch(Packet::close(55, 0))).unwrap();
+        assert!(conn.try_accept_incoming().is_none());
+    }
+
+    #[test]
+    fn the_ready_credit_is_clamped_to_the_receive_cap() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2,delayed_ack"));
+        let config = ConnectionConfig::new()
+            .with_initial_ack_bytes(32 * 1024 * 1024)
+            .with_max_rx_per_channel(1024 * 1024);
+        let mut conn = now(Connection::<_>::connect_with_raw_banner_and_config(
+            mock,
+            NoAuth,
+            b"host::features=shell_v2,delayed_ack",
+            config,
+        ))
+        .unwrap();
+
+        now(conn.dispatch(open_pkt(7, 0, b"tcp:7\0"))).unwrap();
+        let incoming = conn.try_accept_incoming().unwrap();
+        now(incoming.accept()).unwrap();
+
+        let (cmd, _, _, payload) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Ready);
+        assert_eq!(payload, (1024u32 * 1024).to_le_bytes());
+    }
+
+    #[test]
+    fn accept_with_no_free_slot_refuses_and_reports() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2"));
+        mock.feed(&crate::base::mock::okay(1));
+        let mut conn = now(Connection::<_, 1, 64, 24>::connect_with_raw_banner(
+            mock,
+            NoAuth,
+            b"host::features=shell_v2",
+        ))
+        .unwrap();
+        let _busy = now(conn.open_channel(b"shell:\0")).unwrap();
+
+        now(conn.dispatch(open_pkt(9, 0, b"tcp:9\0"))).unwrap();
+        let incoming = conn.try_accept_incoming().unwrap();
+        let err = now(incoming.accept()).unwrap_err();
+        assert!(matches!(err, Error::NoFreeChannels), "got {err:?}");
+
+        let (cmd, local, remote, _) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Close);
+        assert_eq!((local, remote), (0, 9));
+    }
+}

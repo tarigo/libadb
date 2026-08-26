@@ -140,9 +140,11 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
 ## Limitations
 
-- Device-initiated `OPEN` is not handled: reverse forwards
-  (`adb reverse`) and anything else the device opens toward the host
-  are not served. Channels are host-opened only.
+- Device-initiated `OPEN` is accepted through an explicit queue:
+  `accept_incoming()` hands each request over for a verdict (READY on
+  accept, CLSE on reject; a full queue refuses on arrival). What is
+  still missing is the `reverse:` rule service — establishing and
+  listing reverse forwards from this side — which is next in line.
 - With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
   as AOSP's adbd always does; the operation that received a creditless
   one fails with `ShortReadyPayload` rather than having a budget

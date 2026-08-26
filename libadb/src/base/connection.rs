@@ -4,8 +4,11 @@ use core::task::Poll;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
+use alloc::collections::VecDeque;
+
 use super::channel::{
-    channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, DispatchOutcome, SelectResult,
+    channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
+    DispatchOutcome, PendingOpen, SelectResult,
 };
 use super::device_banner::DeviceBanner;
 use super::error::Error;
@@ -39,6 +42,119 @@ pub struct Connection<
     delayed_ack: bool,
     recv_buf: BytesMut,
     pub(crate) desync: DesyncFlag,
+    /// Device-initiated OPENs awaiting [`accept_incoming`]. Bounded by
+    /// the channel table size; overflow is refused with CLSE on
+    /// arrival.
+    ///
+    /// [`accept_incoming`]: Self::accept_incoming
+    incoming: VecDeque<PendingOpen>,
+}
+
+/// A device-initiated channel awaiting a verdict.
+///
+/// Borrow of the connection: decide with [`accept`](Self::accept) or
+/// [`reject`](Self::reject). Dropping it undecided puts the request
+/// back at the head of the queue.
+pub struct Incoming<'c, T, const MC: usize, const MP: usize, const MF: usize>
+where
+    T: Read + Write,
+{
+    conn: &'c mut Connection<T, MC, MP, MF>,
+    pending: Option<PendingOpen>,
+}
+
+impl<T, const MC: usize, const MP: usize, const MF: usize> Incoming<'_, T, MC, MP, MF>
+where
+    T: Read + Write,
+{
+    /// The destination the device asked for, e.g. `tcp:8080\0`.
+    pub fn destination(&self) -> &[u8] {
+        &self.pending.as_ref().expect("undecided").destination
+    }
+
+    /// Take the channel: allocates a slot, answers READY (carrying our
+    /// receive credit when delayed ack is on) and returns the channel,
+    /// ready for [`read_channel`](Connection::read_channel) and
+    /// [`write_channel`](Connection::write_channel).
+    ///
+    /// With every slot in use the request is refused with CLSE and
+    /// [`Error::NoFreeChannels`] comes back.
+    pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
+        let pending = self.pending.take().expect("undecided");
+        let conn = &mut *self.conn;
+        let checksum = conn.checksum();
+
+        let Some(slot_idx) = conn.channels.iter().position(|s| s.is_none()) else {
+            send_pkt(
+                &mut conn.transport,
+                &conn.desync,
+                &Packet::close(0, pending.remote_id),
+                checksum,
+            )
+            .await?;
+            return Err(Error::NoFreeChannels);
+        };
+
+        let local_id = conn.next_local_id();
+        let mut slot = ChannelSlot::new(local_id);
+        slot.remote_id = pending.remote_id;
+        slot.state = ChannelState::Open;
+        if conn.delayed_ack {
+            // OPEN's arg1 is the device's receive credit — our budget.
+            slot.send_budget = i64::from(pending.credit);
+        }
+        conn.channels[slot_idx] = Some(slot);
+
+        let credit_bytes;
+        let payload: &[u8] = if conn.delayed_ack {
+            credit_bytes = conn.config.advertised_ack_bytes().to_le_bytes();
+            &credit_bytes
+        } else {
+            &[]
+        };
+        send_pkt(
+            &mut conn.transport,
+            &conn.desync,
+            &Packet::new(
+                Command::Ready,
+                local_id,
+                pending.remote_id,
+                payload.to_vec(),
+            ),
+            checksum,
+        )
+        .await?;
+
+        Ok(ChannelId {
+            slot: slot_idx,
+            local_id,
+        })
+    }
+
+    /// Refuse the channel: answers CLSE and frees nothing, since
+    /// nothing was allocated.
+    pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
+        let pending = self.pending.take().expect("undecided");
+        let checksum = self.conn.checksum();
+        send_pkt(
+            &mut self.conn.transport,
+            &self.conn.desync,
+            &Packet::close(0, pending.remote_id),
+            checksum,
+        )
+        .await
+    }
+}
+
+impl<T, const MC: usize, const MP: usize, const MF: usize> Drop for Incoming<'_, T, MC, MP, MF>
+where
+    T: Read + Write,
+{
+    fn drop(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.conn.incoming.push_front(pending);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -46,28 +162,51 @@ async fn dispatch_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
     channels: &mut [Option<ChannelSlot>],
+    incoming: &mut VecDeque<PendingOpen>,
     delayed_ack: bool,
     rx_cap: usize,
     watermark: usize,
     checksum: Checksum,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
-    if let DispatchOutcome::AckWrite {
-        local_id,
-        remote_id,
-        len,
-    } = dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark)?
-    {
-        send_okay_to(
-            transport,
-            desync,
-            delayed_ack,
+    match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark)? {
+        DispatchOutcome::AckWrite {
             local_id,
             remote_id,
             len,
-            checksum,
-        )
-        .await?;
+        } => {
+            send_okay_to(
+                transport,
+                desync,
+                delayed_ack,
+                local_id,
+                remote_id,
+                len,
+                checksum,
+            )
+            .await?;
+        }
+        DispatchOutcome::IncomingOpen {
+            remote_id,
+            credit,
+            destination,
+        } => {
+            // The queue is bounded by the channel table: past that, an
+            // OPEN storm is refused on arrival rather than remembered.
+            if incoming.len() >= channels.len() {
+                send_pkt(transport, desync, &Packet::close(0, remote_id), checksum).await?;
+            } else {
+                incoming.push_back(PendingOpen {
+                    remote_id,
+                    credit,
+                    destination,
+                });
+            }
+        }
+        DispatchOutcome::CancelPendingOpen { remote_id } => {
+            incoming.retain(|p| p.remote_id != remote_id);
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -209,6 +348,7 @@ where
             device_banner: self.device_banner,
             local_id_counter: AtomicU32::new(self.local_id_counter),
             desync: self.desync,
+            incoming: std::sync::Mutex::new(self.incoming),
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
@@ -465,6 +605,54 @@ where
         Ok(())
     }
 
+    /// Wait for a device-initiated channel (`adb reverse` traffic and
+    /// the like) and hand it over for a verdict.
+    ///
+    /// Packets for other channels keep being dispatched while waiting,
+    /// exactly as in [`read_channel`](Self::read_channel). The returned
+    /// [`Incoming`] borrows the connection until [`Incoming::accept`]
+    /// or [`Incoming::reject`] resolves it; dropping it instead puts
+    /// the request back at the head of the queue, so cancelling this
+    /// future loses nothing.
+    ///
+    /// Pending requests are bounded by the channel table size: past
+    /// that, new OPENs are refused with CLSE on arrival.
+    pub async fn accept_incoming(
+        &mut self,
+    ) -> Result<
+        Incoming<'_, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+        Error<<T as ErrorType>::Error>,
+    > {
+        self.desync.check()?;
+        loop {
+            if let Some(pending) = self.incoming.pop_front() {
+                return Ok(Incoming {
+                    conn: self,
+                    pending: Some(pending),
+                });
+            }
+            let pkt = recv_pkt(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+            )
+            .await?;
+            self.dispatch(pkt).await?;
+        }
+    }
+
+    /// [`accept_incoming`](Self::accept_incoming) without waiting:
+    /// takes a request that already arrived, if any.
+    pub fn try_accept_incoming(
+        &mut self,
+    ) -> Option<Incoming<'_, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>> {
+        let pending = self.incoming.pop_front()?;
+        Some(Incoming {
+            conn: self,
+            pending: Some(pending),
+        })
+    }
+
     /// Close a channel.
     pub async fn close_channel(
         &mut self,
@@ -577,6 +765,7 @@ where
                             &mut self.transport,
                             &self.desync,
                             &mut self.channels,
+                            &mut self.incoming,
                             delayed_ack,
                             rx_cap,
                             watermark,
@@ -698,6 +887,7 @@ where
             &mut self.transport,
             &self.desync,
             &mut self.channels,
+            &mut self.incoming,
             delayed_ack,
             rx_cap,
             watermark,
