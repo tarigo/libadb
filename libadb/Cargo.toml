@@ -86,3 +86,13 @@ smol = "2"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 signature = "2"
+
+# These two bridge a local TCP socket, which the other examples do not;
+# rather than carry a smol copy of that plumbing they stay tokio-only.
+[[example]]
+name = "forward"
+required-features = ["tokio"]
+
+[[example]]
+name = "reverse"
+required-features = ["tokio"]
