@@ -300,6 +300,51 @@ async fn sync_fail_response_surfaces_device_message() {
 }
 
 rt_test! {
+async fn sync_fail_longer_than_the_buffer_is_truncated_not_masked() {
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"sync:\0").await;
+
+        ch.expect_write_ack().await;
+
+        let long = [b'x'; 600];
+        ch.send_write(&sync_msg(b"FAIL", 600, &long)).await;
+        ch.expect_ack().await;
+
+        // The follow-up request only parses right if the parser is
+        // positioned after the whole 600-byte body.
+        expect_sync_req(&mut ch, b"STAT", b"/ok").await;
+        let mut body = [0u8; 16];
+        body[0..4].copy_from_slice(b"STAT");
+        body[4..8].copy_from_slice(&0o100644u32.to_le_bytes());
+        body[8..12].copy_from_slice(&7u32.to_le_bytes());
+        body[12..16].copy_from_slice(&1_700_000_000u32.to_le_bytes());
+        ch.send_write(&body).await;
+        ch.expect_ack().await;
+
+        expect_sync_quit(&mut ch).await;
+    })
+    .await;
+
+    let mut buf = [0u8; 256];
+    let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+    let err = sync.stat("/gone").await.unwrap_err();
+    let Error::Sync(SyncError::Failed(msg)) = err else {
+        panic!("expected Sync(Failed), got {err:?}");
+    };
+    assert_eq!(msg.len(), 256, "kept exactly what the buffer holds");
+    assert!(msg.iter().all(|&b| b == b'x'));
+
+    // The overflow was drained, not left in the stream: the next
+    // response-reading operation parses from a clean position.
+    let st = sync.stat("/ok").await.unwrap();
+    assert_eq!(st.size, 7);
+
+    sync.quit().await.unwrap();
+    rt::join(device).await;
+}
+}
+
+rt_test! {
 async fn sync_quit_sends_quit_then_closes_channel() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"sync:\0").await;
