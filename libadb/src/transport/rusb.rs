@@ -1,20 +1,22 @@
-/// ADB over USB transport (libusb / `rusb` backend).
-///
-/// Functional counterpart of `crate::transport::nusb` but built on the
-/// blocking `rusb`/libusb bindings. Both features may be enabled at
-/// once; the `Rusb` marker selects this backend at a call site.
-///
-/// Bulk transfers block the thread they run on — a runtime pool
-/// thread, or the caller itself under the `Inline` runtime and under
-/// `Tokio` when no Tokio runtime is active (its `run_blocking` then
-/// deliberately runs inline) — with no timeout: a read returns when the device answers or detaches, and
-/// cannot be cancelled from the host side. Slicing the wait into
-/// timeouts is not an option (`rusb` discards the bytes a transfer had
-/// already received when it reports `Timeout`), and `nusb` is no
-/// escape hatch for cancellation either — aborting an in-flight read
-/// forfeits the connection on both backends, see
-/// [`ReadCancelSafety`](crate::transport::ReadCancelSafety). What
-/// `nusb` buys is waiting without parking an OS thread.
+//! ADB over USB transport (libusb / `rusb` backend).
+//!
+//! Functional counterpart of `crate::transport::nusb` but built on the
+//! blocking `rusb`/libusb bindings. Both features may be enabled at
+//! once; the `Rusb` marker selects this backend at a call site.
+//!
+//! Bulk transfers block the thread they run on — a runtime pool
+//! thread, or the caller itself under the `Inline` runtime and under
+//! `Tokio` when no Tokio runtime is active (its `run_blocking` then
+//! deliberately runs inline) — with no timeout: a read returns when
+//! the device answers or detaches, and cannot be cancelled from the
+//! host side. Slicing the wait into timeouts is not an option (`rusb`
+//! discards the bytes a transfer had already received when it reports
+//! `Timeout`), and `nusb` is no escape hatch for cancellation either —
+//! aborting an in-flight read forfeits the connection on both
+//! backends, see
+//! [`ReadCancelSafety`](crate::transport::ReadCancelSafety). What
+//! `nusb` buys is waiting without parking an OS thread.
+
 #[cfg(feature = "rusb")]
 pub use self::inner::*;
 
