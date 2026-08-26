@@ -29,13 +29,14 @@
 use alloc::sync::Arc;
 use async_lock::Mutex as AsyncMutex;
 use bytes::BytesMut;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 use event_listener::{Event, EventListener};
 use std::sync::Mutex;
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
 use crate::base::channel::{
     channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot,
@@ -91,6 +92,10 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
     pub(crate) incoming: Mutex<VecDeque<PendingOpen>>,
+    /// Requests staged out of the queue in an owned [`SplitIncoming`],
+    /// by remote id — the only place a device cancellation can still
+    /// reach them once they have left `incoming`.
+    pub(crate) staged: Mutex<Vec<(u32, Arc<AtomicBool>)>>,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -109,6 +114,27 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     fn lock_incoming(&self) -> std::sync::MutexGuard<'_, VecDeque<PendingOpen>> {
         self.incoming.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn lock_staged(&self) -> std::sync::MutexGuard<'_, Vec<(u32, Arc<AtomicBool>)>> {
+        self.staged.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Wrap a request taken off the queue in its owned holder,
+    /// registering it so a device cancellation can still find it.
+    fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH, MC, MP, MF>
+    where
+        WH: Write,
+    {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.lock_staged()
+            .push((pending.remote_id, Arc::clone(&cancelled)));
+        SplitIncoming {
+            shared: Arc::clone(self),
+            pending: Some(pending),
+            reserved: None,
+            cancelled,
+        }
     }
 
     fn checksum(&self) -> Checksum {
@@ -368,8 +394,9 @@ where
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         loop {
             let excess = {
+                let staged = self.shared.lock_staged();
                 let mut q = self.shared.lock_incoming();
-                if q.len() > MC {
+                if staged.len() + q.len() > MC {
                     q.pop_front()
                 } else {
                     None
@@ -378,13 +405,7 @@ where
             let Some(pending) = excess else {
                 return Ok(());
             };
-            SplitIncoming {
-                reader: self,
-                pending: Some(pending),
-                reserved: None,
-            }
-            .reject()
-            .await?;
+            self.shared.stage_incoming(pending).reject().await?;
         }
     }
 
@@ -540,7 +561,8 @@ where
     /// the like) and hand it over for a verdict.
     ///
     /// Packets for other channels keep being dispatched while waiting.
-    /// The returned [`SplitIncoming`] borrows the reader until
+    /// The returned [`SplitIncoming`] owns the request — it does not
+    /// borrow the reader, so it can be held across other calls until
     /// [`accept`](SplitIncoming::accept) or
     /// [`reject`](SplitIncoming::reject) resolves it; dropping it
     /// undecided puts the request back at the head of the queue.
@@ -554,16 +576,12 @@ where
     /// [`read_channel`](Self::read_channel).
     pub async fn accept_incoming(
         &mut self,
-    ) -> Result<SplitIncoming<'_, RH, WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
+    ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
             let pending = self.shared.lock_incoming().pop_front();
             if let Some(pending) = pending {
-                return Ok(SplitIncoming {
-                    reader: self,
-                    pending: Some(pending),
-                    reserved: None,
-                });
+                return Ok(self.shared.stage_incoming(pending));
             }
             let pkt = recv_pkt(
                 &mut self.read_half,
@@ -577,13 +595,9 @@ where
 
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
     /// takes a request that already arrived, if any.
-    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<'_, RH, WH, MC, MP, MF>> {
+    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH, MC, MP, MF>> {
         let pending = self.shared.lock_incoming().pop_front()?;
-        Some(SplitIncoming {
-            reader: self,
-            pending: Some(pending),
-            reserved: None,
-        })
+        Some(self.shared.stage_incoming(pending))
     }
 
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<RH as ErrorType>::Error>> {
@@ -629,14 +643,19 @@ where
             } => {
                 // Bounded by the channel table: past that, an OPEN
                 // storm is refused on arrival rather than remembered.
+                // Held holders spend the same budget as queued
+                // requests — otherwise an application sitting on
+                // holders would drain the queue and let payloads
+                // accumulate without limit.
                 let pending = PendingOpen {
                     remote_id,
                     credit,
                     destination,
                 };
                 let refused = {
+                    let staged = self.shared.lock_staged();
                     let mut q = self.shared.lock_incoming();
-                    if q.len() >= MC {
+                    if staged.len() + q.len() >= MC {
                         Some(pending)
                     } else {
                         q.push_back(pending);
@@ -652,48 +671,94 @@ where
                     // recoverable until CLSE is committed, and its Drop
                     // re-queues it (one past the cap, which only new
                     // arrivals check).
-                    SplitIncoming {
-                        reader: self,
-                        pending: Some(pending),
-                        reserved: None,
-                    }
-                    .reject()
-                    .await?;
+                    self.shared.stage_incoming(pending).reject().await?;
                 }
             }
             DispatchOutcome::CancelPendingOpen { remote_id } => {
-                self.shared
-                    .lock_incoming()
-                    .retain(|p| p.remote_id != remote_id);
+                // Every place the request can live, under one lock
+                // order (channels, then staged, then incoming — the
+                // same order accept and Drop take): a racing accept
+                // may have installed the slot after this packet was
+                // classified, so look for it again here; otherwise
+                // flag the staged holder and drop it from the queue.
+                // There is no gap in which the withdrawal finds the
+                // request nowhere.
+                let mut chs = self.shared.lock_channels();
+                let staged = self.shared.lock_staged();
+                let mut incoming = self.shared.lock_incoming();
+                let mut closed = None;
+                if remote_id != 0 {
+                    for (idx, slot_opt) in chs.iter_mut().enumerate() {
+                        let Some(slot) = slot_opt else { continue };
+                        if slot.remote_id == remote_id {
+                            slot.apply_close();
+                            closed = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                if closed.is_none() {
+                    incoming.retain(|p| p.remote_id != remote_id);
+                    // A request staged out of the queue is cancelled
+                    // through its flag: the verdict observes it.
+                    for (id, flag) in staged.iter() {
+                        if *id == remote_id {
+                            flag.store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
+                drop(incoming);
+                drop(staged);
+                drop(chs);
+                if let Some(idx) = closed {
+                    if let Some(signal) = self.shared.signals.get(idx) {
+                        signal.wake();
+                    }
+                }
             }
             DispatchOutcome::DataBuffered => {}
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
     }
+
+    /// Send CLSE and release the channel slot —
+    /// [`Writer::close_channel`] reachable from the read half, so an
+    /// open-read-close service exchange can run on the `Reader` alone.
+    pub async fn close_channel(
+        &self,
+        ch: ChannelId,
+    ) -> Result<(), Error<<RH as ErrorType>::Error>> {
+        close_channel_via(&self.shared, ch).await
+    }
 }
 
 /// A device-initiated channel awaiting a verdict, on a split
-/// connection. Dropping it undecided puts the request back at the
-/// head of the queue.
-pub struct SplitIncoming<'r, RH, WH, const MC: usize, const MP: usize, const MF: usize>
-where
-    RH: Read,
-    WH: Write<Error = <RH as ErrorType>::Error>,
+/// connection. Owns the request — holding it does not borrow the
+/// [`Reader`]. Dropping it undecided puts the request back at the head
+/// of the queue.
+pub struct SplitIncoming<
+    WH,
+    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
+    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
+    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
+> where
+    WH: Write,
 {
-    reader: &'r mut Reader<RH, WH, MC, MP, MF>,
+    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
     pending: Option<PendingOpen>,
     /// A slot reserved by `accept` before READY is on the wire. If the
     /// future is cancelled or errors before that, `Drop` frees it —
     /// otherwise a cancelled accept would occupy it forever.
     reserved: Option<usize>,
+    /// Set by the reader when the device withdraws this OPEN (a CLSE
+    /// naming no local id) while the request is staged here.
+    cancelled: Arc<AtomicBool>,
 }
 
-impl<RH, WH, const MC: usize, const MP: usize, const MF: usize>
-    SplitIncoming<'_, RH, WH, MC, MP, MF>
+impl<WH, const MC: usize, const MP: usize, const MF: usize> SplitIncoming<WH, MC, MP, MF>
 where
-    RH: Read,
-    WH: Write<Error = <RH as ErrorType>::Error>,
+    WH: Write,
 {
     /// The destination the device asked for, e.g. `tcp:8080\0`.
     pub fn destination(&self) -> &[u8] {
@@ -713,14 +778,27 @@ where
     /// that poll on, a drop abandons a packet mid-write and the
     /// connection is marked desynchronized, as with any cancelled
     /// write.
-    pub async fn accept(mut self) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
+    ///
+    /// A request the device has withdrawn in the meantime (a CLSE for
+    /// its OPEN) is not taken: no READY is sent and
+    /// [`Error::ChannelClosed`] comes back.
+    pub async fn accept(mut self) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
         let (remote_id, credit) = (pending.remote_id, pending.credit);
-        let shared = self.reader.shared.clone();
+        let shared = Arc::clone(&self.shared);
         let checksum = shared.checksum();
 
         let reserved = {
             let mut chs = shared.lock_channels();
+            // Checked under the channels lock, where withdrawals are
+            // classified and handled: the flag is either already set
+            // here, or the withdrawal arrives after the slot below
+            // exists and closes it like a remote CLSE — there is no
+            // in-between where it finds neither.
+            if self.cancelled.load(Ordering::Relaxed) {
+                self.pending.take();
+                return Err(Error::ChannelClosed);
+            }
             chs.iter().position(|s| s.is_none()).map(|idx| {
                 let local_id = shared.next_local_id();
                 let mut slot = ChannelSlot::new(local_id);
@@ -785,9 +863,16 @@ where
     /// before the CLSE write is first polled, waiting for the shared
     /// write lock included; after that it is marked desynchronized, as
     /// with any cancelled write.
-    pub async fn reject(mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
+    ///
+    /// A request the device has withdrawn in the meantime is consumed
+    /// silently: it no longer expects an answer.
+    pub async fn reject(mut self) -> Result<(), Error<<WH as ErrorType>::Error>> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            self.pending.take();
+            return Ok(());
+        }
         let remote_id = self.pending.as_ref().expect("undecided").remote_id;
-        let shared = self.reader.shared.clone();
+        let shared = Arc::clone(&self.shared);
         let checksum = shared.checksum();
         {
             let mut wh = shared.write_half.lock().await;
@@ -804,21 +889,29 @@ where
     }
 }
 
-impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> Drop
-    for SplitIncoming<'_, RH, WH, MC, MP, MF>
+impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for SplitIncoming<WH, MC, MP, MF>
 where
-    RH: Read,
-    WH: Write<Error = <RH as ErrorType>::Error>,
+    WH: Write,
 {
     fn drop(&mut self) {
         // A slot reserved but never confirmed by READY: release it.
         if let Some(idx) = self.reserved.take() {
-            if let Some(slot) = self.reader.shared.lock_channels().get_mut(idx) {
+            if let Some(slot) = self.shared.lock_channels().get_mut(idx) {
                 *slot = None;
             }
         }
+        // Unregister and requeue under both locks at once, in the same
+        // staged-then-incoming order the cancel dispatch takes: a
+        // withdrawal must find the request in one collection or the
+        // other, never in the gap between them.
+        let mut staged = self.shared.lock_staged();
+        let mut incoming = self.shared.lock_incoming();
+        staged.retain(|(_, flag)| !Arc::ptr_eq(flag, &self.cancelled));
         if let Some(pending) = self.pending.take() {
-            self.reader.shared.lock_incoming().push_front(pending);
+            // A withdrawn request is dead; anything else goes back.
+            if !self.cancelled.load(Ordering::Relaxed) {
+                incoming.push_front(pending);
+            }
         }
     }
 }
@@ -970,30 +1063,7 @@ where
         &self,
         ch: ChannelId,
     ) -> Result<(), Error<<WH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
-        let (local_id, remote_id) = self.channel_ids(ch)?;
-        {
-            let mut wh = self.shared.write_half.lock().await;
-            send_pkt(
-                &mut *wh,
-                &self.shared.desync,
-                &Packet::close(local_id, remote_id),
-                self.shared.checksum(),
-            )
-            .await?;
-        }
-        {
-            let mut chs = self.shared.lock_channels();
-            if let Some(slot) = chs.get_mut(ch.slot) {
-                if slot.as_ref().is_some_and(|s| s.local_id == ch.local_id) {
-                    *slot = None;
-                }
-            }
-        }
-        if let Some(signal) = self.shared.signals.get(ch.slot) {
-            signal.wake();
-        }
-        Ok(())
+        close_channel_via(&self.shared, ch).await
     }
 
     fn channel_ids(&self, ch: ChannelId) -> Result<(u32, u32), Error<<WH as ErrorType>::Error>> {
@@ -1075,11 +1145,126 @@ where
     }
 }
 
+/// Send CLSE for `ch` and free its slot: the close path shared by
+/// [`Writer::close_channel`] and [`Reader::close_channel`].
+async fn close_channel_via<WH, const MC: usize, const MP: usize, const MF: usize>(
+    shared: &Shared<WH, MC, MP, MF>,
+    ch: ChannelId,
+) -> Result<(), Error<<WH as ErrorType>::Error>>
+where
+    WH: Write,
+{
+    shared.desync.check()?;
+    let (local_id, remote_id) = {
+        let chs = shared.lock_channels();
+        channel_ids_of(&*chs, ch)?
+    };
+    {
+        let mut wh = shared.write_half.lock().await;
+        send_pkt(
+            &mut *wh,
+            &shared.desync,
+            &Packet::close(local_id, remote_id),
+            shared.checksum(),
+        )
+        .await?;
+    }
+    {
+        let mut chs = shared.lock_channels();
+        if let Some(slot) = chs.get_mut(ch.slot) {
+            if slot.as_ref().is_some_and(|s| s.local_id == ch.local_id) {
+                *slot = None;
+            }
+        }
+    }
+    if let Some(signal) = shared.signals.get(ch.slot) {
+        signal.wake();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::base::connection::Connection;
     use crate::base::mock::{abandon, now, okay, split_with_channel, Mock, NoAuth, SharedMock};
+
+    /// Stage one OPEN out of the queue, then deliver more packets —
+    /// the device-side traffic a staged request can race against.
+    fn staged_with_followup(
+        followup: &[Packet],
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        SplitIncoming<SharedMock>,
+        SharedMock,
+    ) {
+        use core::future::Future as _;
+        use core::task::{Context, Poll, Waker};
+
+        let mut mock = Mock::new();
+        mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::<_>::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let (mut reader, _writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+
+        seen.feed(&Packet::new(Command::Open, 80, 0, b"tcp:80\0".to_vec()));
+        let pump = |reader: &mut Reader<SharedMock, SharedMock>| {
+            let mut buf = [0u8; 16];
+            let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
+            let mut cx = Context::from_waker(Waker::noop());
+            // Everything fed so far is dispatched on the way; the
+            // drained mock then reports EOF, which is how the pump
+            // knows the read went all the way through.
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(Err(Error::UnexpectedEof)) => {}
+                other => panic!("expected the drained-transport EOF, got {other:?}"),
+            }
+        };
+        pump(&mut reader);
+        let inc = reader.try_accept_incoming().expect("the OPEN was queued");
+
+        for pkt in followup {
+            seen.feed(pkt);
+        }
+        pump(&mut reader);
+        (reader, inc, seen)
+    }
+
+    #[test]
+    fn a_device_cancel_reaches_the_staged_request() {
+        let (mut reader, inc, seen) = staged_with_followup(&[Packet::close(80, 0)]);
+
+        // The verdict observes the withdrawal: no READY, no channel.
+        let err = now(inc.accept()).unwrap_err();
+        assert!(
+            matches!(err, Error::ChannelClosed),
+            "expected ChannelClosed, got {err:?}"
+        );
+        assert!(
+            !seen
+                .sent()
+                .iter()
+                .any(|(cmd, _, arg1, _)| *cmd == Command::Ready && *arg1 == 80),
+            "READY must not answer a withdrawn OPEN"
+        );
+        // The dead request does not come back to the queue either.
+        assert!(reader.try_accept_incoming().is_none());
+    }
+
+    #[test]
+    fn a_staged_reject_after_the_cancel_stays_silent() {
+        let (_reader, inc, seen) = staged_with_followup(&[Packet::close(80, 0)]);
+
+        now(inc.reject()).unwrap();
+        assert!(
+            !seen
+                .sent()
+                .iter()
+                .any(|(cmd, _, arg1, _)| *cmd == Command::Close && *arg1 == 80),
+            "a withdrawn OPEN expects no answer"
+        );
+    }
 
     #[test]
     fn a_withdrawal_racing_the_accept_closes_the_split_slot() {
@@ -1102,6 +1287,67 @@ mod tests {
             matches!(err, Error::ChannelClosed),
             "expected ChannelClosed, got {err:?}"
         );
+    }
+
+    #[test]
+    fn held_holders_spend_the_open_storm_budget() {
+        use core::future::Future as _;
+        use core::task::{Context, Poll, Waker};
+
+        let open_pkt =
+            |remote_id: u32, dest: &[u8]| Packet::new(Command::Open, remote_id, 0, dest.to_vec());
+
+        let mut mock = Mock::new();
+        mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::<_, 2, 64, 24>::connect(
+            seen.clone(),
+            NoAuth,
+            &[],
+        ))
+        .unwrap();
+        let (mut reader, _writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+
+        let pump = |reader: &mut Reader<SharedMock, SharedMock, 2, 64, 24>| {
+            let mut buf = [0u8; 16];
+            let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
+            let mut cx = Context::from_waker(Waker::noop());
+            match fut.as_mut().poll(&mut cx) {
+                Poll::Ready(Err(Error::UnexpectedEof)) => {}
+                other => panic!("expected the drained-transport EOF, got {other:?}"),
+            }
+        };
+
+        // Two held holders exhaust the MC = 2 budget without ever
+        // touching the queue length.
+        seen.feed(&open_pkt(60, b"tcp:60\0"));
+        pump(&mut reader);
+        let held_a = reader.try_accept_incoming().unwrap();
+        seen.feed(&open_pkt(61, b"tcp:61\0"));
+        pump(&mut reader);
+        let held_b = reader.try_accept_incoming().unwrap();
+        assert_eq!(reader.shared.lock_incoming().len(), 0);
+
+        // The third OPEN must be refused on arrival: an application
+        // sitting on holders cannot make the bound unenforceable.
+        seen.feed(&open_pkt(62, b"tcp:62\0"));
+        pump(&mut reader);
+        assert!(
+            seen.sent()
+                .iter()
+                .any(|(cmd, _, arg1, _)| *cmd == Command::Close && *arg1 == 62),
+            "the OPEN past the budget must be refused with CLSE"
+        );
+        assert!(
+            reader.try_accept_incoming().is_none(),
+            "nothing may be queued past the budget"
+        );
+
+        // The budget comes back with the holders.
+        drop(held_a);
+        drop(held_b);
+        assert_eq!(reader.shared.lock_incoming().len(), 2);
     }
 
     #[test]

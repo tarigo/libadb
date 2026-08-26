@@ -25,16 +25,106 @@
 //! * any failure → `FAIL` + `%04x` + message.
 
 use alloc::vec::Vec;
+use core::future::Future;
 
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
-
-use crate::base::connection::Connection;
+use crate::base::channel::ChannelId;
 use crate::base::error::{Error, ProtocolError, ReverseError};
 
 /// Replies are tiny (a port number, a listing); anything past this is
 /// not the service we think we are talking to.
 const REPLY_CAP: usize = 64 * 1024;
+
+/// A connection the reverse service can drive: open a service channel,
+/// read it to close, close it back to free the slot. Implemented for
+/// both [`Connection`] and the split [`Reader`], so the FFI's split
+/// halves reach it too.
+///
+/// [`Connection`]: crate::Connection
+/// [`Reader`]: crate::Reader
+pub trait ReverseChannel {
+    /// Transport error carried by this connection's [`Error`].
+    type IoError;
+
+    /// Open a channel to `dest` (a NUL-terminated service string).
+    fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> impl Future<Output = Result<ChannelId, Error<Self::IoError>>>;
+
+    /// Read from a channel opened by [`open_service_channel`].
+    ///
+    /// [`open_service_channel`]: Self::open_service_channel
+    fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, Error<Self::IoError>>>;
+
+    /// Send CLSE for a channel opened by [`open_service_channel`] and
+    /// free its slot.
+    ///
+    /// [`open_service_channel`]: Self::open_service_channel
+    fn close_service_channel(
+        &mut self,
+        ch: ChannelId,
+    ) -> impl Future<Output = Result<(), Error<Self::IoError>>>;
+}
+
+impl<T, const MC: usize, const MP: usize, const MF: usize> ReverseChannel
+    for crate::base::connection::Connection<T, MC, MP, MF>
+where
+    T: embedded_io_async::Read + embedded_io_async::Write,
+{
+    type IoError = <T as embedded_io::ErrorType>::Error;
+
+    async fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> Result<ChannelId, Error<Self::IoError>> {
+        self.open_channel(dest).await
+    }
+
+    async fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<usize, Error<Self::IoError>> {
+        self.read_channel(ch, buf).await
+    }
+
+    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
+        self.close_channel(ch).await
+    }
+}
+
+#[cfg(feature = "split")]
+impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> ReverseChannel
+    for crate::split::Reader<RH, WH, MC, MP, MF>
+where
+    RH: embedded_io_async::Read,
+    WH: embedded_io_async::Write<Error = <RH as embedded_io::ErrorType>::Error>,
+{
+    type IoError = <RH as embedded_io::ErrorType>::Error;
+
+    async fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> Result<ChannelId, Error<Self::IoError>> {
+        self.open_channel(dest).await
+    }
+
+    async fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<usize, Error<Self::IoError>> {
+        self.read_channel(ch, buf).await
+    }
+
+    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
+        self.close_channel(ch).await
+    }
+}
 
 /// Ask the device to listen on `device_spec` and forward every
 /// connection to a channel opened toward the host with `host_spec` as
@@ -42,14 +132,11 @@ const REPLY_CAP: usize = 64 * 1024;
 ///
 /// Returns the service's data bytes: for `tcp:` device specs this is
 /// the bound port in decimal (useful with `tcp:0`), empty otherwise.
-pub async fn establish<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn establish<C: ReverseChannel>(
+    conn: &mut C,
     device_spec: &str,
     host_spec: &str,
-) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+) -> Result<Vec<u8>, Error<C::IoError>> {
     check_specs(&[device_spec, host_spec])?;
     let mut dest = Vec::with_capacity(18 + device_spec.len() + host_spec.len());
     dest.extend_from_slice(b"reverse:forward:");
@@ -62,13 +149,10 @@ where
 }
 
 /// Remove the rule listening on `device_spec`.
-pub async fn remove<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn remove<C: ReverseChannel>(
+    conn: &mut C,
     device_spec: &str,
-) -> Result<(), Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+) -> Result<(), Error<C::IoError>> {
     check_specs(&[device_spec])?;
     let mut dest = Vec::with_capacity(21 + device_spec.len());
     dest.extend_from_slice(b"reverse:killforward:");
@@ -80,12 +164,7 @@ where
 }
 
 /// Remove every rule this connection established.
-pub async fn remove_all<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
-) -> Result<(), Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+pub async fn remove_all<C: ReverseChannel>(conn: &mut C) -> Result<(), Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:killforward-all\0").await?;
     parse_status(&reply).map_err(Error::Reverse)?;
     Ok(())
@@ -93,12 +172,7 @@ where
 
 /// The device's current rules, as adbd prints them: lines of
 /// `<serial> <remote> <local>\n`.
-pub async fn list<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
-) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+pub async fn list<C: ReverseChannel>(conn: &mut C) -> Result<Vec<u8>, Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:list-forward\0").await?;
     // The listing skips OKAY: it is just a hex4-prefixed block. A
     // failure still arrives as FAIL + hex4 + message, and the two
@@ -120,18 +194,15 @@ fn check_specs<E>(specs: &[&str]) -> Result<(), Error<E>> {
 }
 
 /// Open the service channel, read until the device closes it.
-async fn exchange<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+async fn exchange<C: ReverseChannel>(
+    conn: &mut C,
     dest: &[u8],
-) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let ch = conn.open_channel(dest).await?;
+) -> Result<Vec<u8>, Error<C::IoError>> {
+    let ch = conn.open_service_channel(dest).await?;
     let mut reply = Vec::new();
     let mut buf = [0u8; 512];
     let result = loop {
-        match conn.read_channel(ch, &mut buf).await {
+        match conn.read_service_channel(ch, &mut buf).await {
             Ok(n) => {
                 // Checked before extending: the buffer must never grow
                 // past the cap, not even transiently for the chunk
@@ -148,7 +219,7 @@ where
     // The remote CLSE only marks the slot closed; freeing it takes a
     // close of our own, on every exit — otherwise each call leaks a
     // slot until NoFreeChannels. Best-effort: `result` wins.
-    let _ = conn.close_channel(ch).await;
+    let _ = conn.close_service_channel(ch).await;
     result
 }
 
