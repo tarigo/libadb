@@ -21,7 +21,7 @@ name = "adb"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-libadb = { path = "../libadb", version = "0.1.0", default-features = false, features = ["split"] }
+libadb = { path = "../libadb", version = "0.2.0", default-features = false, features = ["split"] }
 # `std` provides `impl embedded_io::Error for std::io::Error`, needed
 # by the blocking TCP transport.
 embedded-io = { version = "0.6", features = ["std"] }
