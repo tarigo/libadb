@@ -1,5 +1,8 @@
 # libadb
 
+[![CI](https://github.com/tarigo/libadb/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tarigo/libadb/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/tarigo/libadb/badge-data/coverage.json)](https://github.com/tarigo/libadb/actions/workflows/ci.yml)
+
 Low-level ADB (Android Debug Bridge) wire-protocol library for Rust.
 
 Talks to a device directly over TCP or USB — no `adbd` fork/exec, no
