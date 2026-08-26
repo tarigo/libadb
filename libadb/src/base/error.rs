@@ -17,6 +17,8 @@ pub enum Error<E> {
     Auth(AuthError),
     /// Sync protocol error.
     Sync(SyncError),
+    /// Reverse-forward service error.
+    Reverse(ReverseError),
     /// Operation on a closed channel.
     ChannelClosed,
     /// All channel slots are occupied.
@@ -178,6 +180,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
             Self::Protocol(e) => write!(f, "protocol: {e}"),
             Self::Auth(e) => write!(f, "auth: {e}"),
             Self::Sync(e) => write!(f, "{e}"),
+            Self::Reverse(e) => write!(f, "{e}"),
             Self::ChannelClosed => f.write_str("channel closed"),
             Self::NoFreeChannels => f.write_str("no free channel slots"),
             Self::UnexpectedEof => f.write_str("unexpected eof"),
@@ -216,6 +219,7 @@ where
             Self::Protocol(e) => Some(e),
             Self::Auth(e) => Some(e),
             Self::Sync(e) => Some(e),
+            Self::Reverse(e) => Some(e),
             Self::Logcat(e) => Some(e),
             Self::Decode(e) => Some(e),
             Self::ChannelClosed
@@ -258,6 +262,43 @@ impl<E> From<SyncError> for Error<E> {
         Self::Sync(e)
     }
 }
+
+impl<E> From<ReverseError> for Error<E> {
+    fn from(e: ReverseError) -> Self {
+        Self::Reverse(e)
+    }
+}
+
+/// What the `reverse:` rule service answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReverseError {
+    /// The device returned `FAIL`. The message is adbd's own text,
+    /// e.g. `bad forward: …` or `listener '…' not found`.
+    Failed(Vec<u8>),
+    /// The reply matched neither `OKAY` nor `FAIL`, or a *successful*
+    /// reply's length prefix disagreed with what arrived. A `FAIL` is
+    /// reported as [`Failed`](Self::Failed) even when its own length
+    /// prefix is mangled — the device's message matters more than its
+    /// framing.
+    UnexpectedReply,
+}
+
+impl fmt::Display for ReverseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(msg) => {
+                write!(f, "reverse service failed: ")?;
+                match core::str::from_utf8(msg) {
+                    Ok(m) => f.write_str(m),
+                    Err(_) => write!(f, "{msg:?}"),
+                }
+            }
+            Self::UnexpectedReply => f.write_str("unexpected reverse service reply"),
+        }
+    }
+}
+
+impl core::error::Error for ReverseError {}
 
 impl<E> From<crate::logcat::LogcatError> for Error<E> {
     fn from(e: crate::logcat::LogcatError) -> Self {
