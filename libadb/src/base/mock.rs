@@ -167,6 +167,11 @@ impl SharedMock {
         self.lock().sent()
     }
 
+    /// Queue a packet for the reader, as the device would send it.
+    pub(crate) fn feed(&self, pkt: &Packet) {
+        self.lock().feed(pkt);
+    }
+
     fn new(mock: Mock) -> Self {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(mock)))
     }

@@ -1,5 +1,5 @@
 use alloc::collections::BTreeSet;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use core::future::Future;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
@@ -54,7 +54,32 @@ pub(crate) enum DispatchOutcome {
     /// A WRTE was buffered with its acknowledgement held back: readers
     /// wait on the socket and writers on credit, so nobody needs waking.
     DataBuffered,
+    /// The device opened a channel toward the host (`adb reverse`).
+    /// The host queues it for [`accept_incoming`] and answers READY on
+    /// accept or CLSE on refusal.
+    ///
+    /// [`accept_incoming`]: super::connection::Connection::accept_incoming
+    IncomingOpen {
+        remote_id: u32,
+        /// The device's receive credit from OPEN `arg1`; our send
+        /// budget once accepted, meaningful only with delayed ack.
+        credit: u32,
+        destination: Bytes,
+    },
+    /// The device gave up on an OPEN it had sent — a CLSE that names
+    /// no local id. Drop the matching pending entry if still queued.
+    CancelPendingOpen {
+        remote_id: u32,
+    },
     Unmatched,
+}
+
+/// A device-initiated OPEN waiting for the application's verdict.
+#[derive(Debug)]
+pub(crate) struct PendingOpen {
+    pub remote_id: u32,
+    pub credit: u32,
+    pub destination: Bytes,
 }
 
 /// `rx_cap` bounds how much unread data a single channel may accumulate;
@@ -67,6 +92,18 @@ pub(crate) fn dispatch_packet<E>(
     rx_cap: usize,
     watermark: usize,
 ) -> Result<DispatchOutcome, Error<E>> {
+    if pkt.command == Command::Open {
+        return Ok(DispatchOutcome::IncomingOpen {
+            remote_id: pkt.arg0,
+            credit: pkt.arg1,
+            destination: pkt.data.clone(),
+        });
+    }
+    if pkt.command == Command::Close && pkt.arg1 == 0 {
+        return Ok(DispatchOutcome::CancelPendingOpen {
+            remote_id: pkt.arg0,
+        });
+    }
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {

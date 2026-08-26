@@ -35,8 +35,11 @@ use embedded_io_async::{Read, Write};
 use event_listener::{Event, EventListener};
 use std::sync::Mutex;
 
+use alloc::collections::VecDeque;
+
 use crate::base::channel::{
-    channel_ids_of, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot, DispatchOutcome,
+    channel_ids_of, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot, ChannelState,
+    DispatchOutcome, PendingOpen,
 };
 use crate::base::connection::{
     ConnectionConfig, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
@@ -86,6 +89,8 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) device_banner: Option<DeviceBanner<MP, MF>>,
     pub(crate) local_id_counter: AtomicU32,
     pub(crate) desync: DesyncFlag,
+    /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
+    pub(crate) incoming: Mutex<VecDeque<PendingOpen>>,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -100,6 +105,10 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     fn lock_channels(&self) -> std::sync::MutexGuard<'_, [Option<ChannelSlot>; MC]> {
         self.channels.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn lock_incoming(&self) -> std::sync::MutexGuard<'_, VecDeque<PendingOpen>> {
+        self.incoming.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn checksum(&self) -> Checksum {
@@ -495,6 +504,46 @@ where
         channel_ids_of(&*chs, ch)
     }
 
+    /// Wait for a device-initiated channel (`adb reverse` traffic and
+    /// the like) and hand it over for a verdict.
+    ///
+    /// Packets for other channels keep being dispatched while waiting.
+    /// The returned [`SplitIncoming`] borrows the reader until
+    /// [`accept`](SplitIncoming::accept) or
+    /// [`reject`](SplitIncoming::reject) resolves it; dropping it
+    /// undecided puts the request back at the head of the queue.
+    pub async fn accept_incoming(
+        &mut self,
+    ) -> Result<SplitIncoming<'_, RH, WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
+        loop {
+            let pending = self.shared.lock_incoming().pop_front();
+            if let Some(pending) = pending {
+                return Ok(SplitIncoming {
+                    reader: self,
+                    pending: Some(pending),
+                });
+            }
+            let pkt = recv_pkt(
+                &mut self.read_half,
+                &mut self.recv_buf,
+                self.shared.config.max_payload(),
+            )
+            .await?;
+            self.dispatch(pkt).await?;
+        }
+    }
+
+    /// [`accept_incoming`](Self::accept_incoming) without waiting:
+    /// takes a request that already arrived, if any.
+    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<'_, RH, WH, MC, MP, MF>> {
+        let pending = self.shared.lock_incoming().pop_front()?;
+        Some(SplitIncoming {
+            reader: self,
+            pending: Some(pending),
+        })
+    }
+
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let outcome = {
             let mut chs = self.shared.lock_channels();
@@ -531,10 +580,173 @@ where
             DispatchOutcome::SlotClosed { idx } => {
                 self.shared.signals[idx].wake();
             }
+            DispatchOutcome::IncomingOpen {
+                remote_id,
+                credit,
+                destination,
+            } => {
+                // Bounded by the channel table: past that, an OPEN
+                // storm is refused on arrival rather than remembered.
+                let queued = {
+                    let mut q = self.shared.lock_incoming();
+                    if q.len() >= MC {
+                        false
+                    } else {
+                        q.push_back(PendingOpen {
+                            remote_id,
+                            credit,
+                            destination,
+                        });
+                        true
+                    }
+                };
+                if !queued {
+                    let mut wh = self.shared.write_half.lock().await;
+                    send_pkt(
+                        &mut *wh,
+                        &self.shared.desync,
+                        &Packet::close(0, remote_id),
+                        self.shared.checksum(),
+                    )
+                    .await?;
+                }
+            }
+            DispatchOutcome::CancelPendingOpen { remote_id } => {
+                self.shared
+                    .lock_incoming()
+                    .retain(|p| p.remote_id != remote_id);
+            }
             DispatchOutcome::DataBuffered => {}
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
+    }
+}
+
+/// A device-initiated channel awaiting a verdict, on a split
+/// connection. Dropping it undecided puts the request back at the
+/// head of the queue.
+pub struct SplitIncoming<'r, RH, WH, const MC: usize, const MP: usize, const MF: usize>
+where
+    RH: Read,
+    WH: Write<Error = <RH as ErrorType>::Error>,
+{
+    reader: &'r mut Reader<RH, WH, MC, MP, MF>,
+    pending: Option<PendingOpen>,
+}
+
+impl<RH, WH, const MC: usize, const MP: usize, const MF: usize>
+    SplitIncoming<'_, RH, WH, MC, MP, MF>
+where
+    RH: Read,
+    WH: Write<Error = <RH as ErrorType>::Error>,
+{
+    /// The destination the device asked for, e.g. `tcp:8080\0`.
+    pub fn destination(&self) -> &[u8] {
+        &self.pending.as_ref().expect("undecided").destination
+    }
+
+    /// Take the channel: allocates a slot, answers READY (carrying our
+    /// receive credit when delayed ack is on) and returns the channel.
+    ///
+    /// With every slot in use the request is refused with CLSE and
+    /// [`Error::NoFreeChannels`] comes back.
+    pub async fn accept(mut self) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
+        let pending = self.pending.take().expect("undecided");
+        let shared = &self.reader.shared;
+        let checksum = shared.checksum();
+
+        let slot_idx = {
+            let mut chs = shared.lock_channels();
+            match chs.iter().position(|s| s.is_none()) {
+                Some(idx) => {
+                    let local_id = shared.next_local_id();
+                    let mut slot = ChannelSlot::new(local_id);
+                    slot.remote_id = pending.remote_id;
+                    slot.state = ChannelState::Open;
+                    if shared.delayed_ack {
+                        // OPEN's arg1 is the device's receive credit —
+                        // our budget.
+                        slot.send_budget = i64::from(pending.credit);
+                    }
+                    let id = slot.local_id;
+                    chs[idx] = Some(slot);
+                    Ok((idx, id))
+                }
+                None => Err(()),
+            }
+        };
+        let (slot_idx, local_id) = match slot_idx {
+            Ok(pair) => pair,
+            Err(()) => {
+                let mut wh = shared.write_half.lock().await;
+                send_pkt(
+                    &mut *wh,
+                    &shared.desync,
+                    &Packet::close(0, pending.remote_id),
+                    checksum,
+                )
+                .await?;
+                return Err(Error::NoFreeChannels);
+            }
+        };
+
+        let credit_bytes;
+        let payload: &[u8] = if shared.delayed_ack {
+            credit_bytes = shared.config.advertised_ack_bytes().to_le_bytes();
+            &credit_bytes
+        } else {
+            &[]
+        };
+        {
+            let mut wh = shared.write_half.lock().await;
+            send_pkt(
+                &mut *wh,
+                &shared.desync,
+                &Packet::new(
+                    Command::Ready,
+                    local_id,
+                    pending.remote_id,
+                    payload.to_vec(),
+                ),
+                checksum,
+            )
+            .await?;
+        }
+
+        Ok(ChannelId {
+            slot: slot_idx,
+            local_id,
+        })
+    }
+
+    /// Refuse the channel: answers CLSE and frees nothing, since
+    /// nothing was allocated.
+    pub async fn reject(mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
+        let pending = self.pending.take().expect("undecided");
+        let shared = &self.reader.shared;
+        let checksum = shared.checksum();
+        let mut wh = shared.write_half.lock().await;
+        send_pkt(
+            &mut *wh,
+            &shared.desync,
+            &Packet::close(0, pending.remote_id),
+            checksum,
+        )
+        .await
+    }
+}
+
+impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> Drop
+    for SplitIncoming<'_, RH, WH, MC, MP, MF>
+where
+    RH: Read,
+    WH: Write<Error = <RH as ErrorType>::Error>,
+{
+    fn drop(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.reader.shared.lock_incoming().push_front(pending);
+        }
     }
 }
 
@@ -989,6 +1201,59 @@ mod send_queue_tests {
         assert_eq!(wrtes.len(), 2, "expected two WRTEs, got {wrtes:?}");
         assert_eq!(&wrtes[0], b"aaaaa");
         assert_eq!(&wrtes[1], b"ccccc");
+    }
+}
+
+#[cfg(test)]
+mod incoming_tests {
+    use crate::base::channel::ChannelId;
+    use crate::base::mock::{now, split_one_channel_delayed_ack, wrte};
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+
+    fn open_pkt(remote_id: u32, credit: u32, dest: &[u8]) -> Packet {
+        Packet::new(Command::Open, remote_id, credit, dest.to_vec())
+    }
+
+    #[test]
+    fn a_device_open_on_a_split_reader_is_accepted_and_serves_data() {
+        let (mut reader, writer, _ch, seen) = split_one_channel_delayed_ack(0, &[]);
+        seen.feed(&open_pkt(77, 4096, b"tcp:9090\0"));
+
+        let incoming = now(reader.accept_incoming()).unwrap();
+        assert_eq!(incoming.destination(), b"tcp:9090\0");
+        let ch: ChannelId = now(incoming.accept()).unwrap();
+
+        let (cmd, local, remote, payload) = seen.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Ready);
+        assert_eq!(remote, 77);
+        assert_eq!(payload.len(), 4);
+
+        // Their data arrives on the accepted channel, and our write
+        // spends the OPEN-granted budget through the split writer.
+        seen.feed(&wrte(local, b"ping"));
+        let mut buf = [0u8; 16];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        now(writer.write_channel(ch, b"pong")).unwrap();
+        let (cmd, l, r, payload) = seen.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Write);
+        assert_eq!((l, r), (local, 77));
+        assert_eq!(payload, b"pong");
+    }
+
+    #[test]
+    fn a_rejected_open_on_a_split_reader_answers_clse() {
+        let (mut reader, _writer, _ch, seen) = split_one_channel_delayed_ack(0, &[]);
+        seen.feed(&open_pkt(88, 0, b"tcp:1\0"));
+
+        let incoming = now(reader.accept_incoming()).unwrap();
+        now(incoming.reject()).unwrap();
+
+        let (cmd, local, remote, _) = seen.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Close);
+        assert_eq!((local, remote), (0, 88));
     }
 }
 
