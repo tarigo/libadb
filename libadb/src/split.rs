@@ -63,6 +63,13 @@ impl FlowSignal {
         self.event.listen()
     }
 
+    /// Wake every writer parked on this channel.
+    ///
+    /// Waking is only a prompt to look again: admission is decided by
+    /// the slot's send queue, so writers that are not at its head check
+    /// their place and park right back. That keeps credit impossible to
+    /// lose to a missed or stolen notification — order lives in data
+    /// under the channels mutex, not in wake delivery.
     fn wake(&self) {
         self.event.notify(usize::MAX);
     }
@@ -169,6 +176,38 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
         }
         if let Some(signal) = self.shared.signals.get(self.ch.slot) {
             signal.wake();
+        }
+    }
+}
+
+/// A place in a channel's send queue. Leaving without being served —
+/// the write future was dropped mid-wait — gives the turn up, so the
+/// queue keeps moving.
+struct QueueGuard<'a, WH, const MC: usize, const MP: usize, const MF: usize> {
+    shared: &'a Shared<WH, MC, MP, MF>,
+    ch: ChannelId,
+    place: u64,
+    served: bool,
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
+    for QueueGuard<'_, WH, MC, MP, MF>
+{
+    fn drop(&mut self) {
+        if self.served {
+            return;
+        }
+        let head_moved = {
+            let mut chs = self.shared.lock_channels();
+            match slot_for_mut(&mut *chs, self.ch) {
+                Some(slot) => slot.send_leave(self.place),
+                None => false,
+            }
+        };
+        if head_moved {
+            if let Some(signal) = self.shared.signals.get(self.ch.slot) {
+                signal.wake();
+            }
         }
     }
 }
@@ -486,9 +525,13 @@ where
                 )
                 .await?;
             }
-            DispatchOutcome::SlotUpdated { idx } => {
+            DispatchOutcome::CreditGranted { idx } => {
                 self.shared.signals[idx].wake();
             }
+            DispatchOutcome::SlotClosed { idx } => {
+                self.shared.signals[idx].wake();
+            }
+            DispatchOutcome::DataBuffered => {}
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
@@ -569,7 +612,15 @@ where
     ///
     /// Splits `data` into chunks bounded by `max_payload` and the
     /// currently-granted send budget. Concurrent writers on the same
-    /// channel never consume the same credit.
+    /// channel never consume the same credit, and credit is granted in
+    /// arrival order — a writer looping back for its next chunk queues
+    /// behind the ones already waiting.
+    ///
+    /// The bytes of one call go out in order; concurrent calls on the
+    /// same channel interleave at chunk granularity in unspecified
+    /// order, like unsynchronized writes to one socket. A caller that
+    /// needs whole messages on the wire serializes the calls itself,
+    /// as the FFI shell does around each frame.
     ///
     /// **Not cancellation-safe.** Reserved-but-unsent credit is
     /// refunded when the future is dropped, but a packet goes out as a
@@ -674,20 +725,53 @@ where
             return Err(Error::ChannelClosed);
         };
 
+        // Take a place in the send queue. Only its head may reserve, so
+        // concurrent writers are served in arrival order: a writer that
+        // loops straight back after sending queues behind the ones
+        // already waiting and cannot drain a grant past them.
+        let place = {
+            let mut chs = self.shared.lock_channels();
+            let Some(slot) = slot_for_mut(&mut *chs, ch) else {
+                return Err(Error::ChannelClosed);
+            };
+            if slot.is_closed() {
+                return Err(Error::ChannelClosed);
+            }
+            slot.send_enqueue()
+        };
+        let mut queue = QueueGuard {
+            shared: &self.shared,
+            ch,
+            place,
+            served: false,
+        };
+
         loop {
             let listener = signal.listen();
-            if let Some(result) = self.try_reserve(ch, want) {
-                return result;
+            match self.try_reserve(ch, want, place) {
+                Some(Ok((n, more))) => {
+                    queue.served = true;
+                    // Budget survived the reservation: prompt the next
+                    // writer in line to take its share.
+                    if more {
+                        signal.wake();
+                    }
+                    return Ok(n);
+                }
+                Some(Err(e)) => return Err(e),
+                None => listener.await,
             }
-            listener.await;
         }
     }
 
+    /// Reserve send credit if it is `place`'s turn and budget allows.
+    #[allow(clippy::type_complexity)]
     fn try_reserve(
         &self,
         ch: ChannelId,
         want: usize,
-    ) -> Option<Result<usize, Error<<WH as ErrorType>::Error>>> {
+        place: u64,
+    ) -> Option<Result<(usize, bool), Error<<WH as ErrorType>::Error>>> {
         let mut chs = self.shared.lock_channels();
         let Some(slot) = slot_for_mut(&mut *chs, ch) else {
             return Some(Err(Error::ChannelClosed));
@@ -695,7 +779,14 @@ where
         if slot.is_closed() {
             return Some(Err(Error::ChannelClosed));
         }
-        slot.try_reserve_send(want, self.shared.delayed_ack).map(Ok)
+        if slot.send_turn() != place {
+            return None;
+        }
+        slot.try_reserve_send(want, self.shared.delayed_ack)
+            .map(|n| {
+                slot.send_advance();
+                Ok((n, slot.send_budget > 0))
+            })
     }
 }
 
@@ -735,6 +826,169 @@ mod tests {
             now(reader.read_channel(ch, &mut buf)),
             Err(Error::Desynchronized)
         ));
+    }
+}
+
+#[cfg(test)]
+mod send_queue_tests {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    use crate::base::channel::{slot_for_mut, ChannelId};
+    use crate::base::mock::{okay_with_budget, split_one_channel_delayed_ack, SharedMock};
+    use crate::base::protocol::command::Command;
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        let mut cx = Context::from_waker(Waker::noop());
+        fut.poll(&mut cx)
+    }
+
+    /// WRTE payloads the writer put on the wire, in order.
+    fn wrte_payloads(seen: &SharedMock) -> Vec<Vec<u8>> {
+        seen.sent()
+            .into_iter()
+            .filter(|(cmd, ..)| *cmd == Command::Write)
+            .map(|(_, _, _, payload)| payload)
+            .collect()
+    }
+
+    /// Feed `credit` bytes of delayed-ack budget straight into the
+    /// slot and wake the queue — standing in for a device OKAY, so a
+    /// test can dose grants between polls.
+    fn grant(writer: &super::Writer<SharedMock>, ch: ChannelId, credit: u32) {
+        {
+            let mut chs = writer.shared.lock_channels();
+            slot_for_mut(&mut *chs, ch)
+                .unwrap()
+                .apply_ready(&credit.to_le_bytes(), true)
+                .unwrap();
+        }
+        writer.shared.signals[ch.slot].wake();
+    }
+
+    #[test]
+    fn a_returning_writer_queues_behind_the_one_already_waiting() {
+        // Zero initial credit parks both writers, in arrival order,
+        // before any budget exists.
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(0, &[]);
+
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaaaaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+
+        // A grant covering one chunk: the head sends `aaaaa` and
+        // requeues for its remainder — behind the writer that was
+        // already waiting.
+        grant(&writer, ch, 5);
+        assert!(poll_once(first.as_mut()).is_pending());
+
+        // The shared grant arrives. Polling the returning writer first
+        // must not let it drain the budget past the queue.
+        grant(&writer, ch, 100);
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_ready());
+        assert!(poll_once(first.as_mut()).is_ready());
+
+        let wrtes = wrte_payloads(&seen);
+        assert_eq!(wrtes.len(), 3, "expected three WRTEs, got {wrtes:?}");
+        assert_eq!(&wrtes[0], b"aaaaa");
+        assert_eq!(
+            &wrtes[1], b"bbbbb",
+            "the queued writer goes before the returning one"
+        );
+        assert_eq!(&wrtes[2], b"aaaaa");
+    }
+
+    #[test]
+    fn a_grant_is_served_in_arrival_order_not_by_the_scheduler() {
+        // A budget of 5 lets the first writer send one chunk and queue
+        // again behind the second; the grant that follows covers both.
+        let (mut reader, writer, ch, seen) =
+            split_one_channel_delayed_ack(5, &[okay_with_budget(1, 100)]);
+
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaaaaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+
+        // The reader dispatches the grant that covers everyone...
+        let mut buf = [0u8; 8];
+        {
+            let mut read = Box::pin(reader.read_channel(ch, &mut buf));
+            let _ = poll_once(read.as_mut());
+        }
+
+        // ...and polling the second writer first must not let it cut
+        // into the frame the first one is still sending.
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert!(poll_once(first.as_mut()).is_ready());
+        assert!(poll_once(second.as_mut()).is_ready());
+
+        let wrtes = wrte_payloads(&seen);
+        assert_eq!(wrtes.len(), 3, "expected three WRTEs, got {wrtes:?}");
+        assert_eq!(&wrtes[0], b"aaaaa");
+        assert_eq!(&wrtes[1], b"aaaaa");
+        assert_eq!(&wrtes[2], b"bbbbb");
+    }
+
+    #[test]
+    fn a_cancelled_head_hands_its_turn_to_the_next_writer() {
+        let (mut reader, writer, ch, seen) =
+            split_one_channel_delayed_ack(0, &[okay_with_budget(1, 50)]);
+
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+
+        // Dropped before it ever sent a byte: the head of the queue
+        // leaves, and the turn has to pass on.
+        drop(first);
+
+        let mut buf = [0u8; 8];
+        {
+            let mut read = Box::pin(reader.read_channel(ch, &mut buf));
+            let _ = poll_once(read.as_mut());
+        }
+
+        assert!(poll_once(second.as_mut()).is_ready());
+        let wrtes = wrte_payloads(&seen);
+        assert_eq!(wrtes.len(), 1, "expected one WRTE, got {wrtes:?}");
+        assert_eq!(&wrtes[0], b"bbbbb");
+    }
+
+    #[test]
+    fn a_cancelled_place_mid_queue_is_skipped_when_reached() {
+        let (mut reader, writer, ch, seen) =
+            split_one_channel_delayed_ack(0, &[okay_with_budget(1, 50)]);
+
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        let mut third = Box::pin(writer.write_channel(ch, b"ccccc"));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert!(poll_once(third.as_mut()).is_pending());
+
+        // A hole in the middle of the queue, not at its head.
+        drop(second);
+
+        let mut buf = [0u8; 8];
+        {
+            let mut read = Box::pin(reader.read_channel(ch, &mut buf));
+            let _ = poll_once(read.as_mut());
+        }
+
+        assert!(poll_once(first.as_mut()).is_ready());
+        assert!(poll_once(third.as_mut()).is_ready());
+
+        let wrtes = wrte_payloads(&seen);
+        assert_eq!(wrtes.len(), 2, "expected two WRTEs, got {wrtes:?}");
+        assert_eq!(&wrtes[0], b"aaaaa");
+        assert_eq!(&wrtes[1], b"ccccc");
     }
 }
 

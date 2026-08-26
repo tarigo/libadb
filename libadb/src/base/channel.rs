@@ -1,3 +1,4 @@
+use alloc::collections::BTreeSet;
 use bytes::BytesMut;
 use core::future::Future;
 use embedded_io::ErrorType;
@@ -36,10 +37,19 @@ pub(crate) enum DispatchOutcome {
         remote_id: u32,
         len: usize,
     },
-    SlotUpdated {
+    /// An OKAY refilled the slot's send budget: one writer can proceed.
+    CreditGranted {
         #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
+    /// A CLSE closed the slot: every waiter has to see the error.
+    SlotClosed {
+        #[allow(dead_code)] // read only by split::Reader, to wake writers
+        idx: usize,
+    },
+    /// A WRTE was buffered with its acknowledgement held back: readers
+    /// wait on the socket and writers on credit, so nobody needs waking.
+    DataBuffered,
     Unmatched,
 }
 
@@ -68,17 +78,17 @@ pub(crate) fn dispatch_packet<E>(
                             remote_id,
                             len,
                         },
-                        AckDecision::Hold => DispatchOutcome::SlotUpdated { idx },
+                        AckDecision::Hold => DispatchOutcome::DataBuffered,
                     },
                 );
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
                 slot.apply_ready(&pkt.data, delayed_ack)?;
-                return Ok(DispatchOutcome::SlotUpdated { idx });
+                return Ok(DispatchOutcome::CreditGranted { idx });
             }
             Command::Close if pkt.arg1 == slot.local_id => {
                 slot.apply_close();
-                return Ok(DispatchOutcome::SlotUpdated { idx });
+                return Ok(DispatchOutcome::SlotClosed { idx });
             }
             _ => {}
         }
@@ -146,6 +156,18 @@ pub(crate) struct ChannelSlot {
     /// Bytes received for this channel that the peer has not been
     /// acknowledged for yet — the backpressure the device feels.
     pub unacked: usize,
+    /// Send-queue place currently allowed to reserve credit. The queue
+    /// keeps concurrent `split::Writer`s in arrival order: places are
+    /// handed out by [`send_enqueue`](Self::send_enqueue) and only the
+    /// holder of `send_q_head` may take budget.
+    pub send_q_head: u64,
+    pub send_q_tail: u64,
+    /// Places whose writer left the queue unserved; skipped when the
+    /// head reaches them. Bounded: a hole is only recorded below a
+    /// place still occupied — a leaving tail reclaims itself and any
+    /// holes adjacent to it — so cancellation churn cannot grow this
+    /// past the caller's own peak of concurrent writers.
+    pub send_q_gone: BTreeSet<u64>,
 }
 
 impl ChannelSlot {
@@ -158,6 +180,9 @@ impl ChannelSlot {
             wrte_acked: true,
             send_budget: 0,
             unacked: 0,
+            send_q_head: 0,
+            send_q_tail: 0,
+            send_q_gone: BTreeSet::new(),
         }
     }
 
@@ -310,6 +335,58 @@ impl ChannelSlot {
             self.wrte_acked = true;
         }
     }
+
+    /// Take a place at the back of the send queue.
+    #[allow(dead_code)] // used only by split::Writer
+    pub fn send_enqueue(&mut self) -> u64 {
+        let place = self.send_q_tail;
+        self.send_q_tail += 1;
+        place
+    }
+
+    /// The place currently allowed to reserve credit.
+    #[allow(dead_code)] // used only by split::Writer
+    pub fn send_turn(&self) -> u64 {
+        self.send_q_head
+    }
+
+    /// Move the queue past the served head, skipping places whose
+    /// writer already left.
+    #[allow(dead_code)] // used only by split::Writer
+    pub fn send_advance(&mut self) {
+        self.send_q_head += 1;
+        while self.send_q_gone.remove(&self.send_q_head) {
+            self.send_q_head += 1;
+        }
+    }
+
+    /// Leave the queue from `place` without being served. Returns
+    /// whether the head moved — the caller then wakes the next writer.
+    ///
+    /// A leaving tail hands its place straight back — together with any
+    /// holes that end up at the tail with it — so a caller that keeps
+    /// queueing and dropping writes behind a blocked head reuses one
+    /// place instead of growing the hole set.
+    #[allow(dead_code)] // used only by split::Writer
+    pub fn send_leave(&mut self, place: u64) -> bool {
+        if place == self.send_q_head {
+            self.send_advance();
+            true
+        } else if place + 1 == self.send_q_tail {
+            self.send_q_tail = place;
+            while self.send_q_tail > self.send_q_head
+                && self.send_q_gone.remove(&(self.send_q_tail - 1))
+            {
+                self.send_q_tail -= 1;
+            }
+            false
+        } else if place > self.send_q_head {
+            self.send_q_gone.insert(place);
+            false
+        } else {
+            false
+        }
+    }
 }
 
 pub(crate) fn channel_ids_of<E>(
@@ -424,5 +501,29 @@ where
     /// Consumes the `Channel`.
     pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
         self.conn.close_channel(self.id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChannelSlot;
+
+    #[test]
+    fn cancellation_churn_behind_a_blocked_head_does_not_accumulate() {
+        let mut slot = ChannelSlot::new(1);
+        let _head = slot.send_enqueue();
+
+        for _ in 0..1_000 {
+            let mid = slot.send_enqueue();
+            let tail = slot.send_enqueue();
+            // Dropped mid-queue: a hole, while `tail` still lives...
+            assert!(!slot.send_leave(mid));
+            // ...and the leaving tail reclaims itself and the hole.
+            assert!(!slot.send_leave(tail));
+        }
+
+        assert!(slot.send_q_gone.is_empty());
+        assert_eq!(slot.send_q_tail, 1);
+        assert_eq!(slot.send_q_head, 0);
     }
 }
