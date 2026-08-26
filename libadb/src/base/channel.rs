@@ -11,6 +11,10 @@ use super::error::{Error, ProtocolError, RxOverflow};
 use super::protocol::command::Command;
 use super::protocol::Packet;
 
+/// AOSP's adbd always sends the 4-byte credit; when a peer omits it,
+/// the operation that received the packet fails with
+/// [`ProtocolError::ShortReadyPayload`] — deliberate strictness over
+/// guessing a budget.
 pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
     if payload.len() >= 4 {
         Ok(u32::from_le_bytes([
