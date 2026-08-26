@@ -25,7 +25,9 @@
 //!   bytes to fit the largest `DATA` chunk the device may send.
 //!
 //! Passing a buffer that is too small yields
-//! [`Error::ReceiveBufferFull`].
+//! [`Error::ReceiveBufferFull`] — except for a `FAIL` body, which is
+//! truncated to the buffer instead so the device's error is never
+//! masked by a buffer complaint.
 //!
 //! # Examples
 //!
@@ -185,12 +187,23 @@ where
     async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>> {
         let msg_len = self.peek_u32(4) as usize;
         self.rx.head += HEADER_SIZE;
-        if msg_len == 0 {
-            return Ok(Vec::new());
+        // The device's message outranks a buffer complaint: keep what
+        // fits and drain the rest, so the error surfaces truncated
+        // rather than masked by ReceiveBufferFull — and the stream
+        // stays consistent for whatever the caller does next.
+        let take = msg_len.min(self.rx.buf.len());
+        if take > 0 {
+            self.rx.fill_at_least(&mut self.channel, take).await?;
         }
-        self.rx.fill_at_least(&mut self.channel, msg_len).await?;
-        let msg = self.rx.buf[self.rx.head..self.rx.head + msg_len].to_vec();
-        self.rx.head += msg_len;
+        let msg = self.rx.buf[self.rx.head..self.rx.head + take].to_vec();
+        self.rx.head += take;
+        let mut left = msg_len - take;
+        while left > 0 {
+            let chunk = left.min(self.rx.buf.len());
+            self.rx.fill_at_least(&mut self.channel, chunk).await?;
+            self.rx.head += chunk;
+            left -= chunk;
+        }
         Ok(msg)
     }
 

@@ -110,7 +110,8 @@ pub enum AuthError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncError {
-    /// Device returned a `FAIL` response.
+    /// Device returned a `FAIL` response. The message is truncated to
+    /// the session buffer when the device sent more than it holds.
     Failed(Vec<u8>),
     /// Unexpected sync response command ID.
     UnexpectedId([u8; 4]),
