@@ -29,6 +29,10 @@ pub trait Runtime {
     type Tcp: Splittable + Send + 'static;
 
     /// Dial `host:port`.
+    ///
+    /// Implementations disable Nagle (`TCP_NODELAY`), as `adb` itself
+    /// does: the protocol answers small packets with small packets, and
+    /// coalescing them costs a delayed-ACK round on every exchange.
     fn connect_tcp(
         host: &str,
         port: u16,
@@ -147,6 +151,7 @@ impl Runtime for Tokio {
         let host = alloc::string::String::from(host);
         async move {
             let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+            stream.set_nodelay(true)?;
             Ok(crate::transport::tcp::TokioTcp::new(stream))
         }
     }
@@ -186,6 +191,7 @@ impl Runtime for Smol {
         let host = alloc::string::String::from(host);
         async move {
             let stream = smol::net::TcpStream::connect((host.as_str(), port)).await?;
+            stream.set_nodelay(true)?;
             Ok(crate::transport::tcp::SmolTcp::new(stream))
         }
     }

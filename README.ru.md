@@ -64,6 +64,7 @@ use libadb::shell::v2;
 use libadb::{Connection, Feature, TokioTcp};
 
 let tcp = tokio::net::TcpStream::connect("127.0.0.1:5555").await?;
+tcp.set_nodelay(true)?; // ADB болтлив: Нейгл стоит round-trip на каждый обмен
 let transport = TokioTcp::new(tcp);
 
 let mut conn = Connection::<_>::connect(
