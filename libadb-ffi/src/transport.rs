@@ -86,6 +86,7 @@ pub(crate) fn connect(uri_str: &str) -> Result<FfiTransport, FfiConnectError> {
     match uri {
         Uri::Tcp { host, port } => {
             let stream = TcpStream::connect((host, port)).map_err(FfiConnectError::Tcp)?;
+            stream.set_nodelay(true).map_err(FfiConnectError::Tcp)?;
             Ok(FfiTransport::Tcp(BlockingTcp(stream)))
         }
         Uri::Usb(selector) => {

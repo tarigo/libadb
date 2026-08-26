@@ -63,9 +63,17 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     let auth = AdbKeyAuth::load()?;
 
     #[cfg(feature = "tokio")]
-    let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
+    let transport = {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        libadb::TokioTcp::new(stream)
+    };
     #[cfg(all(feature = "smol", not(feature = "tokio")))]
-    let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
+    let transport = {
+        let stream = smol::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        libadb::SmolTcp::new(stream)
+    };
 
     eprintln!("[*] connecting to {addr} ...");
     let mut conn = Connection::<_>::connect(transport, auth, &[])
@@ -138,9 +146,17 @@ async fn run_command(addr: &str, command: &str) -> Result<(), Box<dyn std::error
     let auth = AdbKeyAuth::load()?;
 
     #[cfg(feature = "tokio")]
-    let transport = libadb::TokioTcp::new(tokio::net::TcpStream::connect(addr).await?);
+    let transport = {
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        libadb::TokioTcp::new(stream)
+    };
     #[cfg(all(feature = "smol", not(feature = "tokio")))]
-    let transport = libadb::SmolTcp::new(smol::net::TcpStream::connect(addr).await?);
+    let transport = {
+        let stream = smol::net::TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        libadb::SmolTcp::new(stream)
+    };
 
     eprintln!("[*] connecting to {addr} ...");
     let mut conn = Connection::<_>::connect(transport, auth, &[])
