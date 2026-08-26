@@ -233,12 +233,20 @@ unsafe fn handshake<A: Authenticator>(
 /// connection stays usable: bytes of a partially received packet are
 /// kept, so the next read continues where this one stopped.
 ///
-/// A *write* timeout is a harder stop: firing mid-packet abandons a
-/// write the device has partially seen, so the connection is marked
-/// desynchronized and every later channel operation fails with
-/// [`AdbStatus::Desynchronized`] — metadata queries and this setter
-/// still answer. Set it only where tearing the connection down beats
-/// blocking; for a recoverable bound, use the read timeout.
+/// **Platform note.** That recoverable-read guarantee holds on Unix,
+/// where `SO_RCVTIMEO` leaves the socket intact. On Windows, Winsock
+/// documents a blocking receive that expires under `SO_RCVTIMEO` as
+/// leaving the connection in an indeterminate state and advises
+/// closing it — so there a timed-out read means close the connection,
+/// not read again. Until this path uses a readiness-based deadline on
+/// Windows, treat the read timeout as recoverable on Unix only.
+///
+/// A *write* timeout is a harder stop even on Unix: firing mid-packet
+/// abandons a write the device has partially seen, so the connection
+/// is marked desynchronized and every later channel operation fails
+/// with [`AdbStatus::Desynchronized`] — metadata queries and this
+/// setter still answer. Set it only where tearing the connection down
+/// beats blocking; for a recoverable bound, use the read timeout.
 ///
 /// # Safety
 /// `conn` must be a valid handle.

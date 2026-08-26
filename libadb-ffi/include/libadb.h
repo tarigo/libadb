@@ -106,12 +106,15 @@ void adb_connection_free(adb_connection_t *conn);
  * knob and answer ADB_ERR_INVALID_ARG. A read that hits the timeout
  * fails with ADB_ERR_IO and the connection stays usable: bytes of a
  * partially received packet are kept, so the next read continues
- * where this one stopped. A write timeout is a harder stop: firing
- * mid-packet abandons a write the device has partially seen, so the
- * connection is marked desynchronized and every later channel
- * operation fails with ADB_ERR_DESYNCHRONIZED (metadata queries and
- * this setter still answer). Prefer the read timeout for a
- * recoverable bound. */
+ * where this one stopped. This recoverable-read guarantee holds on
+ * Unix; on Windows a receive that expires under SO_RCVTIMEO leaves the
+ * connection indeterminate (Winsock advises closing it), so there a
+ * timed-out read means close, not read again. A write timeout is a
+ * harder stop even on Unix: firing mid-packet abandons a write the
+ * device has partially seen, so the connection is marked
+ * desynchronized and every later channel operation fails with
+ * ADB_ERR_DESYNCHRONIZED (metadata queries and this setter still
+ * answer). Prefer the read timeout for a recoverable bound. */
 adb_status_t adb_connection_set_io_timeout_ms(
     adb_connection_t *conn,
     uint32_t          read_ms,

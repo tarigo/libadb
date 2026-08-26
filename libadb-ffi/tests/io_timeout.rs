@@ -1,6 +1,7 @@
-//! A read timeout set through the C API surfaces as ADB_ERR_IO and
-//! leaves the connection usable, instead of parking the caller forever
-//! on a silent device.
+//! A read timeout set through the C API surfaces as ADB_ERR_IO instead
+//! of parking the caller forever on a silent device. On Unix — the only
+//! platform where the contract promises it — the connection also stays
+//! usable across the timeout, partially received packet included.
 
 use std::ffi::{c_void, CString};
 use std::ptr;
@@ -22,7 +23,7 @@ unsafe extern "C" fn never_signs(
 }
 
 #[test]
-fn a_read_timeout_fails_with_io_and_keeps_the_connection() {
+fn a_read_timeout_fails_with_io_instead_of_parking() {
     // One pushed WRTE, then silence.
     let (addr, _rx, _parked) = fake_adbd_pushing(vec![b"hello".to_vec()]);
     let uri = CString::new(format!("tcp://{addr}")).unwrap();
@@ -69,6 +70,7 @@ fn a_read_timeout_fails_with_io_and_keeps_the_connection() {
 /// A device that sends half a WRTE, then holds the rest until the test
 /// releases it — the partially received packet must survive the
 /// timed-out read. The halves are coordinated, not timed.
+#[cfg(unix)]
 #[allow(clippy::type_complexity)]
 fn half_then_rest_adbd() -> (
     String,
@@ -116,6 +118,10 @@ fn half_then_rest_adbd() -> (
     (addr, half_rx, release_tx)
 }
 
+// Unix-only: the documented recoverable-read guarantee does not hold
+// on Windows, where a timed-out receive leaves the socket
+// indeterminate — there this test would demand unsupported behaviour.
+#[cfg(unix)]
 #[test]
 fn a_packet_split_by_a_timeout_survives_it() {
     let (addr, half_rx, release_tx) = half_then_rest_adbd();
@@ -234,18 +240,26 @@ fn a_write_timeout_fails_with_io_and_desynchronizes() {
     assert_eq!(status, adb::AdbStatus::Ok, "set_io_timeout failed");
 
     // Pump data at a peer that never reads. Once both socket buffers
-    // are full, a write blocks past the timeout and fails with Io.
+    // are full, a write blocks past the 300 ms timeout and fails with
+    // Io — and it must, well before the device's own eventual close.
     let chunk = vec![0x61u8; 256 * 1024];
     let mut saw_io = false;
     let t0 = Instant::now();
     for _ in 0..256 {
         let status = unsafe { adb::adb_write_channel(conn, id, chunk.as_ptr(), chunk.len()) };
         if status == adb::AdbStatus::Io {
+            // The Io is the send timeout, not the device's later close:
+            // `deaf_adbd` holds the socket open far longer than this.
+            assert!(
+                t0.elapsed().as_secs() < 3,
+                "Io arrived too late to be the send timeout: {:?}",
+                t0.elapsed()
+            );
             saw_io = true;
             break;
         }
         assert_eq!(status, adb::AdbStatus::Ok, "write failed early");
-        assert!(t0.elapsed().as_secs() < 30, "writes never blocked");
+        assert!(t0.elapsed().as_secs() < 5, "writes never blocked");
     }
     assert!(saw_io, "the write timeout never fired");
 
@@ -258,8 +272,11 @@ fn a_write_timeout_fails_with_io_and_desynchronizes() {
         "expected a poisoned connection"
     );
 
-    // Metadata still answers.
+    // Metadata still answers, and so does the timeout setter — both
+    // are contractually outside the desynchronized failure scope.
     assert!(unsafe { adb::adb_connection_max_payload(conn) } > 0);
+    let status = unsafe { adb::adb_connection_set_io_timeout_ms(conn, 0, 0) };
+    assert_eq!(status, adb::AdbStatus::Ok, "setter must survive desync");
 
     unsafe { adb::adb_connection_free(conn) };
 }

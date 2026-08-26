@@ -195,7 +195,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                     feature.wire_name()
                 )
             }
-            Self::Desynchronized => f.write_str("connection desynchronized by a cancelled write"),
+            Self::Desynchronized => f.write_str("connection desynchronized by an unfinished write"),
         }
     }
 }
