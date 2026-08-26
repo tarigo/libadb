@@ -162,6 +162,11 @@ impl SharedMock {
         self.lock().acks_for(local_id)
     }
 
+    /// Everything the split halves sent, in wire order.
+    pub(crate) fn sent(&self) -> Vec<(Command, u32, u32, Vec<u8>)> {
+        self.lock().sent()
+    }
+
     fn new(mock: Mock) -> Self {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(mock)))
     }
@@ -341,6 +346,39 @@ pub(crate) fn split_with_channel(
     let (mut reader, writer) = conn.split().unwrap();
     let ch = now(reader.open_channel(b"shell:\0")).unwrap();
     (reader, writer, ch)
+}
+
+/// A split connection with delayed-ack on, one channel whose OPEN
+/// grants `budget` bytes, and `extra` packets queued behind it — the
+/// grants the reader dispatches when polled.
+#[cfg(feature = "split")]
+#[allow(clippy::type_complexity)]
+pub(crate) fn split_one_channel_delayed_ack(
+    budget: u32,
+    extra: &[Packet],
+) -> (
+    crate::split::Reader<SharedMock, SharedMock>,
+    crate::split::Writer<SharedMock>,
+    ChannelId,
+    SharedMock,
+) {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn_with("shell_v2,delayed_ack"))
+        .feed(&okay_with_budget(1, budget));
+    for pkt in extra {
+        mock.feed(pkt);
+    }
+    let transport = SharedMock::new(mock);
+    let seen = transport.clone();
+    let conn = now(Connection::<_>::connect_with_raw_banner(
+        transport,
+        NoAuth,
+        b"host::features=shell_v2,delayed_ack",
+    ))
+    .unwrap();
+    let (mut reader, writer) = conn.split().unwrap();
+    let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+    (reader, writer, ch, seen)
 }
 
 pub(crate) fn cnxn_with(features: &str) -> Packet {
