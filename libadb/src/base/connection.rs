@@ -374,6 +374,7 @@ where
             local_id_counter: AtomicU32::new(self.local_id_counter),
             desync: self.desync,
             incoming: std::sync::Mutex::new(self.incoming),
+            staged: std::sync::Mutex::new(alloc::vec::Vec::new()),
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
