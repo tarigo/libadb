@@ -349,6 +349,63 @@ mod incoming {
     }
 
     #[test]
+    fn a_withdrawal_racing_the_accept_closes_the_slot() {
+        // The zero-local-id CLSE was buffered behind the OPEN: by the
+        // time it is dispatched, the request is an accepted slot, not
+        // a queued one — it must close like any remote CLSE.
+        let mut conn = connected(b"host::features=shell_v2", "shell_v2");
+        now(conn.dispatch(open_pkt(90, 0, b"tcp:9\0"))).unwrap();
+        let ch = now(conn.try_accept_incoming().unwrap().accept()).unwrap();
+
+        now(conn.dispatch(Packet::close(90, 0))).unwrap();
+
+        let mut buf = [0u8; 8];
+        let err = now(conn.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(
+            matches!(err, Error::ChannelClosed),
+            "expected ChannelClosed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_accept_frees_the_slot_and_requeues() {
+        use core::task::{Context, Poll, Waker};
+
+        // A transport whose write parks forever: accept reserves a slot,
+        // sends READY, and hangs — the exact window a cancel lands in.
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2"));
+        // CNXN writes header+payload (two calls); the empty-payload READY
+        // that accept sends is the very next write.
+        mock.stall_write(2);
+        let mut conn = now(Connection::<_>::connect_with_raw_banner(
+            mock,
+            NoAuth,
+            b"host::features=shell_v2",
+        ))
+        .unwrap();
+
+        now(conn.dispatch(open_pkt(66, 0, b"tcp:6\0"))).unwrap();
+        {
+            let incoming = conn.try_accept_incoming().unwrap();
+            let mut fut = core::pin::pin!(incoming.accept());
+            let mut cx = Context::from_waker(Waker::noop());
+            // Poll once: the slot is reserved, the READY write stalls.
+            assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+            // Drop mid-flight — cancellation.
+        }
+
+        // The reserved slot came back: the table is empty again.
+        assert!(
+            conn.channels.iter().all(Option::is_none),
+            "the reserved slot leaked past the cancel"
+        );
+        // The request came back too: it is acceptable again.
+        let again = conn.try_accept_incoming().expect("request lost on cancel");
+        assert_eq!(again.destination(), b"tcp:6\0");
+    }
+
+    #[test]
     fn the_ready_credit_is_clamped_to_the_receive_cap() {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2,delayed_ack"));

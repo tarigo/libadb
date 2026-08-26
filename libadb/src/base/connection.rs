@@ -7,7 +7,7 @@ use embedded_io_async::{Read, Write};
 use alloc::collections::VecDeque;
 
 use super::channel::{
-    channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
+    channel_ids_of, clse_closes, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
     DispatchOutcome, PendingOpen, SelectResult,
 };
 use super::device_banner::DeviceBanner;
@@ -61,6 +61,10 @@ where
 {
     conn: &'c mut Connection<T, MC, MP, MF>,
     pending: Option<PendingOpen>,
+    /// A slot reserved by `accept` before READY is on the wire. If the
+    /// future is cancelled or errors before that, `Drop` frees it —
+    /// otherwise a cancelled accept would occupy it forever.
+    reserved: Option<usize>,
 }
 
 impl<T, const MC: usize, const MP: usize, const MF: usize> Incoming<'_, T, MC, MP, MF>
@@ -79,52 +83,60 @@ where
     ///
     /// With every slot in use the request is refused with CLSE and
     /// [`Error::NoFreeChannels`] comes back.
+    ///
+    /// Dropping this future never loses the request: the reserved slot
+    /// is released and the request returns to the queue. The connection
+    /// itself survives only a drop that lands before the READY write is
+    /// first polled — from that poll on, a drop abandons a packet
+    /// mid-write and the connection is marked desynchronized, as with
+    /// any cancelled write.
     pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
-        let pending = self.pending.take().expect("undecided");
-        let conn = &mut *self.conn;
-        let checksum = conn.checksum();
+        let pending = self.pending.as_ref().expect("undecided");
+        let (remote_id, credit) = (pending.remote_id, pending.credit);
+        let checksum = self.conn.checksum();
 
-        let Some(slot_idx) = conn.channels.iter().position(|s| s.is_none()) else {
+        let Some(slot_idx) = self.conn.channels.iter().position(|s| s.is_none()) else {
             send_pkt(
-                &mut conn.transport,
-                &conn.desync,
-                &Packet::close(0, pending.remote_id),
+                &mut self.conn.transport,
+                &self.conn.desync,
+                &Packet::close(0, remote_id),
                 checksum,
             )
             .await?;
+            self.pending.take();
             return Err(Error::NoFreeChannels);
         };
 
-        let local_id = conn.next_local_id();
+        let local_id = self.conn.next_local_id();
         let mut slot = ChannelSlot::new(local_id);
-        slot.remote_id = pending.remote_id;
+        slot.remote_id = remote_id;
         slot.state = ChannelState::Open;
-        if conn.delayed_ack {
+        if self.conn.delayed_ack {
             // OPEN's arg1 is the device's receive credit — our budget.
-            slot.send_budget = i64::from(pending.credit);
+            slot.send_budget = i64::from(credit);
         }
-        conn.channels[slot_idx] = Some(slot);
+        self.conn.channels[slot_idx] = Some(slot);
+        // Armed for rollback until READY is committed.
+        self.reserved = Some(slot_idx);
 
         let credit_bytes;
-        let payload: &[u8] = if conn.delayed_ack {
-            credit_bytes = conn.config.advertised_ack_bytes().to_le_bytes();
+        let payload: &[u8] = if self.conn.delayed_ack {
+            credit_bytes = self.conn.config.advertised_ack_bytes().to_le_bytes();
             &credit_bytes
         } else {
             &[]
         };
         send_pkt(
-            &mut conn.transport,
-            &conn.desync,
-            &Packet::new(
-                Command::Ready,
-                local_id,
-                pending.remote_id,
-                payload.to_vec(),
-            ),
+            &mut self.conn.transport,
+            &self.conn.desync,
+            &Packet::new(Command::Ready, local_id, remote_id, payload.to_vec()),
             checksum,
         )
         .await?;
 
+        // READY is out: the slot is committed and the request consumed.
+        self.reserved = None;
+        self.pending.take();
         Ok(ChannelId {
             slot: slot_idx,
             local_id,
@@ -133,16 +145,23 @@ where
 
     /// Refuse the channel: answers CLSE and frees nothing, since
     /// nothing was allocated.
+    ///
+    /// Dropping this future never loses the request — it returns to the
+    /// queue. The connection itself survives only a drop that lands
+    /// before the CLSE write is first polled; after that it is marked
+    /// desynchronized, as with any cancelled write.
     pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let pending = self.pending.take().expect("undecided");
+        let remote_id = self.pending.as_ref().expect("undecided").remote_id;
         let checksum = self.conn.checksum();
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::close(0, pending.remote_id),
+            &Packet::close(0, remote_id),
             checksum,
         )
-        .await
+        .await?;
+        self.pending.take();
+        Ok(())
     }
 }
 
@@ -151,6 +170,12 @@ where
     T: Read + Write,
 {
     fn drop(&mut self) {
+        // A slot reserved but never confirmed by READY: release it.
+        if let Some(idx) = self.reserved.take() {
+            if let Some(slot) = self.conn.channels.get_mut(idx) {
+                *slot = None;
+            }
+        }
         if let Some(pending) = self.pending.take() {
             self.conn.incoming.push_front(pending);
         }
@@ -502,7 +527,7 @@ where
             return Ok(n);
         }
 
-        let (local_id, _) = self.channel_ids(ch)?;
+        let (local_id, remote_id) = self.channel_ids(ch)?;
         let rx_cap = self.config.rx_cap();
 
         loop {
@@ -525,7 +550,7 @@ where
                     }
                     return Ok(n);
                 }
-                Command::Close if pkt.arg1 == local_id => {
+                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_close();
                     }
@@ -611,9 +636,17 @@ where
     /// Packets for other channels keep being dispatched while waiting,
     /// exactly as in [`read_channel`](Self::read_channel). The returned
     /// [`Incoming`] borrows the connection until [`Incoming::accept`]
-    /// or [`Incoming::reject`] resolves it; dropping it instead puts
-    /// the request back at the head of the queue, so cancelling this
-    /// future loses nothing.
+    /// or [`Incoming::reject`] resolves it; dropping the verdict
+    /// undecided puts the request back at the head of the queue and
+    /// loses nothing.
+    ///
+    /// Dropping the future while it still *waits* for a packet is
+    /// another matter: the wait is a transport read, so cancelling it
+    /// inherits the transport's
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) — where
+    /// reads are not cancel-safe (USB), an abandoned in-flight read can
+    /// lose packet bytes, exactly as with a cancelled
+    /// [`read_channel`](Self::read_channel).
     ///
     /// Pending requests are bounded by the channel table size: past
     /// that, new OPENs are refused with CLSE on arrival.
@@ -629,6 +662,7 @@ where
                 return Ok(Incoming {
                     conn: self,
                     pending: Some(pending),
+                    reserved: None,
                 });
             }
             let pkt = recv_pkt(
@@ -650,6 +684,7 @@ where
         Some(Incoming {
             conn: self,
             pending: Some(pending),
+            reserved: None,
         })
     }
 
@@ -720,7 +755,7 @@ where
             return Ok(SelectResult::Data(n));
         }
 
-        let (local_id, _) = self.channel_ids(ch)?;
+        let (local_id, remote_id) = self.channel_ids(ch)?;
         let delayed_ack = self.delayed_ack;
         let rx_cap = self.config.rx_cap();
         let watermark = self.config.rx_watermark();
@@ -754,7 +789,7 @@ where
                         }
                         return Ok(SelectResult::Data(n));
                     }
-                    Command::Close if pkt.arg1 == local_id => {
+                    Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
                         if let Some(slot) = self.channels[ch.slot].as_mut() {
                             slot.apply_close();
                         }
@@ -914,7 +949,7 @@ where
                 }
             }
 
-            let local_id = self.channel_ids(ch)?.0;
+            let (local_id, remote_id) = self.channel_ids(ch)?;
             let pkt = recv_pkt(
                 &mut self.transport,
                 &mut self.recv_buf,
@@ -931,7 +966,7 @@ where
                         }
                     }
                 }
-                Command::Close if pkt.arg1 == local_id => {
+                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_close();
                     }
