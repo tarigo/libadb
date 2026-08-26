@@ -138,6 +138,23 @@ dominates the cost of a channel write: skipping it made a 32 KiB
 See the [`libadb/examples/`](libadb/examples/) directory for end-to-end
 programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
+## Limitations
+
+- Device-initiated `OPEN` is not handled: reverse forwards
+  (`adb reverse`) and anything else the device opens toward the host
+  are not served. Channels are host-opened only.
+- With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
+  as AOSP's adbd always does; the operation that received a creditless
+  one fails with `ShortReadyPayload` rather than having a budget
+  guessed for it.
+- USB reads cannot be cancelled safely mid-transfer on either backend:
+  `select` takes effect between reads (see `ReadCancelSafety`), and
+  aborting an in-flight read forfeits the connection. The `rusb`
+  backend blocks the thread the transfer runs on — a runtime pool
+  thread, or the caller itself under the `Inline` runtime and under
+  `Tokio` outside an active Tokio runtime — until the device answers
+  or detaches; `nusb` waits without parking an OS thread.
+
 ## Transports
 
 - `TokioTcp` — wraps `tokio::net::TcpStream`
