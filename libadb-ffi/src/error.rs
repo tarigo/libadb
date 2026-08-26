@@ -3,7 +3,7 @@ use alloc::format;
 use core::cell::RefCell;
 use core::ffi::c_char;
 
-use libadb::base::error::Error;
+use libadb::base::error::{Error, ReverseError};
 
 use crate::transport::FfiConnectError;
 
@@ -21,6 +21,9 @@ pub enum AdbStatus {
     ChannelClosed = 7,
     NoFreeChannels = 8,
     Desynchronized = 9,
+    /// The device's reverse rule service refused the request; the
+    /// device's own message is in [`adb_last_error`].
+    Reverse = 10,
     Internal = 255,
 }
 
@@ -70,6 +73,10 @@ pub(crate) fn fail_error<E: core::fmt::Display>(e: Error<E>) -> AdbStatus {
         Error::ChannelClosed => AdbStatus::ChannelClosed,
         Error::NoFreeChannels => AdbStatus::NoFreeChannels,
         Error::Desynchronized => AdbStatus::Desynchronized,
+        // The device refused the rule — an answer, not a breakage; a
+        // malformed reply is a protocol fault like any other.
+        Error::Reverse(ReverseError::Failed(_)) => AdbStatus::Reverse,
+        Error::Reverse(ReverseError::UnexpectedReply) => AdbStatus::Protocol,
         _ => AdbStatus::Internal,
     };
     set(e);
