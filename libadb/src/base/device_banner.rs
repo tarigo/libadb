@@ -21,18 +21,11 @@ pub struct DeviceBanner<const P: usize, const F: usize> {
 
 impl<const P: usize, const F: usize> DeviceBanner<P, F> {
     pub fn from_bytes(raw: impl Into<Bytes>) -> Result<Self, ProtocolError> {
-        let raw = raw.into();
-        core::str::from_utf8(raw.as_ref()).map_err(|_| ProtocolError::InvalidBannerUtf8)?;
-        Self::parse_inner(raw)
+        Self::parse_inner(raw.into())
     }
 
-    #[allow(unsafe_code)]
     fn parse_inner(raw: Bytes) -> Result<Self, ProtocolError> {
-        // SAFETY: the only caller, `from_bytes`, validates `raw` with
-        // `core::str::from_utf8(raw.as_ref())` before reaching this
-        // function. `raw` is moved in verbatim, so its bytes stay valid
-        // UTF-8 for the lifetime of `s`.
-        let s = unsafe { core::str::from_utf8_unchecked(raw.as_ref()) };
+        let s = core::str::from_utf8(raw.as_ref()).map_err(|_| ProtocolError::InvalidBannerUtf8)?;
         let (state, rest) = s
             .split_once(':')
             .ok_or(ProtocolError::InvalidBannerPrefix)?;
@@ -135,14 +128,13 @@ impl<const P: usize, const F: usize> DeviceBanner<P, F> {
         self.raw.as_ref()
     }
 
-    #[allow(unsafe_code)]
     fn str_at(&self, range: &Range<usize>) -> &str {
-        // SAFETY: `self.raw` is the same `Bytes` that was validated in
-        // `from_bytes` before construction, so every sub-slice is also
-        // valid UTF-8. Ranges come from `range_of()` over substrings
-        // produced by `str::split*` on the same buffer, so they sit on
-        // UTF-8 code-point boundaries.
-        unsafe { core::str::from_utf8_unchecked(&self.raw[range.clone()]) }
+        // The ranges come from `range_of()` over substrings that
+        // `str::split*` produced on this same buffer, so they sit on
+        // code-point boundaries of text `parse_inner` validated; a
+        // banner is a few hundred bytes read a handful of times, so
+        // checking again costs nothing.
+        core::str::from_utf8(&self.raw[range.clone()]).expect("banner ranges index validated UTF-8")
     }
 }
 
