@@ -19,7 +19,7 @@ mod rt;
 mod fake_device;
 use fake_device::{session, AuthPolicy, FakeDevice, TEST_SIGNATURE};
 
-#[path = "common/mod.rs"]
+#[path = "common/common.rs"]
 mod common;
 
 use libadb::protocol::constant::{ADB_VERSION, ADB_VERSION_SKIP_CHECKSUM};

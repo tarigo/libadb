@@ -11,7 +11,7 @@ mod rt;
 mod fake_device;
 use fake_device::{session, FakeChannel, FakeDevice};
 
-#[path = "common/mod.rs"]
+#[path = "common/common.rs"]
 mod common;
 
 // ---------------------------------------------------------------------------
