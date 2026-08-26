@@ -10,7 +10,7 @@ mod rt;
 mod fake_device;
 use fake_device::{session, FakeDevice};
 
-#[path = "common/mod.rs"]
+#[path = "common/common.rs"]
 mod common;
 use common::{shell_v2_encode, shell_v2_parse, SH_CLOSE_STDIN, SH_EXIT, SH_STDERR, SH_STDOUT};
 

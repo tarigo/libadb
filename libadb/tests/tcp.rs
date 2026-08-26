@@ -14,7 +14,7 @@ use fake_device::{
     TEST_PUBKEY,
 };
 
-#[path = "common/mod.rs"]
+#[path = "common/common.rs"]
 mod common;
 use common::{expect_missing_feature, handshake, shell_v2_encode, SH_EXIT, SH_STDOUT};
 

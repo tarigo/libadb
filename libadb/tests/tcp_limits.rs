@@ -11,7 +11,7 @@ mod rt;
 mod fake_device;
 use fake_device::{wrap, FakeDevice, FakeSession, TestAuth};
 
-#[path = "common/mod.rs"]
+#[path = "common/common.rs"]
 mod common;
 
 use libadb::protocol::command::CMD_WRTE;
