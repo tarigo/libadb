@@ -34,6 +34,7 @@ typedef enum {
     ADB_ERR_PROTOCOL        = 6,
     ADB_ERR_CHANNEL_CLOSED  = 7,
     ADB_ERR_NO_FREE_CHANNELS = 8,
+    ADB_ERR_DESYNCHRONIZED  = 9,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
 
@@ -99,6 +100,22 @@ adb_status_t adb_connect_with_authenticator(
 
 /* Release a handle returned by adb_connect(). NULL is a no-op. */
 void adb_connection_free(adb_connection_t *conn);
+
+/* Set receive/send timeouts on a tcp:// connection, in milliseconds;
+ * 0 disables the corresponding timeout. USB transports have no such
+ * knob and answer ADB_ERR_INVALID_ARG. A read that hits the timeout
+ * fails with ADB_ERR_IO and the connection stays usable: bytes of a
+ * partially received packet are kept, so the next read continues
+ * where this one stopped. A write timeout is a harder stop: firing
+ * mid-packet abandons a write the device has partially seen, so the
+ * connection is marked desynchronized and every later channel
+ * operation fails with ADB_ERR_DESYNCHRONIZED (metadata queries and
+ * this setter still answer). Prefer the read timeout for a
+ * recoverable bound. */
+adb_status_t adb_connection_set_io_timeout_ms(
+    adb_connection_t *conn,
+    uint32_t          read_ms,
+    uint32_t          write_ms);
 
 /* Negotiated max payload in bytes; 0 if conn is NULL. */
 uint32_t adb_connection_max_payload(const adb_connection_t *conn);

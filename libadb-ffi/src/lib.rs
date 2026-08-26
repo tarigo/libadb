@@ -82,6 +82,8 @@ fn decode_channel_id(id: u64) -> ChannelId {
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,
     pub(crate) writer: FfiWriter,
+    /// Second handle to the TCP socket for timeouts; None over USB.
+    pub(crate) tcp_socket: Option<std::net::TcpStream>,
 }
 
 pub(crate) fn lock_poisoned<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -202,6 +204,10 @@ unsafe fn handshake<A: Authenticator>(
         Ok(t) => t,
         Err(e) => return error::fail_ffi_connect(e),
     };
+    let tcp_socket = match transport::tcp_socket_of(&t) {
+        Ok(s) => s,
+        Err(e) => return error::fail_ffi_connect(transport::FfiConnectError::Tcp(e)),
+    };
 
     let conn = ffi_try!(Connection::connect_with_raw_banner(t, auth, banner_bytes));
 
@@ -213,8 +219,49 @@ unsafe fn handshake<A: Authenticator>(
     let boxed = Box::new(adb_connection_t {
         reader: Arc::new(Mutex::new(reader)),
         writer,
+        tcp_socket,
     });
     *out = Box::into_raw(boxed);
+    AdbStatus::Ok
+}
+
+/// Set receive/send timeouts on a `tcp://` connection, in
+/// milliseconds; 0 disables the corresponding timeout. USB transports
+/// have no such knob and answer [`AdbStatus::InvalidArg`].
+///
+/// A read that hits the timeout fails with [`AdbStatus::Io`], and the
+/// connection stays usable: bytes of a partially received packet are
+/// kept, so the next read continues where this one stopped.
+///
+/// A *write* timeout is a harder stop: firing mid-packet abandons a
+/// write the device has partially seen, so the connection is marked
+/// desynchronized and every later channel operation fails with
+/// [`AdbStatus::Desynchronized`] — metadata queries and this setter
+/// still answer. Set it only where tearing the connection down beats
+/// blocking; for a recoverable bound, use the read timeout.
+///
+/// # Safety
+/// `conn` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn adb_connection_set_io_timeout_ms(
+    conn: *mut adb_connection_t,
+    read_ms: u32,
+    write_ms: u32,
+) -> AdbStatus {
+    error::clear_last_error();
+    if conn.is_null() {
+        return error::fail_invalid_arg("null pointer");
+    }
+    let Some(socket) = &(*conn).tcp_socket else {
+        return error::fail_invalid_arg("timeouts apply to tcp:// transports only");
+    };
+    let as_duration = |ms: u32| (ms > 0).then(|| std::time::Duration::from_millis(u64::from(ms)));
+    if let Err(e) = socket.set_read_timeout(as_duration(read_ms)) {
+        return error::fail_io(e);
+    }
+    if let Err(e) = socket.set_write_timeout(as_duration(write_ms)) {
+        return error::fail_io(e);
+    }
     AdbStatus::Ok
 }
 

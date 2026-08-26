@@ -20,6 +20,7 @@ pub enum AdbStatus {
     Protocol = 6,
     ChannelClosed = 7,
     NoFreeChannels = 8,
+    Desynchronized = 9,
     Internal = 255,
 }
 
@@ -40,6 +41,11 @@ pub(crate) fn clear_last_error() {
 pub(crate) fn fail_invalid_arg(msg: impl core::fmt::Display) -> AdbStatus {
     set(msg);
     AdbStatus::InvalidArg
+}
+
+pub(crate) fn fail_io(msg: impl core::fmt::Display) -> AdbStatus {
+    set(msg);
+    AdbStatus::Io
 }
 
 pub(crate) fn fail_auth(msg: impl core::fmt::Display) -> AdbStatus {
@@ -63,6 +69,7 @@ pub(crate) fn fail_error<E: core::fmt::Display>(e: Error<E>) -> AdbStatus {
         Error::Protocol(_) => AdbStatus::Protocol,
         Error::ChannelClosed => AdbStatus::ChannelClosed,
         Error::NoFreeChannels => AdbStatus::NoFreeChannels,
+        Error::Desynchronized => AdbStatus::Desynchronized,
         _ => AdbStatus::Internal,
     };
     set(e);
