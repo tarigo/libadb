@@ -14,8 +14,16 @@ mod tokio_split {
 
     use crate::transport::{ReadCancelSafety, Splittable};
 
-    // A dropped socket read leaves its bytes in the kernel buffer.
-    impl<T> ReadCancelSafety for FromTokio<T> {
+    // A dropped TCP read leaves its bytes in the kernel buffer. Claimed
+    // for the socket, not for every adapter: `FromTokio` can wrap
+    // readers whose dropped read loses data.
+    impl ReadCancelSafety for FromTokio<TcpStream> {
+        fn read_cancel_safe(&self) -> bool {
+            true
+        }
+    }
+
+    impl ReadCancelSafety for FromTokio<OwnedReadHalf> {
         fn read_cancel_safe(&self) -> bool {
             true
         }
@@ -38,7 +46,9 @@ mod smol_split {
 
     use crate::transport::{ReadCancelSafety, Splittable};
 
-    impl<T> ReadCancelSafety for FromFutures<T> {
+    // Same scope as the tokio impl above: the socket, not the adapter.
+    // Covers the split halves too — they are the same type.
+    impl ReadCancelSafety for FromFutures<TcpStream> {
         fn read_cancel_safe(&self) -> bool {
             true
         }

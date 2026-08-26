@@ -465,6 +465,14 @@ where
 
     /// Read from a channel, returning early if `interrupt` resolves first.
     ///
+    /// How early depends on the transport. Where dropping a read loses
+    /// nothing (TCP), the read is raced against the interrupt and
+    /// cancelled the moment it is due. Where it would lose data (USB),
+    /// the interrupt is checked between reads instead: a read already
+    /// in flight completes first and may return its data ahead of a
+    /// ready interrupt. See
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    ///
     /// After a [`SelectResult::Interrupted`] result the caller can
     /// [`write_channel`](Self::write_channel) and call this method
     /// again — the read resumes cleanly without losing data.
