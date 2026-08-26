@@ -81,6 +81,17 @@ impl core::fmt::Display for FfiConnectError {
     }
 }
 
+/// A second handle to the transport's TCP socket, for socket options;
+/// `Ok(None)` for USB transports. A clone failure is an error, not a
+/// USB lookalike — the caller fails the connect rather than producing
+/// a TCP connection whose timeout setter claims there is no socket.
+pub(crate) fn tcp_socket_of(t: &FfiTransport) -> Result<Option<TcpStream>, std::io::Error> {
+    match t {
+        FfiTransport::Tcp(BlockingTcp(s)) => s.try_clone().map(Some),
+        FfiTransport::Usb(_) => Ok(None),
+    }
+}
+
 pub(crate) fn connect(uri_str: &str) -> Result<FfiTransport, FfiConnectError> {
     let uri = uri::parse(uri_str).map_err(FfiConnectError::Uri)?;
     match uri {
