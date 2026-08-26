@@ -81,6 +81,12 @@ where
     /// Read from the channel, but return early if `interrupt` resolves
     /// first.
     ///
+    /// On a transport whose reads cannot be cancelled without losing
+    /// data (USB), the interrupt is checked between reads: one already
+    /// in flight completes first and may return its data ahead of a
+    /// ready interrupt — see
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    ///
     /// After a [`SelectResult::Interrupted`] result the caller can act
     /// on the interrupt (e.g. forward stdin) and call `select` again —
     /// the channel state is unchanged and the next read will resume.

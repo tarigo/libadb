@@ -123,6 +123,14 @@ impl Splittable for NoTcp {
     }
 }
 
+// `Transport<T, U>` asks both alternatives, so a USB-only build needs
+// this the same way NoUsb provides it for the TCP-only one.
+impl crate::transport::ReadCancelSafety for NoTcp {
+    fn read_cancel_safe(&self) -> bool {
+        match *self {}
+    }
+}
+
 /// The `tokio` runtime.
 #[cfg(feature = "tokio")]
 pub struct Tokio;

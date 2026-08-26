@@ -291,7 +291,12 @@ where
     /// yields `None`, then call `pump` again.
     ///
     /// On [`SelectResult::Interrupted`] no bytes were appended and the
-    /// caller can act on the interrupt before pumping again.
+    /// caller can act on the interrupt before pumping again. On a
+    /// transport whose reads cannot be cancelled without losing data
+    /// (USB), the interrupt is checked between reads: one already in
+    /// flight completes first and may yield [`SelectResult::Data`]
+    /// ahead of a ready interrupt — see
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// Returns [`Error::ReceiveBufferFull`] if there is no free space
     /// in the buffer even after compaction.
