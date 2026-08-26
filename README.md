@@ -134,17 +134,13 @@ dominates the cost of a channel write: skipping it made a 32 KiB
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Binary logcat entries, parsed     |
 | `sync`        | `sync:`                      | `STAT`/`LIST`/`SEND`/`RECV`, v1 + v2 |
 | `track_app`   | `track-app:`                 | Streaming debuggable-process snapshots |
+| `reverse`     | `reverse:…`                  | Reverse-forward rules; incoming channels via `accept_incoming` |
 
 See the [`libadb/examples/`](libadb/examples/) directory for end-to-end
 programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
 ## Limitations
 
-- Device-initiated `OPEN` is accepted through an explicit queue:
-  `accept_incoming()` hands each request over for a verdict (READY on
-  accept, CLSE on reject; a full queue refuses on arrival). What is
-  still missing is the `reverse:` rule service — establishing and
-  listing reverse forwards from this side — which is next in line.
 - With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
   as AOSP's adbd always does; the operation that received a creditless
   one fails with `ShortReadyPayload` rather than having a budget

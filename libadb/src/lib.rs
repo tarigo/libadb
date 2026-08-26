@@ -106,6 +106,7 @@ pub mod base;
 pub mod cmd;
 pub mod exec;
 pub mod logcat;
+pub mod reverse;
 pub mod shell;
 #[cfg(feature = "split")]
 pub mod split;
