@@ -130,6 +130,79 @@ jobs:
           key: test-ffi-${{ matrix.features }}
       - run: just test-ffi-one "${{ matrix.features }}"
 
+  # Line coverage over the feature set the CI tests exercise. This job
+  # only measures — it builds and runs PR-controlled code, so it stays
+  # read-only; publication lives in coverage_badge below, which gets the
+  # write token but never checks out or executes anything from the repo.
+  coverage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      percent: ${{ steps.measure.outputs.percent }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install just and cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - name: Measure line coverage
+        id: measure
+        # jq rounds to one decimal and always prints with a dot, which
+        # keeps the pipeline locale-independent.
+        run: |
+          pct=$(just coverage-json | jq '.data[0].totals.lines.percent * 10 | round / 10')
+          echo "percent=$pct" | tee -a "$GITHUB_OUTPUT"
+
+  # On a main push, publish the percentage as shields.io endpoint JSON
+  # to the single-file `badge-data` branch, which the README badge
+  # reads. Serialized per repo, and skipped when main has moved on, so
+  # an old run finishing late cannot overwrite a newer badge.
+  coverage_badge:
+    needs: coverage
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: coverage-badge
+      cancel-in-progress: false
+    env:
+      COVERAGE: ${{ needs.coverage.outputs.percent }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Publish the coverage badge data
+        run: |
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          latest=$(git ls-remote "$remote" refs/heads/main | cut -f1)
+          if [ "$latest" != "$GITHUB_SHA" ]; then
+            echo "main moved on to $latest; skipping the badge for $GITHUB_SHA"
+            exit 0
+          fi
+          case "${COVERAGE%.*}" in
+            100|9?) color=brightgreen ;;
+            8?)     color=green ;;
+            7?)     color=yellowgreen ;;
+            6?)     color=yellow ;;
+            5?)     color=orange ;;
+            *)      color=red ;;
+          esac
+          dir=$(mktemp -d)
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' \
+            "$COVERAGE" "$color" > "$dir/coverage.json"
+          git -C "$dir" init -q -b badge-data
+          git -C "$dir" config user.name "github-actions[bot]"
+          git -C "$dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$dir" add coverage.json
+          git -C "$dir" commit -qm "coverage ${COVERAGE}%"
+          git -C "$dir" push -f "$remote" badge-data
+
   all_features:
     runs-on: ubuntu-latest
     steps:

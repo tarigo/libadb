@@ -1,9 +1,11 @@
 # Development tasks for libadb. Run `just` to list them.
 #
 # CI drives the same recipes, so a green `just ci` locally means the
-# same commands, flags and feature sets the workflow will run — with one
-# exception: the fuzz job. It needs nightly and cargo-fuzz and takes a
-# minute per target, so it stays out of `ci`; run `just fuzz-all`.
+# same commands, flags and feature sets the workflow will run — with two
+# exceptions. The fuzz job needs nightly and cargo-fuzz and takes a
+# minute per target, so it stays out of `ci`; run `just fuzz-all`. The
+# coverage job measures rather than checks — it can't go red, only the
+# badge changes — and needs cargo-llvm-cov; run `just coverage`.
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
@@ -26,6 +28,11 @@ mutants_features := "tokio,smol,nusb,rusb"
 # Seconds a single mutant may take before it counts as a timeout. A
 # mutant that loops forever would otherwise hold the run open.
 mutants_timeout := "120"
+# Features coverage is measured under: what CI's tests exercise without
+# hardware. The USB backends stay out on purpose — their tests need a
+# device, so compiling them in would only grow the denominator with
+# lines nothing on CI can reach.
+coverage_features := "tokio,smol"
 
 # The warning policy every recipe runs under, CI included: clippy takes
 # `-D warnings` on its own command line, but rustc warnings from tests,
@@ -36,7 +43,8 @@ export RUSTFLAGS := "-D warnings"
 default:
     @just --list
 
-# Everything CI checks, except fuzzing — see the note at the top.
+# Everything CI checks, except fuzzing and coverage — see the note at
+# the top.
 ci: fmt-check clippy clippy-ffi test doc msrv no-std all-features
 
 fmt:
@@ -58,6 +66,16 @@ test-one features:
 
 test-ffi-one features="":
     cargo test -p libadb-ffi --no-default-features --features "{{features}}"
+
+# Line coverage of the workspace tests, as a terminal table. Needs
+# cargo-llvm-cov (and the llvm-tools-preview rustup component).
+coverage:
+    cargo llvm-cov --workspace --no-default-features --features {{coverage_features}}
+
+# The same run as JSON on stdout — the CI badge reads
+# .data[0].totals.lines.percent out of it.
+coverage-json:
+    cargo llvm-cov --workspace --no-default-features --features {{coverage_features}} --json --summary-only
 
 doc-one package features:
     RUSTDOCFLAGS="-D warnings" cargo doc -p {{package}} --no-default-features --features "{{features}}" --no-deps

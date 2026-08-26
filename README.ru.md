@@ -1,5 +1,8 @@
 # libadb
 
+[![CI](https://github.com/tarigo/libadb/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tarigo/libadb/actions/workflows/ci.yml)
+[![покрытие](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/tarigo/libadb/badge-data/coverage.json)](https://github.com/tarigo/libadb/actions/workflows/ci.yml)
+
 Низкоуровневая библиотека проводного протокола ADB (Android Debug Bridge)
 для Rust.
 
