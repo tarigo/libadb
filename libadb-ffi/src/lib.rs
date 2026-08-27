@@ -432,13 +432,20 @@ pub unsafe extern "C" fn adb_connection_features(
         .writer
         .device_banner_parsed()
         .map_or(&[][..], |b| b.features());
+    // `Feature` may grow ahead of this crate's constants; unknown ones
+    // are skipped, so the reported count covers exactly what a C
+    // caller can name.
+    let known = || {
+        features
+            .iter()
+            .filter_map(feature::FfiFeature::from_feature)
+    };
     if !out_len.is_null() {
-        *out_len = features.len();
+        *out_len = known().count();
     }
     if !buf.is_null() && buf_cap > 0 {
-        let n = features.len().min(buf_cap);
-        for (slot, f) in features.iter().take(n).enumerate() {
-            *buf.add(slot) = feature::FfiFeature::from_feature(f) as u32;
+        for (slot, f) in known().take(buf_cap).enumerate() {
+            *buf.add(slot) = f as u32;
         }
     }
     AdbStatus::Ok

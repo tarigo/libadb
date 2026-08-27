@@ -24,9 +24,14 @@ macro_rules! features {
                 }
             }
 
-            pub(crate) fn from_feature(feature: &Feature) -> Self {
+            pub(crate) fn from_feature(feature: &Feature) -> Option<Self> {
                 match feature {
-                    $(Feature::$rust => Self::$variant,)*
+                    $(Feature::$rust => Some(Self::$variant),)*
+                    // `Feature` is non_exhaustive: a variant libadb
+                    // gains before this table learns it is skipped,
+                    // exactly as the header contract promises for
+                    // unknown features.
+                    _ => None,
                 }
             }
 
@@ -72,8 +77,8 @@ mod tests {
         for raw in 0u32..=20 {
             let ff = FfiFeature::from_raw(raw).expect("known discriminant");
             let feature = ff.to_feature();
-            assert_eq!(FfiFeature::from_feature(&feature), ff);
-            assert_eq!(FfiFeature::from_feature(&feature) as u32, raw);
+            assert_eq!(FfiFeature::from_feature(&feature), Some(ff));
+            assert_eq!(FfiFeature::from_feature(&feature).unwrap() as u32, raw);
         }
     }
 

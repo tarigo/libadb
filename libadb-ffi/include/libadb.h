@@ -26,6 +26,13 @@ typedef struct adb_connection adb_connection_t;
  * into one value and writes all eight bytes through out-pointers. */
 typedef uint64_t adb_channel_id_t;
 
+/*
+ * This list grows in minor releases: new statuses may be appended, and
+ * existing values never change. Compare against the constants you
+ * know and treat anything else as a generic failure — do not assume
+ * the list is exhaustive. (ADB_FEATURE_* below grows under the same
+ * contract.)
+ */
 typedef enum {
     ADB_OK                  = 0,
     ADB_ERR_INVALID_ARG     = 1,

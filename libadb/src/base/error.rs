@@ -8,6 +8,7 @@ pub use super::protobuf::DecodeError;
 
 /// ADB protocol error, parameterized over the transport IO error type.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error<E> {
     /// Transport IO error.
     Io(E),
@@ -71,6 +72,7 @@ pub enum Error<E> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProtocolError {
     /// Invalid command code.
     InvalidCommand(u32),
@@ -103,6 +105,7 @@ pub enum ProtocolError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthError {
     /// Device rejected all authentication attempts.
     Rejected,
@@ -111,6 +114,7 @@ pub enum AuthError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SyncError {
     /// Device returned a `FAIL` response. The message is truncated to
     /// the session buffer when the device sent more than it holds.
@@ -271,6 +275,7 @@ impl<E> From<ReverseError> for Error<E> {
 
 /// What the `reverse:` rule service answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReverseError {
     /// The device returned `FAIL`. The message is adbd's own text,
     /// e.g. `bad forward: …` or `listener '…' not found`.
