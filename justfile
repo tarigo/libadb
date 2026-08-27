@@ -1,11 +1,13 @@
 # Development tasks for libadb. Run `just` to list them.
 #
 # CI drives the same recipes, so a green `just ci` locally means the
-# same commands, flags and feature sets the workflow will run — with two
-# exceptions. The fuzz job needs nightly and cargo-fuzz and takes a
-# minute per target, so it stays out of `ci`; run `just fuzz-all`. The
-# coverage job measures rather than checks — it can't go red, only the
-# badge changes — and needs cargo-llvm-cov; run `just coverage`.
+# same commands, flags and feature sets the workflow will run — with
+# three exceptions. The fuzz job needs nightly and cargo-fuzz and takes
+# a minute per target, so it stays out of `ci`; run `just fuzz-all`.
+# The coverage job measures rather than checks — it can't go red, only
+# the badge changes — and needs cargo-llvm-cov; run `just coverage`.
+# The semver job needs cargo-semver-checks and the crates.io baseline;
+# run `just semver`.
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
@@ -43,8 +45,8 @@ export RUSTFLAGS := "-D warnings"
 default:
     @just --list
 
-# Everything CI checks, except fuzzing and coverage — see the note at
-# the top.
+# Everything CI checks, except fuzzing, coverage and semver — see the
+# note at the top.
 ci: fmt-check clippy clippy-ffi test doc msrv no-std all-features
 
 fmt:
@@ -76,6 +78,13 @@ coverage:
 # .data[0].totals.lines.percent out of it.
 coverage-json:
     cargo llvm-cov --workspace --no-default-features --features {{coverage_features}} --json --summary-only
+
+# Public-API semver conformance: every crate's API is compared against
+# its released crates.io version, and changes must fit the version bump
+# Cargo.toml carries (pre-1.0: breaking needs 0.x -> 0.x+1). Needs
+# cargo-semver-checks (`cargo install cargo-semver-checks --locked`).
+semver:
+    cargo semver-checks --workspace --all-features
 
 doc-one package features:
     RUSTDOCFLAGS="-D warnings" cargo doc -p {{package}} --no-default-features --features "{{features}}" --no-deps

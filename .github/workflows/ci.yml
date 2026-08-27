@@ -203,6 +203,24 @@ jobs:
           git -C "$dir" commit -qm "coverage ${COVERAGE}%"
           git -C "$dir" push -f "$remote" badge-data
 
+  # Public-API semver conformance against the released crates.io
+  # baseline: API changes must fit the version bump Cargo.toml carries.
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libusb + libudev (all-features build)
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev libudev-dev pkg-config
+      - name: Install just and cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-semver-checks
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: semver
+      - run: just semver
+
   all_features:
     runs-on: ubuntu-latest
     steps:
