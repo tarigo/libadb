@@ -221,6 +221,22 @@ jobs:
           key: semver
       - run: just semver
 
+  # The hand-written C header against the Rust implementation; any
+  # signature disagreement is a compile error in the header-check crate.
+  ffi_header:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ffi-header
+      - run: just ffi-header
+
   all_features:
     runs-on: ubuntu-latest
     steps:

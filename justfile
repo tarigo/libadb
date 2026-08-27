@@ -1,13 +1,13 @@
 # Development tasks for libadb. Run `just` to list them.
 #
 # CI drives the same recipes, so a green `just ci` locally means the
-# same commands, flags and feature sets the workflow will run — with
-# three exceptions. The fuzz job needs nightly and cargo-fuzz and takes
-# a minute per target, so it stays out of `ci`; run `just fuzz-all`.
-# The coverage job measures rather than checks — it can't go red, only
-# the badge changes — and needs cargo-llvm-cov; run `just coverage`.
-# The semver job needs cargo-semver-checks and the crates.io baseline;
-# run `just semver`.
+# same commands, flags and feature sets the workflow will run — except
+# for the jobs that need tooling beyond cargo and stay out of `ci`:
+#
+#   fuzzing     `just fuzz-all`   nightly + cargo-fuzz, a minute per target
+#   coverage    `just coverage`   cargo-llvm-cov; measures, cannot go red
+#   semver      `just semver`     cargo-semver-checks + crates.io baseline
+#   C header    `just ffi-header` bindgen, needs libclang
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
@@ -45,8 +45,8 @@ export RUSTFLAGS := "-D warnings"
 default:
     @just --list
 
-# Everything CI checks, except fuzzing, coverage and semver — see the
-# note at the top.
+# Everything CI checks, except the extra-tooling recipes — see the
+# table at the top.
 ci: fmt-check clippy clippy-ffi test doc msrv no-std all-features
 
 fmt:
@@ -85,6 +85,12 @@ coverage-json:
 # cargo-semver-checks (`cargo install cargo-semver-checks --locked`).
 semver:
     cargo semver-checks --workspace --all-features
+
+# The hand-written libadb.h against the Rust implementation: function
+# signatures compare at compile time, enum values and layouts at run
+# time. Needs libclang (bindgen).
+ffi-header:
+    cargo test -p header-check
 
 doc-one package features:
     RUSTDOCFLAGS="-D warnings" cargo doc -p {{package}} --no-default-features --features "{{features}}" --no-deps

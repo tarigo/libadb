@@ -1,0 +1,14 @@
+[package]
+name = "header-check"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Compile-time conformance check of libadb.h against the Rust FFI"
+
+[dependencies]
+libadb-ffi = { path = "../libadb-ffi" }
+
+[build-dependencies]
+bindgen = "0.72"

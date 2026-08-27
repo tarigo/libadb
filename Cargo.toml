@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["libadb", "libadb-ffi"]
+members = ["libadb", "libadb-ffi", "header-check"]
 exclude = ["fuzz"]
 
 [workspace.package]
