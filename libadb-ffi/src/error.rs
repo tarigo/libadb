@@ -8,8 +8,13 @@ use libadb::base::error::{Error, ReverseError};
 use crate::transport::FfiConnectError;
 
 /// Status code returned by most FFI entry points.
+///
+/// The list grows in minor releases — new statuses may be appended,
+/// existing values never change — which is what `#[non_exhaustive]`
+/// says to Rust callers and the header's contract says to C ones.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdbStatus {
     Ok = 0,
     InvalidArg = 1,

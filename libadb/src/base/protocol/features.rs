@@ -7,6 +7,7 @@ macro_rules! features {
         /// Each variant corresponds to an individual feature string
         /// exchanged during the ADB `CNXN` handshake.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
         pub enum Feature {
             $($variant,)*
         }
