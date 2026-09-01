@@ -608,6 +608,7 @@ name = "libadb"
 version = "0.3.0"
 dependencies = [
  "async-lock",
+ "base64ct",
  "bytes",
  "embedded-io",
  "embedded-io-adapters",
@@ -618,12 +619,14 @@ dependencies = [
  "libc",
  "log",
  "nusb",
+ "rand_chacha",
  "rsa",
  "rusb",
  "sha1",
  "signature",
  "smol",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

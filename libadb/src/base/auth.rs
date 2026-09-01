@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 /// authorization.
 ///
 /// Implement this trait to plug in any RSA library (e.g. `rsa`, `ring`, `openssl`,
-/// or a hardware security module).
+/// or a hardware security module). The `keys` feature ships a ready one,
+/// `keys::AdbKey`, which also generates a key when there is none.
 pub trait Authenticator {
     type Error;
 
@@ -21,6 +22,22 @@ pub trait Authenticator {
     ///
     /// Format: base64-encoded RSA public key followed by ` user@host\0`.
     fn public_key(&self) -> &[u8];
+}
+
+/// A mutable borrow authenticates as whatever it points at, so one key
+/// can serve several connections in turn: pass `&mut key` where a
+/// connection wants an authenticator of its own, rather than rebuilding
+/// the key — or duplicating the secret — for each.
+impl<A: Authenticator + ?Sized> Authenticator for &mut A {
+    type Error = A::Error;
+
+    fn sign(&mut self, token: &[u8]) -> impl Future<Output = Result<Vec<u8>, Self::Error>> {
+        (**self).sign(token)
+    }
+
+    fn public_key(&self) -> &[u8] {
+        (**self).public_key()
+    }
 }
 
 use core::future::Future;

@@ -13,7 +13,7 @@ keywords = ["adb", "android", "usb", "no_std", "embedded"]
 categories = ["embedded", "no-std", "network-programming", "hardware-support"]
 
 [package.metadata.docs.rs]
-features = ["tokio", "usb"]
+features = ["tokio", "usb", "keys"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -62,6 +62,42 @@ optional = true
 version = "0.9"
 optional = true
 
+# Built-in RSA host key (the `keys` feature): generation, PKCS#8
+# import/export and the ADB public-key encoding. no_std + alloc.
+# `signature`, `rand_core`, `pkcs8` and `BigUint` are reached through
+# `rsa`'s re-exports so their versions are pinned in one place.
+[dependencies.rsa]
+version = "0.9"
+optional = true
+default-features = false
+features = ["pem"]
+
+[dependencies.sha1]
+version = "0.10"
+optional = true
+default-features = false
+features = ["oid"]
+
+[dependencies.base64ct]
+version = "1"
+optional = true
+default-features = false
+features = ["alloc"]
+
+# Blinding the private-key operation needs entropy at every signature,
+# but `Authenticator::sign` gets none: a key seeds this from the CSPRNG
+# it was built with and draws from it instead.
+[dependencies.rand_chacha]
+version = "0.3"
+optional = true
+default-features = false
+
+[dependencies.zeroize]
+version = "1"
+optional = true
+default-features = false
+features = ["alloc"]
+
 [features]
 default = ["tokio"]
 # Full-duplex Reader/Writer support (the `split` module) with no
@@ -76,6 +112,9 @@ rusb = ["split", "dep:rusb"]
 # Convenience alias for the default USB backend. Both backends may be
 # enabled at once; pick one per call site via `transport::UsbBackend`.
 usb = ["nusb"]
+# Built-in RSA host key: generation, PKCS#8 import/export and the ADB
+# public-key encoding. no_std + alloc; does not imply `split`/std.
+keys = ["dep:rsa", "dep:sha1", "dep:base64ct", "dep:zeroize", "dep:rand_chacha"]
 
 [dev-dependencies]
 bytes = "1"
@@ -86,6 +125,10 @@ smol = "2"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 signature = "2"
+# Seeded RNG for the one deterministic keygen test.
+rand_chacha = "0.3"
+# Integration tests decode the ADB public-key blob independently.
+base64ct = { version = "1", features = ["alloc"] }
 
 # These two bridge a local TCP socket, which the other examples do not;
 # rather than carry a smol copy of that plumbing they stay tokio-only.

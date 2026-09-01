@@ -38,6 +38,8 @@ jobs:
           - tokio,smol
           - smol,usb
           - smol,rusb
+          - tokio,keys
+          - smol,keys
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -93,7 +95,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [tokio, smol, "tokio,nusb,rusb", "tokio,smol"]
+        features: [tokio, smol, "tokio,nusb,rusb", "tokio,smol", "tokio,keys", "smol,keys"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -246,6 +248,7 @@ jobs:
         include:
           - { package: libadb, features: "tokio,rusb" }
           - { package: libadb, features: "smol,nusb" }
+          - { package: libadb, features: "tokio,keys" }
           - { package: libadb-ffi, features: "rusb" }
           - { package: libadb-ffi, features: "nusb" }
     steps:
@@ -271,6 +274,7 @@ jobs:
           - { package: libadb, features: "tokio" }
           - { package: libadb, features: "smol" }
           - { package: libadb, features: "split" }
+          - { package: libadb, features: "keys" }
           - { package: libadb, features: "tokio,rusb" }
           - { package: libadb, features: "smol,nusb" }
           - { package: libadb-ffi, features: "" }

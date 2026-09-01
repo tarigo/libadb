@@ -3,6 +3,14 @@ resolver = "2"
 members = ["libadb", "libadb-ffi"]
 exclude = ["fuzz"]
 
+# RSA key generation and BigUint math are unusably slow at opt-level 0;
+# this keeps debug/test/coverage/mutants builds of the `keys` feature fast.
+[profile.dev.package.num-bigint-dig]
+opt-level = 2
+
+[profile.dev.package.rsa]
+opt-level = 2
+
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
