@@ -36,6 +36,7 @@ handler). The `libadb-ffi` crate is where those live.
 | `rusb`  | USB transport via `rusb` (libusb); combinable with `nusb`               |
 | `usb`   | Convenience alias — enables the default USB backend (`nusb`)            |
 | `split` | Full-duplex `Reader`/`Writer` pair with no bundled runtime (pulls in `std`); implied by every feature above |
+| `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8 load/save, ADB public-key encoding; `no_std + alloc` |
 
 Features are additive: any combination compiles. Which runtime dials a
 socket and which backend opens a USB device are type arguments
@@ -78,9 +79,33 @@ let out = v2::exec(&mut conn, "getprop ro.product.model", &mut rx).await?;
 println!("{}", core::str::from_utf8(&out.stdout)?);
 ```
 
-`Authenticator` is a user-supplied trait — typically an RSA signer
-reading `~/.android/adbkey`. See any file under `libadb/examples/` for
-a complete `AdbKeyAuth` that uses the `rsa` crate.
+`Authenticator` is a user-supplied trait, but the `keys` feature ships
+one: `keys::AdbKey` parses the key `adb` keeps in `~/.android/adbkey` —
+reusing the identity the device already trusts — or generates one of its
+own, with no `adb` installation involved:
+
+```rust,ignore
+use libadb::keys::AdbKey;
+
+// `rng` is any `CryptoRngCore` — `OsRng` on a host, a hardware TRNG on
+// a microcontroller. Loading draws from it once, to seed the generator
+// the key then blinds each signature with; generating draws on it
+// throughout the prime search as well, and seeds that generator after.
+// Either way the borrow ends when the constructor returns.
+let pem = std::fs::read_to_string(dir.join("adbkey"))?;
+let auth = AdbKey::from_pkcs8_pem(&pem, &mut rng, "user@host")?;
+
+// Or make one; the device asks the user to confirm it once.
+let auth = AdbKey::generate(&mut rng, "user@host")?;
+```
+
+Storing the key is yours to do: `to_pkcs8_pem` hands you the contents
+of an `adbkey` file and `public_key_line()` those of `adbkey.pub` —
+putting them on disk is the caller's business. On a microcontroller,
+`to_pkcs8_der` plus `encode_key_record` frame it — with a checksum — for
+a flash region that has no filesystem. The `rsa` and `zeroize` crates
+this API speaks are re-exported as `libadb::keys::{rsa, zeroize}`, so
+there is one version to match rather than two manifests to guess at.
 
 ## Memory budget
 

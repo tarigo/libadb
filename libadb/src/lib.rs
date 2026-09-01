@@ -22,6 +22,7 @@
 //! | `rusb`  | USB transport via `rusb` (libusb); may be combined with `nusb`             |
 //! | `usb`   | Convenience alias enabling the default USB backend (`nusb`)                |
 //! | `split` | [`split`] Reader/Writer pair with no bundled runtime; pulls in `std`. Implied by every feature above |
+//! | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8/PKCS#1 load, PKCS#8 save, ADB public-key encoding. `no_std + alloc` |
 //!
 //! # Quick start
 //!
@@ -33,9 +34,9 @@
 //! tcp.set_nodelay(true)?; // ADB is chatty; Nagle costs a round per exchange
 //! let transport = TokioTcp::new(tcp);
 //!
-//! // `auth` is a user-supplied `libadb::auth::Authenticator` —
-//! // typically an RSA signer reading `~/.android/adbkey`. A complete
-//! // `AdbKeyAuth` using the `rsa` crate lives in `examples/`.
+//! // `auth` is any `libadb::auth::Authenticator`. With the `keys`
+//! // feature the crate ships one: `keys::AdbKey`, parsed from the
+//! // key `adb` keeps in `~/.android/adbkey` or generated on the spot.
 //! let mut conn = Connection::<_>::connect(transport, auth, &[Feature::ShellV2]).await?;
 //!
 //! let mut rx = [0u8; 64 * 1024];
@@ -105,6 +106,8 @@ pub mod abb;
 pub mod base;
 pub mod cmd;
 pub mod exec;
+#[cfg(feature = "keys")]
+pub mod keys;
 pub mod logcat;
 pub mod reverse;
 pub mod shell;
@@ -124,6 +127,9 @@ pub use base::error::{Error, ProtocolError};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
 pub use transport::Splittable;
 
+#[cfg(feature = "keys")]
+pub use keys::AdbKey;
+
 #[cfg(feature = "split")]
 pub use split::{Reader, SplitIncoming, Writer};
 
@@ -141,6 +147,9 @@ pub mod prelude {
         Connection, ConnectionConfig, Error, Feature, ProtocolError, Splittable,
         DEFAULT_HOST_FEATURES,
     };
+
+    #[cfg(feature = "keys")]
+    pub use crate::AdbKey;
 
     #[cfg(feature = "split")]
     pub use crate::{Reader, Writer};

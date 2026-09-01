@@ -221,6 +221,7 @@ impl FakeDeviceHandle {
             expect_open_asb: self.config.expect_open_asb,
             last_open_asb: None,
             handshake_headers: Vec::new(),
+            auth_payloads: Vec::new(),
         };
         session.handshake(&self.config).await;
         session
@@ -238,6 +239,7 @@ pub struct FakeSession {
     expect_open_asb: Option<u32>,
     last_open_asb: Option<u32>,
     handshake_headers: Vec<MsgHeader>,
+    auth_payloads: Vec<(u32, Vec<u8>)>,
 }
 
 impl FakeSession {
@@ -264,8 +266,9 @@ impl FakeSession {
             AuthPolicy::None => {}
             AuthPolicy::AcceptSignature { token } => {
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, token).await;
-                let (h, _) = self.expect(CMD_AUTH).await;
+                let (h, sig) = self.expect(CMD_AUTH).await;
                 self.handshake_headers.push(h);
+                self.auth_payloads.push((h.arg0, sig));
                 assert_eq!(h.arg0, AUTH_SIGNATURE, "expected SIGNATURE");
             }
             AuthPolicy::RequirePublicKey {
@@ -274,13 +277,15 @@ impl FakeSession {
                 expected_pubkey,
             } => {
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, first_token).await;
-                let (h, _) = self.expect(CMD_AUTH).await;
+                let (h, sig) = self.expect(CMD_AUTH).await;
                 self.handshake_headers.push(h);
+                self.auth_payloads.push((h.arg0, sig));
                 assert_eq!(h.arg0, AUTH_SIGNATURE);
 
                 self.send(CMD_AUTH, AUTH_TOKEN, 0, second_token).await;
                 let (h, pk) = self.expect(CMD_AUTH).await;
                 self.handshake_headers.push(h);
+                self.auth_payloads.push((h.arg0, pk.clone()));
                 assert_eq!(h.arg0, AUTH_RSAPUBLICKEY);
                 assert_eq!(&pk, expected_pubkey, "RSAPUBLICKEY payload mismatch");
             }
@@ -319,6 +324,12 @@ impl FakeSession {
     /// reply, in order (CNXN, then any AUTH).
     pub fn handshake_headers(&self) -> &[MsgHeader] {
         &self.handshake_headers
+    }
+
+    /// `(arg0, payload)` of every AUTH the client sent, in order — the
+    /// signatures and, if the policy asked for it, the public key.
+    pub fn auth_payloads(&self) -> &[(u32, Vec<u8>)] {
+        &self.auth_payloads
     }
 
     /// `arg1` of the most recent OPEN accepted by this session — the
