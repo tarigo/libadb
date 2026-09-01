@@ -106,6 +106,48 @@ adb_status_t adb_connect_with_authenticator(
 /* Release a handle returned by adb_connect(). NULL is a no-op. */
 void adb_connection_free(adb_connection_t *conn);
 
+/* ---- host key store -------------------------------------------------
+ *
+ * An RSA host key read from, or written into, a key directory. The
+ * strings the accessors return are owned by the handle and stay valid
+ * until adb_key_free(); feed them straight to adb_connect().
+ */
+typedef struct adb_key adb_key_t;
+
+/*
+ * Load <android_dir>/adbkey, generating and persisting a 2048-bit key
+ * (adbkey, owner-only, plus a matching adbkey.pub) when there is none;
+ * the device then asks the user to confirm the new key once.
+ *
+ *   android_dir  key directory — required. Point it at ~/.android to
+ *                reuse the identity the standard adb client already
+ *                had the device trust; the library resolves no paths
+ *                and reads no environment of its own. Taken as bytes
+ *                on Unix, so a path that is not valid UTF-8 is fine;
+ *                on Windows it must be UTF-8.
+ *   name         "user@host" comment shown in the device's dialog,
+ *                or NULL for a default
+ *   out          receives the handle; release with adb_key_free()
+ *
+ * An existing key is reused untouched, in either PKCS#8 or the PKCS#1
+ * older adb releases wrote. An existing adbkey that will not parse is
+ * ADB_ERR_AUTH and is left on disk: it may still be trusted by a
+ * device, so it is never overwritten.
+ */
+adb_status_t adb_key_load_or_generate(
+    const char  *android_dir,
+    const char  *name,
+    adb_key_t  **out);
+
+/* PKCS#8 PEM private key; pass to adb_connect(). NULL if key is NULL. */
+const char *adb_key_private_key_pem(const adb_key_t *key);
+
+/* ADB-format public key line; pass to adb_connect(). NULL if key is NULL. */
+const char *adb_key_public_key(const adb_key_t *key);
+
+/* Release a handle from adb_key_load_or_generate(). NULL is a no-op. */
+void adb_key_free(adb_key_t *key);
+
 /* Set receive/send timeouts on a tcp:// connection, in milliseconds;
  * 0 disables the corresponding timeout. USB transports have no such
  * knob and answer ADB_ERR_INVALID_ARG. A read that hits the timeout

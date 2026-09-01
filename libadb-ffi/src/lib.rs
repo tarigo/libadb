@@ -32,6 +32,7 @@ mod auth;
 mod block_on;
 mod error;
 mod feature;
+mod keys;
 #[macro_use]
 mod macros;
 mod shell;
@@ -56,6 +57,9 @@ pub use auth::{adb_authenticator_t, AdbSignFn};
 // Also reachable through the C ABI; re-exported so Rust consumers of the
 // rlib — the crate's own integration tests among them — can name them.
 pub use error::{adb_last_error, AdbStatus};
+pub use keys::{
+    adb_key_free, adb_key_load_or_generate, adb_key_private_key_pem, adb_key_public_key, adb_key_t,
+};
 pub use shell::{
     adb_shell_close, adb_shell_close_stdin, adb_shell_free, adb_shell_open, adb_shell_read_frame,
     adb_shell_set_window_size, adb_shell_t, adb_shell_write_stdin,

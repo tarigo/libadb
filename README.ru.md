@@ -244,6 +244,8 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 [`libadb-ffi/include/libadb.h`](libadb-ffi/include/libadb.h), в нём:
 
 - жизненный цикл соединения и хендшейк
+- ключи хоста (`adb_key_load_or_generate`) — переиспользовать
+  `~/.android/adbkey` либо создать его при первом запуске, без `adb`
 - пользовательские аутентификаторы (`adb_connect_with_authenticator`) —
   когда приватный ключ живёт вне процесса (HSM, удалённый подписант)
 - открытие/чтение/запись/закрытие канала

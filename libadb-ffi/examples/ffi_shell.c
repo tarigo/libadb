@@ -13,8 +13,8 @@
  *   # Run a single command:
  *   LD_LIBRARY_PATH=target/debug ./ffi_shell tcp://127.0.0.1:5555 "ls /sdcard"
  *
- * Requires ~/.android/adbkey and ~/.android/adbkey.pub as produced by
- * the standard `adb` tool.
+ * Reuses ~/.android/adbkey; if there is none, a key is generated and
+ * saved on first run — confirm it on the device when asked.
  */
 
 #include "libadb.h"
@@ -35,29 +35,6 @@
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
 /* ------------------------------------------------------------------ */
-
-static char *read_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "open %s: %s\n", path, strerror(errno));
-        return NULL;
-    }
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
-    long sz = ftell(f);
-    if (sz < 0) { fclose(f); return NULL; }
-    rewind(f);
-
-    char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return NULL; }
-    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-    buf[sz] = '\0';
-    fclose(f);
-    return buf;
-}
 
 static char *join_home(const char *suffix) {
     const char *home = getenv("HOME");
@@ -339,25 +316,25 @@ int main(int argc, char **argv) {
     const char *uri = argv[1];
     const char *command = (argc == 3) ? argv[2] : NULL;
 
-    char *priv_path = join_home("/.android/adbkey");
-    char *pub_path  = join_home("/.android/adbkey.pub");
-    char *priv_pem  = read_file(priv_path);
-    char *pub_key   = read_file(pub_path);
-    if (!priv_pem || !pub_key) {
-        fprintf(stderr, "failed to read adb keys from ~/.android\n");
+    /* Reuse the key the standard adb client uses, or make one there on
+     * the first run; the device asks to confirm a new key once. */
+    char *key_dir = join_home("/.android");
+    if (!key_dir) {
+        fprintf(stderr, "HOME is not set; cannot locate ~/.android\n");
         return 1;
     }
-    free(priv_path);
-    free(pub_path);
+    adb_key_t *key = NULL;
+    adb_status_t st = adb_key_load_or_generate(key_dir, NULL, &key);
+    if (st != ADB_OK) die(st, "adb_key_load_or_generate");
+    free(key_dir);
 
     adb_connection_t *conn = NULL;
-    adb_status_t st = adb_connect(
-        uri, priv_pem, pub_key,
+    st = adb_connect(
+        uri, adb_key_private_key_pem(key), adb_key_public_key(key),
         "host::features=shell_v2,delayed_ack",
         &conn);
+    adb_key_free(key);
     if (st != ADB_OK) die(st, "adb_connect");
-    free(priv_pem);
-    free(pub_key);
 
     fprintf(stderr, "[*] connected; max_payload=%u delayed_ack=%s\n",
             adb_connection_max_payload(conn),

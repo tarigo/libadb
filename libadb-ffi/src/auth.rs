@@ -5,29 +5,27 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::future::Future;
 
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::RsaPrivateKey;
-use sha1::Sha1;
-use signature::hazmat::PrehashSigner;
-use signature::SignatureEncoding;
-
 use libadb::base::auth::Authenticator;
+use libadb::keys::rsa::rand_core::OsRng;
+use libadb::keys::AdbKey;
 
 use crate::error::AdbStatus;
 
 pub(crate) struct FfiAuthenticator {
-    signing_key: SigningKey<Sha1>,
+    key: AdbKey,
     public_key: Vec<u8>,
 }
 
 impl FfiAuthenticator {
     pub(crate) fn from_pkcs8_pem(priv_pem: &str, pub_key: &[u8]) -> Result<Self, String> {
-        let private_key = RsaPrivateKey::from_pkcs8_pem(priv_pem)
+        // Signing goes through `AdbKey` so this path is blinded like
+        // every other: the token comes from whatever is on the other
+        // end of the wire. The name only feeds the public blob it
+        // derives, which the caller's own blob replaces below.
+        let key = AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, "")
             .map_err(|e| format!("parse private key: {e}"))?;
-        let signing_key = SigningKey::<Sha1>::new(private_key);
         Ok(Self {
-            signing_key,
+            key,
             public_key: normalize_public_key(pub_key),
         })
     }
@@ -36,13 +34,8 @@ impl FfiAuthenticator {
 impl Authenticator for FfiAuthenticator {
     type Error = String;
 
-    fn sign(&mut self, token: &[u8]) -> impl Future<Output = Result<Vec<u8>, Self::Error>> {
-        let res = self
-            .signing_key
-            .sign_prehash(token)
-            .map(|sig| sig.to_bytes().into_vec())
-            .map_err(|e| format!("sign: {e}"));
-        core::future::ready(res)
+    async fn sign(&mut self, token: &[u8]) -> Result<Vec<u8>, String> {
+        self.key.sign(token).await.map_err(|e| format!("sign: {e}"))
     }
 
     fn public_key(&self) -> &[u8] {
