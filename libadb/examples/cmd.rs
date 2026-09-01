@@ -2,20 +2,21 @@
 //!
 //! ```text
 //! # One-shot (list packages):
-//! cargo run --example cmd --features tokio -- 127.0.0.1:5555 package list packages
-//! cargo run --example cmd --no-default-features --features smol -- 127.0.0.1:5555 package list packages
+//! cargo run --example cmd --features tokio,host-keys -- 127.0.0.1:5555 package list packages
+//! cargo run --example cmd --no-default-features --features smol,host-keys -- 127.0.0.1:5555 package list packages
 //!
 //! # Streaming (monitor activity starts):
-//! cargo run --example cmd --features tokio -- 127.0.0.1:5555 -s activity monitor
+//! cargo run --example cmd --features tokio,host-keys -- 127.0.0.1:5555 -s activity monitor
 //! ```
 //!
 //! Automatically picks `abb_exec`/`abb` when available, falls back to
 //! `shell,v2,raw:cmd …` on older devices.
 //!
-//! Requires `~/.android/adbkey` and `~/.android/adbkey.pub`.
+//! Reuses `~/.android/adbkey`; if there is none, a key is generated
+//! and saved on first run — confirm it on the device when asked.
 
 #[cfg(not(any(feature = "tokio", feature = "smol")))]
-compile_error!("this example requires --features tokio or --features smol");
+compile_error!("this example requires --features tokio,host-keys or --features smol,host-keys");
 
 use std::io::{self, Write};
 use std::{env, process};
@@ -25,9 +26,8 @@ use libadb::{cmd, Connection, Error, Feature};
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
-use adb_key_auth::AdbKeyAuth;
 async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let auth = AdbKeyAuth::load()?;
+    let auth = adb_key_auth::load_or_generate()?;
 
     #[cfg(feature = "tokio")]
     let transport = {
@@ -65,7 +65,7 @@ async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::E
 }
 
 async fn run_stream(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let auth = AdbKeyAuth::load()?;
+    let auth = adb_key_auth::load_or_generate()?;
 
     #[cfg(feature = "tokio")]
     let transport = {

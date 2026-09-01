@@ -36,7 +36,9 @@ handler). The `libadb-ffi` crate is where those live.
 | `rusb`  | USB transport via `rusb` (libusb); combinable with `nusb`               |
 | `usb`   | Convenience alias — enables the default USB backend (`nusb`)            |
 | `split` | Full-duplex `Reader`/`Writer` pair with no bundled runtime (pulls in `std`); implied by every feature above |
+| `runtime` | Set by `tokio` and `smol`, not by hand: it lets the examples say they need one of the two |
 | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8 load/save, ADB public-key encoding; `no_std + alloc` |
+| `host-keys` | `keys::store` on top of `keys`: read `~/.android/adbkey`, or generate and persist one; pulls in `std` |
 
 Features are additive: any combination compiles. Which runtime dials a
 socket and which backend opens a USB device are type arguments
@@ -82,30 +84,34 @@ println!("{}", core::str::from_utf8(&out.stdout)?);
 `Authenticator` is a user-supplied trait, but the `keys` feature ships
 one: `keys::AdbKey` parses the key `adb` keeps in `~/.android/adbkey` —
 reusing the identity the device already trusts — or generates one of its
-own, with no `adb` installation involved:
+own, with no `adb` installation involved. With `host-keys` the crate
+also finds and writes those files for you:
 
 ```rust,ignore
-use libadb::keys::AdbKey;
+use libadb::keys::store;
 
 // `rng` is any `CryptoRngCore` — `OsRng` on a host, a hardware TRNG on
 // a microcontroller. Loading draws from it once, to seed the generator
 // the key then blinds each signature with; generating draws on it
 // throughout the prime search as well, and seeds that generator after.
 // Either way the borrow ends when the constructor returns.
-let pem = std::fs::read_to_string(dir.join("adbkey"))?;
-let auth = AdbKey::from_pkcs8_pem(&pem, &mut rng, "user@host")?;
-
-// Or make one; the device asks the user to confirm it once.
-let auth = AdbKey::generate(&mut rng, "user@host")?;
+// Reuse ~/.android/adbkey, or create it — the device asks the user to
+// confirm a new key once, exactly as it does for adb itself.
+let auth = store::load_or_generate(&dir, &mut rng, "user@host")?;
 ```
 
-Storing the key is yours to do: `to_pkcs8_pem` hands you the contents
-of an `adbkey` file and `public_key_line()` those of `adbkey.pub` —
-putting them on disk is the caller's business. On a microcontroller,
-`to_pkcs8_der` plus `encode_key_record` frame it — with a checksum — for
-a flash region that has no filesystem. The `rsa` and `zeroize` crates
-this API speaks are re-exported as `libadb::keys::{rsa, zeroize}`, so
-there is one version to match rather than two manifests to guess at.
+The directory is always a parameter: the library reads no environment
+and picks no path of its own. An existing key is reused untouched, and
+one that will not parse is an error rather than a reason to overwrite
+an identity a device may already trust.
+
+Without `std` — on a microcontroller — `keys::AdbKey` does the same work
+directly, leaving the storing to you: `generate` takes any CSPRNG you
+hand it, `to_pkcs8_der` plus `encode_key_record` frame the key, checksum
+and all, for a flash region with no filesystem, and `public_key_line()`
+gives the `adbkey.pub` line. The `rsa` and `zeroize` crates this API
+speaks are re-exported as `libadb::keys::{rsa, zeroize}`, so there is
+one version to match rather than two manifests to guess at.
 
 ## Memory budget
 

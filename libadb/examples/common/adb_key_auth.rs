@@ -1,61 +1,37 @@
-//! Shared `Authenticator` impl reading `~/.android/adbkey{,.pub}`.
+//! Shared key setup for the examples: reuse `~/.android/adbkey`, or
+//! generate and save one on first run.
+//!
+//! The library takes the key directory as a parameter and reads no
+//! environment of its own; resolving `~/.android` is this caller's job,
+//! as it would be in any application.
 //!
 //! Included by each binary example via `#[path]`:
 //!
 //! ```ignore
 //! #[path = "common/adb_key_auth.rs"]
 //! mod adb_key_auth;
-//! use adb_key_auth::AdbKeyAuth;
 //! ```
 
 use std::path::PathBuf;
-use std::{env, fs};
+use std::{env, error, fs};
 
-use libadb::auth::Authenticator;
+use libadb::keys::rsa::rand_core::OsRng;
+use libadb::keys::{store, AdbKey};
 
-pub struct AdbKeyAuth {
-    private_key: rsa::RsaPrivateKey,
-    public_key_bytes: Vec<u8>,
+/// Load the key the standard adb client uses, generating one if the
+/// user has never run `adb` — the device asks to confirm it once.
+pub fn load_or_generate() -> Result<AdbKey, Box<dyn error::Error>> {
+    let home = env::var("HOME").map_err(|_| "HOME is not set; cannot locate ~/.android")?;
+    let dir = PathBuf::from(home).join(".android");
+    let key = store::load_or_generate(&dir, &mut OsRng, &name())?;
+    Ok(key)
 }
 
-impl AdbKeyAuth {
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
-        let home = env::var("HOME")?;
-        let base = PathBuf::from(home).join(".android");
-
-        let pem = fs::read_to_string(base.join("adbkey"))
-            .map_err(|e| format!("~/.android/adbkey: {e}"))?;
-        let private_key =
-            <rsa::RsaPrivateKey as rsa::pkcs8::DecodePrivateKey>::from_pkcs8_pem(&pem)
-                .map_err(|e| format!("parse adbkey: {e}"))?;
-
-        let mut public_key_bytes =
-            fs::read(base.join("adbkey.pub")).map_err(|e| format!("~/.android/adbkey.pub: {e}"))?;
-        if !public_key_bytes.ends_with(b"\0") {
-            public_key_bytes.push(0);
-        }
-
-        Ok(Self {
-            private_key,
-            public_key_bytes,
-        })
-    }
-}
-
-impl Authenticator for AdbKeyAuth {
-    type Error = String;
-
-    async fn sign(&mut self, token: &[u8]) -> Result<Vec<u8>, String> {
-        use signature::hazmat::PrehashSigner;
-        use signature::SignatureEncoding;
-        let signing_key = rsa::pkcs1v15::SigningKey::<sha1::Sha1>::new(self.private_key.clone());
-        let sig = signing_key
-            .sign_prehash(token)
-            .map_err(|e| format!("sign: {e}"))?;
-        Ok(sig.to_bytes().into_vec())
-    }
-
-    fn public_key(&self) -> &[u8] {
-        &self.public_key_bytes
-    }
+/// The `user@host` comment shown in the device's authorization dialog.
+fn name() -> String {
+    let user = env::var("USER").unwrap_or_else(|_| String::from("libadb"));
+    let host = fs::read_to_string("/etc/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|_| String::from("host"));
+    format!("{user}@{host}")
 }

@@ -14,8 +14,10 @@
 //! seeds its own blinding generator from what the caller supplies, so
 //! nothing drags in `getrandom` behind your back.
 
-mod pubkey;
+pub(crate) mod pubkey;
 mod record;
+#[cfg(feature = "host-keys")]
+pub mod store;
 
 #[cfg(test)]
 mod tests;

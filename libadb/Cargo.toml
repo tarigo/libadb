@@ -13,7 +13,7 @@ keywords = ["adb", "android", "usb", "no_std", "embedded"]
 categories = ["embedded", "no-std", "network-programming", "hardware-support"]
 
 [package.metadata.docs.rs]
-features = ["tokio", "usb", "keys"]
+features = ["tokio", "usb", "host-keys"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -105,8 +105,12 @@ default = ["tokio"]
 # Implied by every runtime feature below; enable it directly only for
 # runtime-less consumers (e.g. `libadb-ffi`'s blocking executor).
 split = ["dep:async-lock", "dep:event-listener", "event-listener/std"]
-tokio = ["split", "dep:tokio", "dep:embedded-io-adapters", "embedded-io-adapters/tokio-1"]
-smol = ["split", "dep:smol", "dep:embedded-io-adapters", "embedded-io-adapters/futures-03"]
+# Set by the runtimes below, never by hand: `required-features` can ask
+# for a feature but not for a choice between two, so the examples —
+# which work with either runtime — have nothing else to name.
+runtime = []
+tokio = ["split", "runtime", "dep:tokio", "dep:embedded-io-adapters", "embedded-io-adapters/tokio-1"]
+smol = ["split", "runtime", "dep:smol", "dep:embedded-io-adapters", "embedded-io-adapters/futures-03"]
 nusb = ["split", "dep:nusb"]
 rusb = ["split", "dep:rusb"]
 # Convenience alias for the default USB backend. Both backends may be
@@ -115,6 +119,11 @@ usb = ["nusb"]
 # Built-in RSA host key: generation, PKCS#8 import/export and the ADB
 # public-key encoding. no_std + alloc; does not imply `split`/std.
 keys = ["dep:rsa", "dep:sha1", "dep:base64ct", "dep:zeroize", "dep:rand_chacha"]
+# Host key store on top of `keys`: reuse `~/.android/adbkey`, or
+# generate and persist one. Needs `std` for the filesystem, but none of
+# the `split` machinery. `rsa/getrandom` is what gives the caller an
+# `OsRng` to hand the constructors.
+host-keys = ["keys", "rsa/getrandom"]
 
 [dev-dependencies]
 bytes = "1"
@@ -127,15 +136,48 @@ sha1 = { version = "0.10", features = ["oid"] }
 signature = "2"
 # Seeded RNG for the one deterministic keygen test.
 rand_chacha = "0.3"
+tempfile = "3"
 # Integration tests decode the ADB public-key blob independently.
 base64ct = { version = "1", features = ["alloc"] }
+
+# Every example authenticates, and the key comes from `host-keys`; the
+# runtime is still chosen at the command line, except for the two
+# bridges below. A feature row without `host-keys` skips the examples
+# rather than failing, so at least one row has to carry it.
+[[example]]
+name = "abb"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "cmd"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "logcat"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "shell_v1"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "shell_v2"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "sync"
+required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "track_app"
+required-features = ["host-keys", "runtime"]
 
 # These two bridge a local TCP socket, which the other examples do not;
 # rather than carry a smol copy of that plumbing they stay tokio-only.
 [[example]]
 name = "forward"
-required-features = ["tokio"]
+required-features = ["tokio", "host-keys"]
 
 [[example]]
 name = "reverse"
-required-features = ["tokio"]
+required-features = ["tokio", "host-keys"]

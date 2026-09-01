@@ -31,38 +31,9 @@ use fake_device::{wrap, AuthPolicy, FakeDevice, DEFAULT_BANNER};
 #[path = "common/common.rs"]
 mod common;
 
-/// Throwaway RSA-2048 key for these tests only.
-const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCfJ471H4SpiWaP
-1nN1KkLbV227dSZZu0V+AkFMRVHBQ/eu82tfbG9aLSFtDWjP58h2IvjtPtnHupd2
-hyTgHiMt1Pa9gjxhjzdIYiZbNv3sArBhD/L0xgZE7WEwdwB9FE4EaFXQwola81oI
-H+lqXEVWcQtebpP8Sam9HrGhpwtvuKRUfeANRUFmEuPEnLrds+OsalvPT893IcGO
-N/rmb9BK4343jKvPtGcnVtkftDAOFudwENPGZjlC47WkR4/q1pq4fD327YEL0DHc
-Hw42K0g3GBuNzyQTZVtnbK30ogIQFF7ug+A/PAgXu8KLrAoNgHH9W3aeXSNYrXo6
-5uFYbsmHAgMBAAECggEAPTuMim2mbk3xWkzRXhY048v26YUQjLx655i5g701z6w1
-Oqfnuy5uhxzO+/SJS1grbZxV9n1Ub74v8Qfc3adqtIL3rYDSd1yREfXFORnmxutf
-7fAjcx5PIizMVEestfLec16rCacXDpmLHY4dkXDPsorKq3nS0OGMfzk0cXPh+AjQ
-Nz0kXljEP9Hb1dby2Zgh+mAFKD9RU5TeiNkxIsVaR9Fhl7d2cNZhy8gkoOqUhOit
-mAmCvIb1FOAUiPr4iqEjWJOciVPIIHY5NYwy4ktHwsyPH8o3VFggxgc0HNDqywdg
-sXKZpTvtmvXNGIJ7tkXzOCqknWixEHNTKK3Jq5s2vQKBgQDQPtg4HXEoRo7wlAjm
-nMPWZQo1m9o91RSYmyV1x8FVjeFpuNWy5UpnToNPbuVuyiEtxVOrtG/AQGDF6/pI
-Y87i8/VqlZ/gWqM+u/gwdijVvNHzndxSTdg+Ea2G/9gvWlqkDz0NVcgw49WyLq/s
-LXbwELoRvGp5PuVpuG4lo92b7QKBgQDDps3r2DOMrrIIR8Yf5bbUV2GyfF9ahi9Q
-JxVShfeN6Qogi6OIdERGZdHx29LEF9lAX4+On8VyyF/YBw19E+4bgJ1K+1MLc8rx
-ME+ixaCk0zMvpRZ68EE0kCv1kTlJE+6zThJ4NSwH6EK39sUTXULfFLsNedJkzkkm
-+6gzEuyUwwKBgQDITtruRyu0YQJXWR2ircIWdMQ4QrzPYynXjMygmU9Xew0LA5bS
-6IkEC9p0yqf4RIdbnoZYEEy58XLkjpMFlLPJTH6RUnEhfi2uR2J5Qv8OcPzGx97I
-cEaDlb+Dro8FJXUwf9PrAst4c373UL85f5X7XyuLqeAE1kIXyiZxIEknFQKBgHOY
-nTfIMIThPnzX8z4rWf9RdX6gLzJr745a2SU908q7smkSN9fKYgB57jYI3BlRweFf
-1JC+40jzDHW1jQmmedsz/TstDJ7KllA0bAjO3SAlTKvMzWBrjQsCV4aqe/8qULEN
-4qm1OMOfPbQ1j7DmPDlTpUTMAjvfCaeHrpQmjTNDAoGAP1mczr6EOxWe+sU2pI8n
-sK+8KgzS3RWlDluOLzXjC1cNOLQeihXWGfqr028FpQ5XURnOkg/C3XrnAXekLmwz
-PzYB4KuqFNwbz5ZRFESRkGzidJ3HFCwWE6XCvx0djkTZX3GSv+bDf5nrc3S0uyoQ
-HXG1VnHeCDbKytxtqaBZLX0=
------END PRIVATE KEY-----
-";
-
-const TEST_NAME: &str = "unit@test";
+#[path = "test_key/test_key.rs"]
+mod test_key;
+use test_key::{NAME, PKCS8_PEM};
 
 /// Rebuild the public key from an `AUTH(RSAPUBLICKEY)` payload the way
 /// adbd does, checking every field of the struct on the way: a device
@@ -105,7 +76,7 @@ fn public_key_from_wire(payload: &[u8]) -> RsaPublicKey {
 rt_test! {
 async fn a_real_key_completes_the_pubkey_handshake_with_a_verifiable_signature() {
     let mut rng = ChaCha8Rng::seed_from_u64(1);
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut rng, TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(PKCS8_PEM, &mut rng, NAME).unwrap();
     // adbd issues 20-byte SHA-1 prehashes; a real signer insists on it.
     let first_token = [0x11u8; 20];
     let dev = FakeDevice::new().auth(AuthPolicy::RequirePublicKey {

@@ -5,7 +5,7 @@
 //! adb shell 'echo served-by-device | nc -l -p 7788'
 //!
 //! # The bridge (host listens on 127.0.0.1:9911)
-//! cargo run --example forward --features tokio -- 192.168.2.106:5555 9911 tcp:7788
+//! cargo run --example forward --features tokio,host-keys -- 127.0.0.1:5555 9911 tcp:7788
 //!
 //! # Anywhere on the host:
 //! nc 127.0.0.1 9911
@@ -16,7 +16,8 @@
 //! spec, and adbd connects it on the device. Serves one connection at
 //! a time.
 //!
-//! Requires `~/.android/adbkey{,.pub}` (see `adb keygen`).
+//! Reuses `~/.android/adbkey`; if there is none, a key is generated
+//! and saved on first run — confirm it on the device when asked.
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
@@ -38,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
     tcp.set_nodelay(true)?;
-    let auth = adb_key_auth::AdbKeyAuth::load()?;
+    let auth = adb_key_auth::load_or_generate()?;
     let mut conn = Connection::<_>::connect(TokioTcp::new(tcp), auth, &[]).await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port)).await?;
