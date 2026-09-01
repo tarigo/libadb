@@ -56,6 +56,11 @@ pub(crate) fn fail_auth(msg: impl core::fmt::Display) -> AdbStatus {
     AdbStatus::Auth
 }
 
+pub(crate) fn fail_internal(msg: impl core::fmt::Display) -> AdbStatus {
+    set(msg);
+    AdbStatus::Internal
+}
+
 pub(crate) fn fail_ffi_connect(e: FfiConnectError) -> AdbStatus {
     let status = match &e {
         FfiConnectError::Uri(_) => AdbStatus::InvalidUri,

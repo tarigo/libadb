@@ -21,14 +21,14 @@ name = "adb"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-libadb = { path = "../libadb", version = "0.3.0", default-features = false, features = ["split"] }
+libadb = { path = "../libadb", version = "0.3.0", default-features = false, features = ["split", "host-keys"] }
 # `std` provides `impl embedded_io::Error for std::io::Error`, needed
 # by the blocking TCP transport.
 embedded-io = { version = "0.6", features = ["std"] }
 embedded-io-async = { version = "0.6", features = ["std"] }
-rsa = "0.9"
-sha1 = { version = "0.10", features = ["oid"] }
-signature = { version = "2", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 # TCP support is always compiled in and runs on the crate's own
 # blocking executor — no async runtime is linked. USB backends are

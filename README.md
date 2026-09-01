@@ -237,6 +237,8 @@ transport so callers see a fully blocking API. The header lives at
 [`libadb-ffi/include/libadb.h`](libadb-ffi/include/libadb.h) and covers:
 
 - connection lifecycle and handshake
+- host keys (`adb_key_load_or_generate`) — reuse `~/.android/adbkey` or
+  create one on first run, no `adb` installation needed
 - caller-supplied authenticators (`adb_connect_with_authenticator`) —
   for private keys living outside the process (HSM, remote signer)
 - channel open/read/write/close

@@ -648,9 +648,7 @@ dependencies = [
  "embedded-io",
  "embedded-io-async",
  "libadb",
- "rsa",
- "sha1",
- "signature",
+ "tempfile",
 ]
 
 [[package]]
