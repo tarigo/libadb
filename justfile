@@ -11,11 +11,11 @@
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
-lib_features := "tokio smol tokio,usb tokio,rusb tokio,smol tokio,nusb,rusb smol,usb smol,rusb tokio,keys smol,keys"
+lib_features := "tokio smol tokio,usb tokio,rusb tokio,smol tokio,nusb,rusb smol,usb smol,rusb tokio,host-keys smol,host-keys host-keys"
 ffi_features := "usb rusb nusb,rusb"
 # Documentation is built per narrow combination: an intra-doc link to a
 # type behind another feature only breaks when that feature is off.
-doc_features := "tokio smol tokio,rusb smol,nusb tokio,keys tokio,smol,nusb,rusb"
+doc_features := "tokio smol tokio,rusb smol,nusb tokio,host-keys tokio,smol,nusb,rusb"
 msrv_version := "1.87.0"
 no_std_target := "thumbv7m-none-eabi"
 fuzz_targets := "packet_decode shell_v2_frames sync_parse"
@@ -26,7 +26,7 @@ restack_base := "origin/main"
 # mutated: a mutant inside a `cfg`-ed out module compiles away, the
 # tests pass, and it is reported as surviving when nothing was tested at
 # all. Both runtimes and both USB backends cover the crate.
-mutants_features := "tokio,smol,nusb,rusb,keys"
+mutants_features := "tokio,smol,nusb,rusb,host-keys"
 # Seconds a single mutant may take before it counts as a timeout. A
 # mutant that loops forever would otherwise hold the run open.
 mutants_timeout := "120"
@@ -34,7 +34,7 @@ mutants_timeout := "120"
 # hardware. The USB backends stay out on purpose — their tests need a
 # device, so compiling them in would only grow the denominator with
 # lines nothing on CI can reach.
-coverage_features := "tokio,smol,keys"
+coverage_features := "tokio,smol,host-keys"
 
 # The warning policy every recipe runs under, CI included: clippy takes
 # `-D warnings` on its own command line, but rustc warnings from tests,
@@ -141,7 +141,7 @@ doc:
 msrv:
     #!/usr/bin/env bash
     set -euo pipefail
-    for f in tokio smol split keys tokio,rusb smol,nusb tokio,smol; do
+    for f in tokio smol split keys host-keys tokio,rusb smol,nusb tokio,smol; do
         echo "== msrv libadb [$f]"
         just msrv-one libadb "$f"
     done

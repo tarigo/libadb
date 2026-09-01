@@ -1,14 +1,15 @@
 //! Example: stream debuggable/profileable process snapshots.
 //!
 //! ```text
-//! cargo run --example track_app --features tokio -- 127.0.0.1:5555
-//! cargo run --example track_app --no-default-features --features smol -- 127.0.0.1:5555
+//! cargo run --example track_app --features tokio,host-keys -- 127.0.0.1:5555
+//! cargo run --example track_app --no-default-features --features smol,host-keys -- 127.0.0.1:5555
 //! ```
 //!
-//! Requires `~/.android/adbkey` and `~/.android/adbkey.pub`.
+//! Reuses `~/.android/adbkey`; if there is none, a key is generated
+//! and saved on first run — confirm it on the device when asked.
 
 #[cfg(not(any(feature = "tokio", feature = "smol")))]
-compile_error!("this example requires --features tokio or --features smol");
+compile_error!("this example requires --features tokio,host-keys or --features smol,host-keys");
 
 use std::{env, process};
 
@@ -16,9 +17,8 @@ use libadb::{track_app, Connection, Error, Feature};
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
-use adb_key_auth::AdbKeyAuth;
 async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let auth = AdbKeyAuth::load()?;
+    let auth = adb_key_auth::load_or_generate()?;
 
     #[cfg(feature = "tokio")]
     let transport = {

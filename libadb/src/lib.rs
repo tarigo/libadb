@@ -22,7 +22,9 @@
 //! | `rusb`  | USB transport via `rusb` (libusb); may be combined with `nusb`             |
 //! | `usb`   | Convenience alias enabling the default USB backend (`nusb`)                |
 //! | `split` | [`split`] Reader/Writer pair with no bundled runtime; pulls in `std`. Implied by every feature above |
+//! | `runtime` | Set by `tokio` and `smol`, not by hand: it lets the examples require one of the two |
 //! | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8/PKCS#1 load, PKCS#8 save, ADB public-key encoding. `no_std + alloc` |
+//! | `host-keys` | `keys::store` on top of `keys`: read `~/.android/adbkey`, or generate and persist one; pulls in `std` |
 //!
 //! # Quick start
 //!
@@ -99,7 +101,7 @@
 
 extern crate alloc;
 
-#[cfg(feature = "split")]
+#[cfg(any(feature = "split", feature = "host-keys"))]
 extern crate std;
 
 pub mod abb;

@@ -5,7 +5,7 @@
 //! python3 -m http.server 8899
 //!
 //! # Terminal 2: the bridge (device listens on tcp:6100)
-//! cargo run --example reverse --features tokio -- 192.168.2.106:5555 tcp:6100 8899
+//! cargo run --example reverse --features tokio,host-keys -- 127.0.0.1:5555 tcp:6100 8899
 //!
 //! # On the device: adbd binds IPv6-first, so talk to ::1 — and keep
 //! # stdin open until the reply arrives (nc closes on stdin EOF, and a
@@ -19,7 +19,8 @@
 //! the next one is accepted. Channels opened for destinations other
 //! than the established rule are rejected.
 //!
-//! Requires `~/.android/adbkey{,.pub}` (see `adb keygen`).
+//! Reuses `~/.android/adbkey`; if there is none, a key is generated
+//! and saved on first run — confirm it on the device when asked.
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
@@ -41,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
     tcp.set_nodelay(true)?;
-    let auth = adb_key_auth::AdbKeyAuth::load()?;
+    let auth = adb_key_auth::load_or_generate()?;
     let mut conn = Connection::<_>::connect(TokioTcp::new(tcp), auth, &[]).await?;
 
     let host_spec = format!("tcp:{local_port}");
