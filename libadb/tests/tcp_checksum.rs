@@ -71,7 +71,7 @@ rt_test! {
 async fn handshake_packets_carry_a_checksum() {
     let (_conn, device) = session(
         FakeDevice::new().auth(AuthPolicy::AcceptSignature {
-            token: b"token-bytes".to_vec(),
+            token: [0xABu8; 20].to_vec(),
         }),
         HOST_BANNER,
         |s| async move { s },

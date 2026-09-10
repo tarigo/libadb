@@ -1,8 +1,9 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
+use libadb::error::AuthError;
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
 use libadb::shell::v2 as shell_v2;
-use libadb::{abb, cmd, exec, logcat, track_app, Connection, Error, Feature};
+use libadb::{abb, cmd, exec, logcat, track_app, Connection, Error, Feature, ProtocolError};
 
 #[path = "rt/rt.rs"]
 mod rt;
@@ -36,7 +37,7 @@ async fn connect_no_auth() {
 rt_test! {
 async fn connect_auth_signature() {
     let dev = FakeDevice::new().auth(AuthPolicy::AcceptSignature {
-        token: b"random-token-data".to_vec(),
+        token: [0x5Au8; 20].to_vec(),
     });
     let (conn, device) = session(dev, b"host::", |_| async {}).await;
 
@@ -46,10 +47,73 @@ async fn connect_auth_signature() {
 }
 
 rt_test! {
+async fn a_token_that_is_not_a_sha1_prehash_is_refused_before_signing() {
+    // adbd sends a 20-byte prehash. Anything else would be padded into
+    // a DigestInfo no device accepts, so it never reaches the signer.
+    let dev = FakeDevice::new().auth(AuthPolicy::AcceptSignature {
+        token: b"short".to_vec(),
+    });
+    let (handle, addr) = dev.bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+    let stream = rt::connect(addr).await;
+
+    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    else {
+        panic!("expected the handshake to refuse the token");
+    };
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::InvalidAuthToken(5))),
+        "expected InvalidAuthToken(5), got {err:?}"
+    );
+    drop(device);
+}
+}
+
+rt_test! {
+async fn a_signer_that_refuses_says_why() {
+    // The handshake cannot carry the authenticator's own error type, so
+    // it carries what that error says. Losing it would leave a caller
+    // unable to tell a missing key from a broken one.
+    struct Refuses;
+
+    impl libadb::auth::Authenticator for Refuses {
+        type Error = &'static str;
+
+        async fn sign(&mut self, _token: &[u8]) -> Result<Vec<u8>, &'static str> {
+            Err("the smartcard is not present")
+        }
+
+        fn public_key(&self) -> &[u8] {
+            b"\0"
+        }
+    }
+
+    let dev = FakeDevice::new().auth(AuthPolicy::AcceptSignature {
+        token: [0x5Au8; 20].to_vec(),
+    });
+    let (handle, addr) = dev.bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+    let stream = rt::connect(addr).await;
+
+    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), Refuses, b"host::").await
+    else {
+        panic!("expected the handshake to fail");
+    };
+
+    assert!(
+        matches!(&err, Error::Auth(AuthError::SignFailed(why)) if why.contains("smartcard")),
+        "the signer's own words must survive, got {err:?}"
+    );
+    drop(device);
+}
+}
+
+rt_test! {
 async fn connect_auth_pubkey() {
     let dev = FakeDevice::new().auth(AuthPolicy::RequirePublicKey {
-        first_token: b"token-1".to_vec(),
-        second_token: b"token-2".to_vec(),
+        first_token: [0x11u8; 20].to_vec(),
+        second_token: [0x22u8; 20].to_vec(),
         expected_pubkey: TEST_PUBKEY.to_vec(),
     });
     let (conn, device) = session(dev, b"host::", |_| async {}).await;

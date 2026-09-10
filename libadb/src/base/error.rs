@@ -84,6 +84,9 @@ pub enum ProtocolError {
     UnexpectedCommand(Command),
     /// Delayed-ACK READY packet payload is shorter than 4 bytes.
     ShortReadyPayload,
+    /// AUTH token is not the 20-byte SHA-1 prehash the handshake signs.
+    /// Carries the length that arrived.
+    InvalidAuthToken(usize),
     /// Shell v2 EXIT frame received with empty payload (expected 1-byte exit code).
     ShortExitPayload,
     /// Service destination string contains an embedded NUL byte.
@@ -102,12 +105,13 @@ pub enum ProtocolError {
     TooManyBannerFeatures,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     /// Device rejected all authentication attempts.
     Rejected,
-    /// Authenticator failed to sign the token.
-    SignFailed,
+    /// The authenticator would not sign the token. Carries what it
+    /// said, since that is the only account of the failure there is.
+    SignFailed(alloc::string::String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +136,9 @@ impl fmt::Display for ProtocolError {
             Self::ShortReadyPayload => {
                 f.write_str("delayed-ack READY payload shorter than 4 bytes")
             }
+            Self::InvalidAuthToken(len) => f.write_fmt(format_args!(
+                "AUTH token is {len} bytes, not the 20-byte SHA-1 prehash"
+            )),
             Self::ShortExitPayload => f.write_str("shell v2 EXIT frame payload empty"),
             Self::InvalidDestination => f.write_str("service destination contains a NUL byte"),
             Self::UnknownFeature => f.write_str("unknown feature"),
@@ -152,7 +159,7 @@ impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rejected => f.write_str("authentication rejected"),
-            Self::SignFailed => f.write_str("authenticator sign failed"),
+            Self::SignFailed(why) => f.write_fmt(format_args!("authenticator sign failed: {why}")),
         }
     }
 }
@@ -406,7 +413,12 @@ mod tests {
     #[test]
     fn auth_display_rejected_and_sign_failed() {
         assert_eq!(show(&AuthError::Rejected), "authentication rejected");
-        assert_eq!(show(&AuthError::SignFailed), "authenticator sign failed");
+        assert_eq!(
+            show(&AuthError::SignFailed(alloc::string::String::from(
+                "no key"
+            ))),
+            "authenticator sign failed: no key"
+        );
     }
 
     #[test]
