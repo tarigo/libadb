@@ -95,6 +95,8 @@ pub const AUTH_TOKEN: u32 = 1;
 pub const AUTH_SIGNATURE: u32 = 2;
 /// Host sends its RSA public key for on-device authorization prompt.
 pub const AUTH_RSAPUBLICKEY: u32 = 3;
+/// Length of the token adbd asks the host to sign: a SHA-1 prehash.
+pub const AUTH_TOKEN_LEN: usize = 20;
 
 /// ADB protocol version with feature negotiation.
 pub const ADB_VERSION: u32 = 0x0100_0001;

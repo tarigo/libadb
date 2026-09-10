@@ -10,7 +10,10 @@ use alloc::vec::Vec;
 /// or a hardware security module). The `keys` feature ships a ready one,
 /// `keys::AdbKey`, which also generates a key when there is none.
 pub trait Authenticator {
-    type Error;
+    /// Why signing failed. It is `Display` because the handshake has
+    /// nowhere to put the value itself: what reaches the caller of
+    /// `Connection::connect` is the text this renders to.
+    type Error: core::fmt::Display;
 
     /// Sign the token received from the device.
     ///

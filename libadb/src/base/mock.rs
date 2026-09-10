@@ -286,11 +286,20 @@ pub(crate) fn abandon<F: Future>(fut: F) {
 
 pub(crate) struct NoAuth;
 
-impl crate::auth::Authenticator for NoAuth {
-    type Error = ();
+/// Why [`NoAuth`] never signs.
+pub(crate) struct NoKey;
 
-    async fn sign(&mut self, _token: &[u8]) -> Result<Vec<u8>, ()> {
-        Err(())
+impl core::fmt::Display for NoKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("no key")
+    }
+}
+
+impl crate::auth::Authenticator for NoAuth {
+    type Error = NoKey;
+
+    async fn sign(&mut self, _token: &[u8]) -> Result<Vec<u8>, NoKey> {
+        Err(NoKey)
     }
 
     fn public_key(&self) -> &[u8] {

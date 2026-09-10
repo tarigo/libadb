@@ -174,10 +174,16 @@ where
         token: Bytes,
         config: &ConnectionConfig,
     ) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+        // Checked here rather than in each authenticator: a stray
+        // length must not reach a signer that may be someone else's.
+        if token.len() != command::AUTH_TOKEN_LEN {
+            return Err(ProtocolError::InvalidAuthToken(token.len()).into());
+        }
+
         let signature = auth
             .sign(&token)
             .await
-            .map_err(|_| Error::Auth(AuthError::SignFailed))?;
+            .map_err(|e| Error::Auth(AuthError::SignFailed(alloc::format!("{e}"))))?;
 
         send_pkt(
             transport,
