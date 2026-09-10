@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "libadb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-lock",
  "base64ct",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "libadb-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "embedded-io",
  "embedded-io-async",
