@@ -680,3 +680,25 @@ async fn require_feature_works_after_connect_with_raw_banner() {
     rt::join(device).await;
 }
 }
+
+rt_test! {
+async fn a_device_that_demands_tls_is_named_as_such_not_as_a_raw_command() {
+    // Android 11+ wireless debugging answers CNXN with STLS. Before the
+    // command had a name here, that surfaced as the bare decimal
+    // `invalid command 1397511251`.
+    let (handle, addr) = FakeDevice::new().require_tls().bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+    let stream = rt::connect(addr).await;
+
+    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    else {
+        panic!("expected the handshake to refuse a TLS-only device");
+    };
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
+        "expected TlsRequired, got {err:?}"
+    );
+    drop(device);
+}
+}

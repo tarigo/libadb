@@ -5,9 +5,10 @@ use core::future::Future;
 use core::task::Poll;
 
 use super::*;
+use crate::base::error::ProtocolError;
 use crate::base::mock::{
-    abandon, connected_for_select, connected_with_channel, now, two_channels_classic,
-    two_channels_delayed_ack, wrte,
+    abandon, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
+    two_channels_delayed_ack, wrte, Mock, NoAuth,
 };
 
 #[test]
@@ -451,4 +452,19 @@ mod incoming {
         assert_eq!(cmd, Command::Close);
         assert_eq!((local, remote), (0, 9));
     }
+}
+
+#[test]
+fn a_device_that_answers_the_handshake_with_stls_says_it_wants_tls() {
+    let mut mock = Mock::new();
+    mock.feed(&stls());
+
+    let Err(err) = now(Connection::<_>::connect(mock, NoAuth, &[])) else {
+        panic!("expected the handshake to refuse a TLS-only device");
+    };
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
+        "expected TlsRequired, got {err:?}"
+    );
 }
