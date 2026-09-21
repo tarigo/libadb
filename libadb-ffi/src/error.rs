@@ -10,6 +10,7 @@ use crate::transport::FfiConnectError;
 /// Status code returned by most FFI entry points.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AdbStatus {
     Ok = 0,
     InvalidArg = 1,

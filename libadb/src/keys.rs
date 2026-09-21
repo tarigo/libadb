@@ -206,6 +206,7 @@ impl Authenticator for AdbKey {
 
 /// Errors from key encoding, conversion and signing.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum KeyError {
     /// The key name contains a NUL, CR or LF, which would corrupt the
     /// public-key line or the AUTH payload carrying it.
