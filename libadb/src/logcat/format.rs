@@ -73,6 +73,7 @@ impl fmt::Display for Priority {
 /// (`system/logging/liblog/include/android/log.h`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum LogId {
     Main = 0,
     Radio = 1,
@@ -162,6 +163,7 @@ impl LogEntry {
 
 /// Logcat binary-parsing error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LogcatError {
     /// The `logger_entry` header has an `hdr_size` smaller than the
     /// minimum (24 bytes for v3).

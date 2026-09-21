@@ -51,6 +51,7 @@ pub const CMD_STLS: u32 = u32::from_le_bytes(*b"STLS");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum Command {
     Sync = CMD_SYNC,
     Connect = CMD_CNXN,
