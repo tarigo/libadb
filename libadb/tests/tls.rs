@@ -508,3 +508,75 @@ async fn a_device_that_never_asks_for_tls_is_served_in_the_clear() {
 fn test_auth() -> AdbKey {
     host_key()
 }
+
+// ---------------------------------------------------------------------
+// Against a real device, when one is offered
+// ---------------------------------------------------------------------
+
+/// Point `LIBADB_TLS_DEVICE` at a wireless-debugging port to run these:
+///
+/// ```text
+/// LIBADB_TLS_DEVICE=192.168.1.5:41234 cargo test --features tokio,tls,host-keys --test tls
+/// ```
+///
+/// They need a device whose store already holds `~/.android/adbkey`,
+/// which is any device that has ever been authorised over USB. Without
+/// the variable they do nothing, so CI is unaffected.
+fn device_address() -> Option<SocketAddr> {
+    std::env::var("LIBADB_TLS_DEVICE")
+        .ok()?
+        .parse()
+        .map_err(|e| panic!("LIBADB_TLS_DEVICE is not an address: {e}"))
+        .ok()
+}
+
+async fn real_device_key() -> AdbKey {
+    let home = std::env::var("HOME").expect("HOME");
+    let dir = std::path::PathBuf::from(home).join(".android");
+    libadb::keys::store::load_or_generate(&dir, &mut OsRng, "libadb@test").unwrap()
+}
+
+rt_test! {
+async fn a_real_device_serves_a_split_connection_over_tls() {
+    let Some(addr) = device_address() else {
+        return;
+    };
+    // The split halves are a code path of their own, with their own
+    // locking, so a live device is worth the trouble here even though
+    // the local server already covers the unsplit one.
+    let key = real_device_key().await;
+    let identity = TlsIdentity::from_key(&key, &mut OsRng).unwrap();
+    let tls = TlsClientConfig::adb(&identity).unwrap();
+
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    let conn = Connection::<_>::connect_tls(transport, key, &[], &tls)
+        .await
+        .expect("the device accepts a key it was shown over USB");
+    assert!(conn.transport().is_tls());
+
+    let (mut reader, _writer) = conn.split().expect("a TLS connection splits");
+
+    // Enough output to cross many TLS records and many ADB packets.
+    let ch = reader
+        .open_channel(b"shell:seq 1 20000\0")
+        .await
+        .expect("the device opens a shell");
+
+    let mut out = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match reader.read_channel(ch, &mut buf).await {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(libadb::Error::ChannelClosed) => break,
+            Err(e) => panic!("read over a split TLS session failed: {e:?}"),
+        }
+    }
+
+    let lines = out
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .count();
+    assert_eq!(lines, 20000, "every line survived the split TLS session");
+}
+}
