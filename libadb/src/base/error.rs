@@ -103,6 +103,14 @@ pub enum ProtocolError {
     TooManyBannerProperties,
     /// Too many features in the device banner.
     TooManyBannerFeatures,
+    /// The device answered the handshake with `STLS`: it speaks nothing
+    /// but TLS from here on.
+    ///
+    /// This is how Android 11+ wireless debugging works — the port
+    /// `adb pair` hands out, and the one the "Wireless debugging" pane
+    /// shows. The legacy port `adb tcpip` opens is plain text, and so
+    /// is USB; neither is affected.
+    TlsRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +140,10 @@ impl fmt::Display for ProtocolError {
             Self::InvalidChecksum => f.write_str("data checksum mismatch"),
             Self::InvalidCommand(c) => f.write_fmt(format_args!("invalid command {}", c)),
             Self::PayloadTooLarge => f.write_str("payload exceeds max_payload"),
+            Self::TlsRequired => f.write_str(
+                "device requires a TLS handshake (Android 11+ wireless debugging); \
+                 connect over USB, or switch the device to plain TCP with `adb tcpip 5555`",
+            ),
             Self::UnexpectedCommand(c) => f.write_fmt(format_args!("unexpected command {:?}", c)),
             Self::ShortReadyPayload => {
                 f.write_str("delayed-ack READY payload shorter than 4 bytes")
@@ -354,6 +366,15 @@ mod tests {
         assert_eq!(
             show(&ProtocolError::InvalidChecksum),
             "data checksum mismatch"
+        );
+    }
+
+    #[test]
+    fn protocol_display_tls_required_names_a_way_out() {
+        assert_eq!(
+            show(&ProtocolError::TlsRequired),
+            "device requires a TLS handshake (Android 11+ wireless debugging); \
+             connect over USB, or switch the device to plain TCP with `adb tcpip 5555`"
         );
     }
 

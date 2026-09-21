@@ -26,7 +26,8 @@ pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
 
 // adbd may emit stream-level packets (CLSE/OKAY/WRTE/OPEN) for channels
 // left over from a previous session, typically right after host
-// re-attach on USB. Drain them until the CNXN/AUTH response arrives.
+// re-attach on USB. Drain them until the device's verdict on the
+// handshake arrives: CNXN, AUTH or STLS.
 async fn recv_handshake_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
@@ -35,7 +36,7 @@ async fn recv_handshake_pkt<T: Read>(
     loop {
         let pkt = recv_pkt(t, buf, max_payload).await?;
         match pkt.command {
-            Command::Connect | Command::Auth => return Ok(pkt),
+            Command::Connect | Command::Auth | Command::StartTls => return Ok(pkt),
             Command::Close | Command::Ready | Command::Write | Command::Open => {
                 log::debug!("dropping stale {:?} during handshake", pkt.command);
             }
@@ -142,6 +143,10 @@ where
                 )
                 .await?
             }
+            Command::StartTls => {
+                log::debug!("device demands TLS: STLS version {:#010x}", pkt.arg0);
+                return Err(ProtocolError::TlsRequired.into());
+            }
             other => return Err(ProtocolError::UnexpectedCommand(other).into()),
         };
 
@@ -197,6 +202,9 @@ where
         if resp.command == Command::Connect {
             return Ok(resp);
         }
+        if resp.command == Command::StartTls {
+            return Err(ProtocolError::TlsRequired.into());
+        }
 
         if resp.command == Command::Auth && resp.arg0 == command::AUTH_TOKEN {
             let pubkey = auth.public_key();
@@ -211,6 +219,9 @@ where
             let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
             if resp.command == Command::Connect {
                 return Ok(resp);
+            }
+            if resp.command == Command::StartTls {
+                return Err(ProtocolError::TlsRequired.into());
             }
         }
 

@@ -175,6 +175,11 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
 ## Limitations
 
+- Android 11+ wireless debugging — the port `adb pair` hands out, and
+  the one the "Wireless debugging" pane shows — requires TLS, which this
+  crate does not speak. The device answers the handshake with `STLS` and
+  `connect` fails with `ProtocolError::TlsRequired`. Use USB, or the
+  plain-text port `adb tcpip 5555` opens.
 - With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
   as AOSP's adbd always does; the operation that received a creditless
   one fails with `ShortReadyPayload` rather than having a budget

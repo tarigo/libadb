@@ -316,6 +316,17 @@ pub(crate) fn cnxn() -> Packet {
     )
 }
 
+/// What an Android 11+ device on the wireless-debugging port answers a
+/// CNXN with: it will speak nothing but TLS from here on.
+pub(crate) fn stls() -> Packet {
+    Packet::new(
+        Command::StartTls,
+        crate::base::protocol::constant::STLS_VERSION,
+        0,
+        Vec::new(),
+    )
+}
+
 pub(crate) fn okay(local_id: u32) -> Packet {
     Packet::new(Command::Ready, 42, local_id, Vec::new())
 }
