@@ -327,3 +327,184 @@ fn spki_of(der: &[u8]) -> Vec<u8> {
         .expect("an RSA-2048 SubjectPublicKeyInfo");
     der[at..at + 294].to_vec()
 }
+
+// ---------------------------------------------------------------------
+// The whole handshake: STLS, then ADB inside the session
+// ---------------------------------------------------------------------
+
+use libadb::protocol::command::{CMD_CNXN, CMD_STLS};
+use libadb::protocol::constant::{ADB_VERSION, STLS_VERSION};
+use libadb::{Connection, Error};
+
+const DEVICE_BANNER: &[u8] = b"device::features=shell_v2,cmd";
+
+fn header(command: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
+    let mut h = Vec::with_capacity(24 + payload.len());
+    h.extend_from_slice(&command.to_le_bytes());
+    h.extend_from_slice(&arg0.to_le_bytes());
+    h.extend_from_slice(&arg1.to_le_bytes());
+    h.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    let sum: u32 = payload.iter().map(|&b| b as u32).sum();
+    h.extend_from_slice(&sum.to_le_bytes());
+    h.extend_from_slice(&(command ^ 0xFFFF_FFFF).to_le_bytes());
+    h.extend_from_slice(payload);
+    h
+}
+
+fn read_packet(r: &mut impl std::io::Read) -> (u32, u32, u32, Vec<u8>) {
+    let mut h = [0u8; 24];
+    r.read_exact(&mut h).unwrap();
+    let word = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
+    let len = word(3) as usize;
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        r.read_exact(&mut payload).unwrap();
+    }
+    (word(0), word(1), word(2), payload)
+}
+
+/// What the device saw the host do.
+struct HandshakeReport {
+    /// arg0 and arg1 of the host's own STLS.
+    host_stls: (u32, u32),
+    /// Whether the host's STLS carried a payload. AOSP's carries none.
+    host_stls_payload: usize,
+    /// Whether the host repeated its CNXN inside the session. It must
+    /// not: the device speaks first there.
+    repeated_cnxn: bool,
+}
+
+/// A device that demands TLS and then talks ADB inside it.
+fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeReport>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let (cert, key) = device_identity();
+        let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(Arc::new(ClientPolicy {
+                accept: policy == KeyPolicy::Accept,
+                provider,
+            }))
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+
+        let (mut socket, _) = listener.accept().unwrap();
+
+        // In the clear: the host's CNXN, then our demand for TLS.
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
+        socket
+            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .unwrap();
+
+        let (command, arg0, arg1, payload) = read_packet(&mut socket);
+        assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
+        let mut report = HandshakeReport {
+            host_stls: (arg0, arg1),
+            host_stls_payload: payload.len(),
+            repeated_cnxn: false,
+        };
+
+        // From here on, TLS.
+        let conn = ServerConnection::new(Arc::new(config)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        // The device speaks first inside the session.
+        if tls
+            .write_all(&header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER))
+            .is_err()
+        {
+            return report;
+        }
+        let _ = tls.flush();
+
+        // Nothing should arrive until the host opens a channel.
+        tls.sock
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let mut probe = [0u8; 24];
+        if let Ok(24) = tls.read(&mut probe) {
+            report.repeated_cnxn = u32::from_le_bytes(probe[0..4].try_into().unwrap()) == CMD_CNXN;
+        }
+        report
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_device_that_demands_tls_ends_up_connected() {
+    let (addr, device) = spawn_adb_device(KeyPolicy::Accept);
+
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    let conn = Connection::<_>::connect_tls(
+        transport,
+        test_auth(),
+        &[],
+        &client_config(),
+    )
+    .await
+    .expect("a device that offers TLS and trusts the key connects");
+
+    assert!(conn.transport().is_tls(), "the session is running");
+    assert_eq!(conn.device_banner(), Some(DEVICE_BANNER));
+
+    let report = device.join().unwrap();
+    assert_eq!(report.host_stls, (STLS_VERSION, 0), "the host mirrors the offer");
+    assert_eq!(report.host_stls_payload, 0, "STLS carries no payload");
+    assert!(!report.repeated_cnxn, "the host waits rather than repeating CNXN");
+}
+}
+
+rt_test! {
+async fn a_key_the_device_will_not_have_is_named_as_such() {
+    let (addr, device) = spawn_adb_device(KeyPolicy::Reject);
+
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    let Err(err) = Connection::<_>::connect_tls(
+        transport,
+        test_auth(),
+        &[],
+        &client_config(),
+    )
+    .await
+    else {
+        panic!("a device that refuses the key must not hand back a connection");
+    };
+
+    assert!(
+        matches!(err, Error::Auth(libadb::error::AuthError::TlsKeyNotTrusted)),
+        "expected TlsKeyNotTrusted, got {err:?}"
+    );
+    let _ = device.join();
+}
+}
+
+rt_test! {
+async fn a_device_that_never_asks_for_tls_is_served_in_the_clear() {
+    // One entry point covers both kinds of device, so a caller does not
+    // have to know which port it dialled.
+    let (handle, addr) = fake_device::FakeDevice::new().bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    let conn = Connection::<_>::connect_tls(
+        transport,
+        test_auth(),
+        &[],
+        &client_config(),
+    )
+    .await
+    .expect("a plain device still connects");
+
+    assert!(conn.transport().is_plain(), "nothing was upgraded");
+    drop(device);
+}
+}
+
+fn test_auth() -> AdbKey {
+    host_key()
+}

@@ -103,6 +103,45 @@ mod inner {
             config: &TlsClientConfig,
             pending: &[u8],
         ) -> impl Future<Output = Result<(), Self::Error>>;
+
+        /// Whether `error` is the device refusing the key we offered.
+        ///
+        /// TLS 1.3 tells a client nothing when the server rejects its
+        /// certificate: the handshake finishes locally and the refusal
+        /// arrives as an alert on the first read. Without this, that
+        /// reads as an ordinary transport failure.
+        fn is_key_rejected(error: &Self::Error) -> bool;
+    }
+
+    /// Alerts a device sends when it will not have the key.
+    fn alert_means_rejection(alert: rustls::AlertDescription) -> bool {
+        use rustls::AlertDescription as A;
+        matches!(
+            alert,
+            A::CertificateRequired
+                | A::BadCertificate
+                | A::UnsupportedCertificate
+                | A::CertificateRevoked
+                | A::CertificateExpired
+                | A::CertificateUnknown
+                | A::UnknownCA
+                | A::AccessDenied
+                | A::DecryptError
+                | A::HandshakeFailure
+        )
+    }
+
+    impl<E> TlsError<E> {
+        /// Whether this is a device refusing the key, rather than a
+        /// connection that went wrong on its own.
+        pub fn is_key_rejected(&self) -> bool {
+            match self {
+                Self::Tls(rustls::Error::AlertReceived(a)) => alert_means_rejection(*a),
+                // Some adbd builds just close, with no alert at all.
+                Self::HandshakeClosed => true,
+                _ => false,
+            }
+        }
     }
 
     /// What a look at the plaintext side turned up.
@@ -423,6 +462,10 @@ mod inner {
             self.state = State::Tls(session);
             Ok(())
         }
+
+        fn is_key_rejected(error: &Self::Error) -> bool {
+            error.is_key_rejected()
+        }
     }
 
     impl<T> ReadCancelSafety for MaybeTls<T>
@@ -460,6 +503,13 @@ mod inner {
                 Self::Usb(_) => Err(crate::transport::common::TransportError::Tcp(
                     TlsError::NotAvailable,
                 )),
+            }
+        }
+
+        fn is_key_rejected(error: &Self::Error) -> bool {
+            match error {
+                crate::transport::common::TransportError::Tcp(e) => e.is_key_rejected(),
+                crate::transport::common::TransportError::Usb(_) => false,
             }
         }
     }
