@@ -13,5 +13,8 @@ pub const ADB_VERSION: u32 = 0x0100_0001;
 /// do not validate the field. See
 /// [`Connection::protocol_version`](crate::Connection::protocol_version).
 pub const ADB_VERSION_SKIP_CHECKSUM: u32 = 0x0100_0001;
+/// `arg0` of an `STLS` message: the ADB TLS handshake version both sides
+/// must agree on. AOSP calls it `A_STLS_VERSION`.
+pub const STLS_VERSION: u32 = 0x0100_0000;
 /// Default maximum payload size (bytes).
 pub const MAX_PAYLOAD: u32 = 1024 * 1024;

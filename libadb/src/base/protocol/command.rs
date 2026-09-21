@@ -59,6 +59,13 @@ pub enum Command {
     Close = CMD_CLSE,
     Write = CMD_WRTE,
     Auth = CMD_AUTH,
+    /// Upgrade the transport to TLS ([`CMD_STLS`]).
+    ///
+    /// A device on the Android 11+ wireless-debugging port answers the
+    /// host's CNXN with this instead of CNXN or AUTH. Only the
+    /// handshake acts on it: outside the handshake an `STLS` is
+    /// dropped like any other packet no channel claims.
+    StartTls = CMD_STLS,
 }
 
 impl Command {
@@ -78,6 +85,7 @@ impl TryFrom<u32> for Command {
             CMD_CLSE => Ok(Self::Close),
             CMD_WRTE => Ok(Self::Write),
             CMD_AUTH => Ok(Self::Auth),
+            CMD_STLS => Ok(Self::StartTls),
             _ => Err(ProtocolError::InvalidCommand(v)),
         }
     }
@@ -116,10 +124,11 @@ mod tests {
 
     use super::super::super::error::ProtocolError;
     use super::{
-        magic, Command, CMD_AUTH, CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_SYNC, CMD_WRTE,
+        magic, Command, CMD_AUTH, CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_STLS, CMD_SYNC,
+        CMD_WRTE,
     };
 
-    const ALL_VARIANTS: [(Command, u32); 7] = [
+    const ALL_VARIANTS: [(Command, u32); 8] = [
         (Command::Sync, CMD_SYNC),
         (Command::Connect, CMD_CNXN),
         (Command::Open, CMD_OPEN),
@@ -127,6 +136,7 @@ mod tests {
         (Command::Close, CMD_CLSE),
         (Command::Write, CMD_WRTE),
         (Command::Auth, CMD_AUTH),
+        (Command::StartTls, CMD_STLS),
     ];
 
     #[test]
@@ -177,5 +187,14 @@ mod tests {
         assert_eq!(CMD_CLSE, u32::from_le_bytes(*b"CLSE"));
         assert_eq!(CMD_WRTE, u32::from_le_bytes(*b"WRTE"));
         assert_eq!(CMD_AUTH, u32::from_le_bytes(*b"AUTH"));
+        assert_eq!(CMD_STLS, u32::from_le_bytes(*b"STLS"));
+    }
+
+    #[test]
+    fn the_code_a_wireless_device_answers_with_is_a_command_we_know() {
+        // 1397511251 is the decimal an unnamed STLS used to surface as,
+        // in `invalid command 1397511251`.
+        assert_eq!(CMD_STLS, 1_397_511_251);
+        assert_eq!(Command::try_from(CMD_STLS), Ok(Command::StartTls));
     }
 }
