@@ -794,3 +794,174 @@ fn a_payload_the_length_field_cannot_describe_is_refused() {
 
     assert!(crate::keys::record::header(u32::MAX as usize, 0).is_ok());
 }
+
+// ---------------------------------------------------------------------
+// Tests: the certificate the key wears over TLS
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "tls")]
+mod cert {
+    use super::*;
+
+    use alloc::vec;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use rsa::pkcs1v15::Pkcs1v15Sign;
+    use rsa::pkcs8::EncodePublicKey;
+    use rsa::sha2::{Digest, Sha256};
+    use x509_cert::der::{Decode, Encode};
+    use x509_cert::ext::pkix::{BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier};
+    use x509_cert::Certificate;
+
+    use crate::keys::cert;
+
+    /// A fixed instant, so `not_before` never depends on the clock.
+    fn fixed_start() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    /// The exact certificate `TEST_KEY_PEM` yields at `fixed_start()`,
+    /// as produced independently by a third-party X.509 library from the
+    /// same key, the same instant and the same field set.
+    ///
+    /// It pins the encoding: the RFC 5280 choice of `UTCTime` over
+    /// `GeneralizedTime`, the omitted `critical DEFAULT FALSE`, the
+    /// attribute order inside the name, and the explicit NULL parameters on
+    /// the signature algorithm. Any of those drifting is a silent
+    /// incompatibility with what `adb` puts on the wire.
+    const GOLDEN_CERT_HEX: &str = "\
+        30820317308201ffa003020102020101300d06092a864886f70d01010b0500302d310b30\
+        090603550406130255533110300e060355040a0c07416e64726f6964310c300a06035504\
+        030c03416462301e170d3233313131343232313332305a170d3333313131313232313332\
+        305a302d310b30090603550406130255533110300e060355040a0c07416e64726f696431\
+        0c300a06035504030c0341646230820122300d06092a864886f70d01010105000382010f\
+        003082010a02820101009f278ef51f84a989668fd673752a42db576dbb752659bb457e02\
+        414c4551c143f7aef36b5f6c6f5a2d216d0d68cfe7c87622f8ed3ed9c7ba97768724e01e\
+        232dd4f6bd823c618f374862265b36fdec02b0610ff2f4c60644ed613077007d144e0468\
+        55d0c2895af35a081fe96a5c4556710b5e6e93fc49a9bd1eb1a1a70b6fb8a4547de00d45\
+        416612e3c49cbaddb3e3ac6a5bcf4fcf7721c18e37fae66fd04ae37e378cabcfb4672756\
+        d91fb4300e16e77010d3c6663942e3b5a4478fead69ab87c3df6ed810bd031dc1f0e362b\
+        4837181b8dcf2413655b676cadf4a20210145eee83e03f3c0817bbc28bac0a0d8071fd5b\
+        769e5d2358ad7a3ae6e1586ec9870203010001a3423040300f0603551d130101ff040530\
+        030101ff300e0603551d0f0101ff040403020186301d0603551d0e04160414b96085178e\
+        19efe634b3889df565464412ca6fed300d06092a864886f70d01010b0500038201010044\
+        a342bc2c0551815a0e97eb0e91d9bdaedab1252120a23b46087c262721d3a557365ff87b\
+        bb0f0be5e0faaa68de83c19e760ee394e086c80217fe7a9786679ae1702ada79215f9342\
+        2afa974742af845f3a0c6e1a766fbf0fa4c79edcbff279abdceb8231ac57443c22a7c74b\
+        f4a061a9ef2946faea2a21730622d97fccbc9a46c7843a5f12247ee30da065b8fb8dc427\
+        c11ac4704b0ed73e270f87a370e441f6eee2a978c44f3e41e62fc8d5d07e7c0b94f22e2d\
+        78fe81942f7a6629c7aabb6e213604b629a357b7e25a42764e3f5b0360c7534771fb77ef\
+        c7bc44873b69d2dbd6768066a65a184cf739e65529ccbab6af6a0ce6b2c226fbb7b4e446\
+        aed351\
+    ";
+
+    fn golden_bytes() -> Vec<u8> {
+        let hex: alloc::string::String = GOLDEN_CERT_HEX
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        hex.as_bytes()
+            .chunks(2)
+            .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn the_certificate_is_byte_for_byte_what_another_library_builds() {
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+
+        let der = cert::build_at(&key, &mut test_rng(), fixed_start()).unwrap();
+
+        assert_eq!(der, golden_bytes());
+    }
+
+    fn built() -> Certificate {
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let der = cert::build_at(&key, &mut test_rng(), fixed_start()).unwrap();
+        Certificate::from_der(&der).unwrap()
+    }
+
+    #[test]
+    fn the_certificate_carries_the_key_a_device_already_trusts() {
+        // This is the whole point of the certificate: adbd compares the
+        // public key inside it against the keys a USB prompt approved.
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let expected = key
+            .private_key()
+            .to_public_key()
+            .to_public_key_der()
+            .unwrap();
+
+        let spki = built().tbs_certificate.subject_public_key_info;
+
+        assert_eq!(spki.to_der().unwrap(), expected.as_bytes());
+    }
+
+    #[test]
+    fn the_certificate_matches_the_shape_adb_emits() {
+        let tbs = built().tbs_certificate;
+
+        assert_eq!(tbs.version, x509_cert::Version::V3);
+        assert_eq!(tbs.serial_number.as_bytes(), &[0x01]);
+        assert_eq!(tbs.issuer, tbs.subject, "self-signed: issuer is subject");
+        assert_eq!(format!("{}", tbs.subject), "CN=Adb,O=Android,C=US");
+
+        let span =
+            tbs.validity.not_after.to_unix_duration() - tbs.validity.not_before.to_unix_duration();
+        assert_eq!(span, Duration::from_secs(60 * 60 * 24 * 365 * 10));
+    }
+
+    #[test]
+    fn the_three_extensions_are_the_ones_openssl_would_have_written() {
+        let tbs = built().tbs_certificate;
+
+        let basic: BasicConstraints = tbs.get().unwrap().map(|(_, e)| e).unwrap();
+        assert!(basic.ca);
+        assert_eq!(basic.path_len_constraint, None);
+
+        let usage: KeyUsage = tbs.get().unwrap().map(|(_, e)| e).unwrap();
+        assert!(usage.0.contains(KeyUsages::DigitalSignature));
+        assert!(usage.0.contains(KeyUsages::KeyCertSign));
+        assert!(usage.0.contains(KeyUsages::CRLSign));
+
+        let skid: SubjectKeyIdentifier = tbs.get().unwrap().map(|(_, e)| e).unwrap();
+        let expected = Sha1::digest(tbs.subject_public_key_info.subject_public_key.raw_bytes());
+        assert_eq!(skid.0.as_bytes(), expected.as_slice());
+
+        // basicConstraints and keyUsage are critical, the identifier is not.
+        let criticals: Vec<bool> = tbs.extensions.unwrap().iter().map(|e| e.critical).collect();
+        assert_eq!(criticals, vec![true, true, false]);
+    }
+
+    #[test]
+    fn the_certificate_verifies_under_its_own_key() {
+        let certificate = built();
+        let tbs_der = certificate.tbs_certificate.to_der().unwrap();
+
+        test_public_key()
+            .verify(
+                Pkcs1v15Sign::new::<Sha256>(),
+                &Sha256::digest(&tbs_der),
+                certificate.signature.raw_bytes(),
+            )
+            .expect("a device re-encodes the body and checks this signature");
+    }
+
+    #[test]
+    fn signing_the_certificate_draws_on_the_generator() {
+        // The signature is deterministic, so blinding leaves no trace in
+        // the output. What it leaves is a consumed stretch of the RNG:
+        // losing that means the private-key operation went out unmasked.
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let mut rng = test_rng();
+        let before = rng.get_word_pos();
+
+        cert::build_at(&key, &mut rng, fixed_start()).unwrap();
+
+        assert_ne!(
+            rng.get_word_pos(),
+            before,
+            "the certificate signature must be blinded, and blinding costs randomness"
+        );
+    }
+}
