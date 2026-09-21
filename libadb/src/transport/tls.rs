@@ -176,21 +176,23 @@ mod inner {
         }
     }
 
-    /// Hand rustls the ciphertext in `rx` and let it decrypt.
-    fn feed(conn: &mut ClientConnection, rx: &mut BytesMut) -> Result<(), rustls::Error> {
+    /// Hand rustls the ciphertext in `rx`; returns how much it took.
+    ///
+    /// Zero means the records in hand are incomplete. The callers drain
+    /// the plaintext first, so backpressure is never the reason.
+    fn feed(conn: &mut ClientConnection, rx: &mut BytesMut) -> Result<usize, rustls::Error> {
+        let start = rx.len();
         while !rx.is_empty() {
             let taken = match conn.read_tls(&mut &rx[..]) {
                 Ok(0) => break,
                 Ok(n) => n,
-                // The plaintext buffer is full; the caller drains it
-                // before coming back, so this is backpressure, not a
-                // failure.
+                // Backpressure: the caller drains the plaintext and comes back.
                 Err(_) => break,
             };
             rx.advance(taken);
             conn.process_new_packets()?;
         }
-        Ok(())
+        Ok(start - rx.len())
     }
 
     /// Take whatever plaintext is decrypted.
@@ -282,16 +284,18 @@ mod inner {
         }
 
         /// Let rustls decrypt, pushing out any alert it raises.
-        async fn advance(&mut self) -> Result<(), TlsError<T::Error>> {
-            let outcome = feed(&mut self.conn, &mut self.rx);
-            if let Err(e) = outcome {
-                // The alert explaining the failure is queued now; the
-                // peer deserves it even though we are about to give up.
-                harvest(&mut self.conn, &mut self.tx);
-                let _ = self.flush_tx().await;
-                return Err(TlsError::Tls(e));
+        ///
+        /// Returns how much ciphertext it consumed.
+        async fn advance(&mut self) -> Result<usize, TlsError<T::Error>> {
+            match feed(&mut self.conn, &mut self.rx) {
+                Ok(taken) => Ok(taken),
+                Err(e) => {
+                    // Send the alert rustls queued before giving up.
+                    harvest(&mut self.conn, &mut self.tx);
+                    let _ = self.flush_tx().await;
+                    Err(TlsError::Tls(e))
+                }
             }
-            Ok(())
         }
 
         async fn handshake(&mut self) -> Result<(), TlsError<T::Error>> {
@@ -352,11 +356,15 @@ mod inner {
                 harvest(&mut self.conn, &mut self.tx);
                 self.flush_tx().await?;
 
+                // Decrypt what is in hand before going back to the socket, or
+                // the tail of a closed stream is lost as a clean end of file.
+                if !self.rx.is_empty() && self.advance().await? > 0 {
+                    continue;
+                }
                 if self.eof {
                     return Ok(0);
                 }
                 self.fill().await?;
-                self.advance().await?;
             }
         }
     }
@@ -639,6 +647,24 @@ mod inner {
                 // Step two: no lock on the engine while the socket runs.
                 self.shared.write_records(&owed).await?;
 
+                // Decrypt what is in hand before going back to the socket, or
+                // the tail of a closed stream is lost as a clean end of file.
+                if !self.rx.is_empty() {
+                    let (result, owed) = {
+                        let mut conn = self.shared.conn.lock().await;
+                        let result = feed(&mut conn, &mut self.rx);
+                        let mut owed = BytesMut::new();
+                        harvest(&mut conn, &mut owed);
+                        (result, owed)
+                    };
+                    if !owed.is_empty() {
+                        self.shared.write_records(&owed).await?;
+                    }
+                    if result.map_err(TlsError::Tls)? > 0 {
+                        continue;
+                    }
+                }
+
                 if self.eof {
                     return Ok(0);
                 }
@@ -652,21 +678,6 @@ mod inner {
                 } else {
                     self.rx.extend_from_slice(&self.scratch[..n]);
                 }
-
-                // Step three: decrypt, and push out an alert if it went
-                // wrong.
-                let outcome = {
-                    let mut conn = self.shared.conn.lock().await;
-                    let outcome = feed(&mut conn, &mut self.rx);
-                    let mut owed = BytesMut::new();
-                    harvest(&mut conn, &mut owed);
-                    (outcome, owed)
-                };
-                let (result, owed) = outcome;
-                if !owed.is_empty() {
-                    self.shared.write_records(&owed).await?;
-                }
-                result.map_err(TlsError::Tls)?;
             }
         }
     }
