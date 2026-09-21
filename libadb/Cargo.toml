@@ -13,7 +13,7 @@ keywords = ["adb", "android", "usb", "no_std", "embedded"]
 categories = ["embedded", "no-std", "network-programming", "hardware-support"]
 
 [package.metadata.docs.rs]
-features = ["tokio", "usb", "host-keys"]
+features = ["tokio", "usb", "host-keys", "tls"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -98,6 +98,18 @@ optional = true
 default-features = false
 features = ["alloc"]
 
+# ADB over TLS (the `tls` feature): wireless debugging on Android 11+.
+# `x509-cert` is held at 0.2 because 0.3 moved to der/spki 0.8 and
+# signature 3, while everything here stands on der 0.7 / spki 0.7 /
+# signature 2 through `rsa` 0.9. Only its ASN.1 types are used: its
+# certificate builder signs without a CSPRNG, and a private-key
+# operation in this crate is always blinded.
+[dependencies.x509-cert]
+version = "0.2.5"
+optional = true
+default-features = false
+features = ["std"]
+
 [features]
 default = ["tokio"]
 # Full-duplex Reader/Writer support (the `split` module) with no
@@ -124,6 +136,13 @@ keys = ["dep:rsa", "dep:sha1", "dep:base64ct", "dep:zeroize", "dep:rand_chacha"]
 # the `split` machinery. `rsa/getrandom` is what gives the caller an
 # `OsRng` to hand the constructors.
 host-keys = ["keys", "rsa/getrandom"]
+# ADB over TLS: wireless debugging on Android 11+ (the STLS command).
+# Needs `keys`, because the certificate it presents is signed by the
+# very key that authorises a USB connection, and `std` for the clock the
+# certificate is dated by. `rsa/sha2` brings SHA-256 in by the same
+# re-export that already brings SHA-1, rather than opening a second path
+# to `sha2`.
+tls = ["keys", "split", "rsa/sha2", "dep:x509-cert"]
 
 [dev-dependencies]
 bytes = "1"
