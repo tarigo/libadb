@@ -116,6 +116,8 @@ pub mod shell;
 #[cfg(feature = "split")]
 pub mod split;
 pub mod sync;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod track_app;
 pub mod transport;
 pub mod uri;
