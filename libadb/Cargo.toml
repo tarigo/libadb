@@ -230,6 +230,10 @@ name = "shell_v1"
 required-features = ["host-keys", "runtime"]
 
 [[example]]
+name = "pair"
+required-features = ["pairing", "host-keys", "runtime"]
+
+[[example]]
 name = "shell_v2"
 required-features = ["host-keys", "runtime"]
 
