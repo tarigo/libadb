@@ -312,6 +312,18 @@ mod inner {
             self.flush_tx().await
         }
 
+        /// RFC 5705 exporter output for this session.
+        fn export_keying_material(
+            &self,
+            out: &mut [u8],
+            label: &[u8],
+            context: Option<&[u8]>,
+        ) -> Result<(), rustls::Error> {
+            self.conn
+                .export_keying_material(out, label, context)
+                .map(|_| ())
+        }
+
         /// Send `close_notify` and push it out.
         pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
             self.conn.send_close_notify();
@@ -398,6 +410,26 @@ mod inner {
         /// Whether bytes still go out in the clear.
         pub fn is_plain(&self) -> bool {
             matches!(self.state, State::Plain(_))
+        }
+
+        /// Key material exported from the running session, as RFC 5705
+        /// defines it.
+        ///
+        /// Pairing needs this: its password is the six-digit code with
+        /// the exporter's output appended, which is what ties the
+        /// exchange to the session it runs in.
+        pub fn export_keying_material(
+            &self,
+            out: &mut [u8],
+            label: &[u8],
+            context: Option<&[u8]>,
+        ) -> Result<(), TlsError<T::Error>> {
+            match &self.state {
+                State::Tls(s) => s
+                    .export_keying_material(out, label, context)
+                    .map_err(TlsError::Tls),
+                State::Plain(_) | State::Broken => Err(TlsError::NotAvailable),
+            }
         }
 
         /// Send `close_notify`, if there is a session to close.
