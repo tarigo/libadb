@@ -25,6 +25,7 @@
 //! | `runtime` | Set by `tokio` and `smol`, not by hand: it lets the examples require one of the two |
 //! | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8/PKCS#1 load, PKCS#8 save, ADB public-key encoding. `no_std + alloc` |
 //! | `host-keys` | `keys::store` on top of `keys`: read `~/.android/adbkey`, or generate and persist one; pulls in `std` |
+//! | `tls`   | ADB over TLS — wireless debugging on Android 11+ (`STLS`): `tls::TlsClientConfig`, `transport::tls::MaybeTls`, `Connection::connect_tls`. Implies `keys` and `split`; pulls in `std` |
 //!
 //! # Quick start
 //!
@@ -133,6 +134,8 @@ pub use transport::Splittable;
 
 #[cfg(feature = "keys")]
 pub use keys::AdbKey;
+#[cfg(feature = "tls")]
+pub use tls::{TlsClientConfig, TlsIdentity};
 
 #[cfg(feature = "split")]
 pub use split::{Reader, SplitIncoming, Writer};

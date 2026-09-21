@@ -1,9 +1,9 @@
 //! A transport that can start TLS on itself, for ADB's `STLS`.
 //!
-//! [`MaybeTls`] sits in the TCP slot of
+//! `MaybeTls` sits in the TCP slot of
 //! [`Transport`](crate::transport::common::Transport), so a connection
 //! keeps the same type whether or not the device asked for TLS. Before
-//! [`StartTls::start_tls`] it passes bytes straight through; after it,
+//! `StartTls::start_tls` it passes bytes straight through; after it,
 //! everything goes through `rustls`.
 //!
 //! The `rustls` engine is driven by hand over
