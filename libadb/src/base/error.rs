@@ -123,6 +123,13 @@ pub enum AuthError {
     /// The authenticator would not sign the token. Carries what it
     /// said, since that is the only account of the failure there is.
     SignFailed(alloc::string::String),
+    /// The device took the TLS handshake and closed it straight away:
+    /// it does not have the key in the certificate we offered.
+    ///
+    /// TLS 1.3 tells a client nothing when the server rejects its
+    /// certificate — the server speaks first, so the refusal only shows
+    /// once we listen. Authorise the key over USB, or run `adb pair`.
+    TlsKeyNotTrusted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +153,7 @@ impl fmt::Display for ProtocolError {
             Self::PayloadTooLarge => f.write_str("payload exceeds max_payload"),
             Self::TlsRequired => f.write_str(
                 "device requires a TLS handshake (Android 11+ wireless debugging); \
+                 build with the `tls` feature and use `Connection::connect_tls`, \
                  connect over USB, or switch the device to plain TCP with `adb tcpip 5555`",
             ),
             Self::UnexpectedCommand(c) => f.write_fmt(format_args!("unexpected command {:?}", c)),
@@ -176,6 +184,9 @@ impl fmt::Display for AuthError {
         match self {
             Self::Rejected => f.write_str("authentication rejected"),
             Self::SignFailed(why) => f.write_fmt(format_args!("authenticator sign failed: {why}")),
+            Self::TlsKeyNotTrusted => f.write_str(
+                "device does not trust this key over TLS; authorise it over USB or run `adb pair`",
+            ),
         }
     }
 }
@@ -379,7 +390,16 @@ mod tests {
         assert_eq!(
             show(&ProtocolError::TlsRequired),
             "device requires a TLS handshake (Android 11+ wireless debugging); \
+             build with the `tls` feature and use `Connection::connect_tls`, \
              connect over USB, or switch the device to plain TCP with `adb tcpip 5555`"
+        );
+    }
+
+    #[test]
+    fn auth_display_tls_key_not_trusted_points_at_pairing() {
+        assert_eq!(
+            show(&AuthError::TlsKeyNotTrusted),
+            "device does not trust this key over TLS; authorise it over USB or run `adb pair`"
         );
     }
 

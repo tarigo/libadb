@@ -28,7 +28,7 @@ pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
 // left over from a previous session, typically right after host
 // re-attach on USB. Drain them until the device's verdict on the
 // handshake arrives: CNXN, AUTH or STLS.
-async fn recv_handshake_pkt<T: Read>(
+pub(crate) async fn recv_handshake_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
     max_payload: u32,
@@ -133,7 +133,7 @@ where
         let cnxn = match pkt.command {
             Command::Connect => pkt,
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                Self::do_auth(
+                match do_auth(
                     &mut transport,
                     &desync,
                     &mut auth,
@@ -142,6 +142,13 @@ where
                     &config,
                 )
                 .await?
+                {
+                    resp if resp.command == Command::StartTls => {
+                        log::debug!("device demands TLS after auth: STLS {:#010x}", resp.arg0);
+                        return Err(ProtocolError::TlsRequired.into());
+                    }
+                    resp => resp,
+                }
             }
             Command::StartTls => {
                 log::debug!("device demands TLS: STLS version {:#010x}", pkt.arg0);
@@ -150,6 +157,23 @@ where
             other => return Err(ProtocolError::UnexpectedCommand(other).into()),
         };
 
+        Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
+    }
+
+    /// Everything after the device's CNXN: negotiate, parse the banner
+    /// and build the connection.
+    ///
+    /// Split out because the TLS path reaches this point holding a
+    /// transport of a different type, and this part of the work does
+    /// not care which.
+    pub(crate) fn assemble(
+        transport: T,
+        desync: DesyncFlag,
+        recv_buf: BytesMut,
+        banner: &[u8],
+        config: ConnectionConfig,
+        cnxn: Packet,
+    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
         let delayed_ack = features::has_feature(banner, features::DELAYED_ACK)
             && features::has_feature(&cnxn.data, features::DELAYED_ACK);
 
@@ -170,63 +194,64 @@ where
             desync,
         })
     }
+}
 
-    async fn do_auth<A: Authenticator>(
-        transport: &mut T,
-        desync: &DesyncFlag,
-        auth: &mut A,
-        recv_buf: &mut BytesMut,
-        token: Bytes,
-        config: &ConnectionConfig,
-    ) -> Result<Packet, Error<<T as ErrorType>::Error>> {
-        // Checked here rather than in each authenticator: a stray
-        // length must not reach a signer that may be someone else's.
-        if token.len() != command::AUTH_TOKEN_LEN {
-            return Err(ProtocolError::InvalidAuthToken(token.len()).into());
-        }
+/// Answer the device's AUTH challenge.
+///
+/// Returns the packet the exchange ended on, which is CNXN when the key
+/// was accepted — or STLS, if the device would rather have TLS. Naming
+/// that here would make a device offering TLS late look like a rejected
+/// key, so the caller classifies it.
+pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
+    transport: &mut T,
+    desync: &DesyncFlag,
+    auth: &mut A,
+    recv_buf: &mut BytesMut,
+    token: Bytes,
+    config: &ConnectionConfig,
+) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+    // Checked here rather than in each authenticator: a stray
+    // length must not reach a signer that may be someone else's.
+    if token.len() != command::AUTH_TOKEN_LEN {
+        return Err(ProtocolError::InvalidAuthToken(token.len()).into());
+    }
 
-        let signature = auth
-            .sign(&token)
-            .await
-            .map_err(|e| Error::Auth(AuthError::SignFailed(alloc::format!("{e}"))))?;
+    let signature = auth
+        .sign(&token)
+        .await
+        .map_err(|e| Error::Auth(AuthError::SignFailed(alloc::format!("{e}"))))?;
 
+    send_pkt(
+        transport,
+        desync,
+        &Packet::auth_signature(signature),
+        Checksum::Compute,
+    )
+    .await?;
+
+    let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
+    if resp.command != Command::Auth || resp.arg0 != command::AUTH_TOKEN {
+        // CNXN, or STLS: the caller decides what either means.
+        return Ok(resp);
+    }
+
+    {
+        let pubkey = auth.public_key();
         send_pkt(
             transport,
             desync,
-            &Packet::auth_signature(signature),
+            &Packet::auth_public_key(pubkey.to_vec()),
             Checksum::Compute,
         )
         .await?;
 
         let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-        if resp.command == Command::Connect {
+        if resp.command != Command::Auth {
             return Ok(resp);
         }
-        if resp.command == Command::StartTls {
-            return Err(ProtocolError::TlsRequired.into());
-        }
-
-        if resp.command == Command::Auth && resp.arg0 == command::AUTH_TOKEN {
-            let pubkey = auth.public_key();
-            send_pkt(
-                transport,
-                desync,
-                &Packet::auth_public_key(pubkey.to_vec()),
-                Checksum::Compute,
-            )
-            .await?;
-
-            let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-            if resp.command == Command::Connect {
-                return Ok(resp);
-            }
-            if resp.command == Command::StartTls {
-                return Err(ProtocolError::TlsRequired.into());
-            }
-        }
-
-        Err(AuthError::Rejected.into())
     }
+
+    Err(AuthError::Rejected.into())
 }
 
 #[cfg(test)]
