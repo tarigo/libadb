@@ -40,7 +40,7 @@ where
     /// The certificate in `tls` must carry the same key that
     /// authenticates over USB, or the device will not have it. When it
     /// does not, the failure is
-    /// [`AuthError::TlsKeyNotTrusted`](crate::error::AuthError::TlsKeyNotTrusted)
+    /// [`crate::error::AuthError::TlsKeyNotTrusted`]
     /// and the cure is one `adb pair`.
     pub async fn connect_tls<A: Authenticator>(
         transport: T,

@@ -1,6 +1,11 @@
 //! Example: shell on an ADB device via shell_v2 protocol.
 //!
 //! ```text
+//! # Wireless debugging (Android 11+), which speaks only TLS. The port
+//! # changes every time the setting is switched on; read it off the
+//! # device's "Wireless debugging" pane.
+//! cargo run --example shell_v2 --features tokio,host-keys,tls -- tcp://192.168.1.5:41234
+//!
 //! # Interactive shell over TCP (persistent connection, raw terminal, resize support):
 //! cargo run --example shell_v2 --features tokio,host-keys -- 127.0.0.1:5555
 //! cargo run --example shell_v2 --features tokio,host-keys -- tcp://127.0.0.1:5555
@@ -20,6 +25,12 @@
 //!
 //! Reuses `~/.android/adbkey`; if there is none, a key is generated
 //! and saved on first run — confirm it on the device when asked.
+//!
+//! Built with `--features tls`, the example also handles a device that
+//! answers the handshake with `STLS`, which is what wireless debugging
+//! does. The same key serves there: the device looks for it in the very
+//! store the USB prompt fills, so a key it already knows needs no
+//! `adb pair`.
 
 #[cfg(not(any(feature = "tokio", feature = "smol")))]
 compile_error!("this example requires --features tokio,host-keys or --features smol,host-keys");
@@ -30,7 +41,9 @@ use std::{env, process};
 
 use libadb::channel::SelectResult;
 use libadb::shell::v2::{self as shell_v2, Frame};
-use libadb::transport::any::{self, AnyTransport};
+#[cfg(not(feature = "tls"))]
+use libadb::transport::any::AnyTransport;
+use libadb::transport::any::{self};
 
 // The example picks one runtime at build time; the library itself no
 // longer cares which features are on.
@@ -47,7 +60,14 @@ type Usb = libadb::transport::rusb::Rusb;
 #[cfg(not(any(feature = "nusb", feature = "rusb")))]
 type Usb = libadb::transport::common::NoUsb;
 
+// With `tls` the TCP half can start a TLS session on itself.
+#[cfg(not(feature = "tls"))]
 type ExampleTransport = AnyTransport<Rt, <Usb as libadb::UsbBackend<Rt>>::Transport>;
+#[cfg(feature = "tls")]
+type ExampleTransport = libadb::transport::common::Transport<
+    libadb::transport::tls::MaybeTls<<Rt as libadb::transport::runtime::Runtime>::Tcp>,
+    <Usb as libadb::UsbBackend<Rt>>::Transport,
+>;
 use libadb::{Connection, Feature};
 
 #[cfg(feature = "tokio")]
@@ -141,11 +161,31 @@ async fn open_connection(
         .await
         .map_err(|e| format!("transport: {e}"))?;
 
+    #[cfg(not(feature = "tls"))]
     let conn = Connection::<_>::connect(transport, auth, &[Feature::ShellV2])
         .await
         .map_err(|e| format!("connect: {e}"))?;
 
-    eprintln!("[*] connected, device: {:?}", conn.device_banner());
+    #[cfg(feature = "tls")]
+    let conn = {
+        use libadb::keys::rsa::rand_core::OsRng;
+        use libadb::tls::{TlsClientConfig, TlsIdentity};
+
+        // Signing the certificate is the slow part; build it once.
+        let identity = TlsIdentity::from_key(&auth, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
+        let tls = TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))?;
+
+        Connection::<_>::connect_tls(transport.tls_ready(), auth, &[Feature::ShellV2], &tls)
+            .await
+            .map_err(|e| format!("connect: {e}"))?
+    };
+
+    eprintln!(
+        "[*] connected, device: {}",
+        conn.device_banner()
+            .map(String::from_utf8_lossy)
+            .unwrap_or_default()
+    );
     Ok(conn)
 }
 
