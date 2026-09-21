@@ -114,6 +114,35 @@ optional = true
 default-features = false
 features = ["std", "ring", "logging"]
 
+# Pairing (`adb pair`, the `pairing` feature). BoringSSL's SPAKE2 runs
+# on edwards25519, so the curve arithmetic comes from
+# `curve25519-dalek`; the key it agrees on is stretched by HKDF-SHA256
+# and spent on AES-128-GCM. All of them sit on the same `digest` 0.10
+# generation as `rsa` 0.9, so nothing doubles up.
+[dependencies.curve25519-dalek]
+version = "4"
+optional = true
+default-features = false
+features = ["alloc", "precomputed-tables"]
+
+# Constant-time selection, for scalars a timing channel would leak the
+# pairing code through. Already in the tree under `rsa`.
+[dependencies.subtle]
+version = "2"
+optional = true
+default-features = false
+
+[dependencies.hkdf]
+version = "0.12"
+optional = true
+default-features = false
+
+[dependencies.aes-gcm]
+version = "0.10"
+optional = true
+default-features = false
+features = ["aes", "alloc"]
+
 [dependencies.x509-cert]
 version = "0.2.5"
 optional = true
@@ -153,6 +182,11 @@ host-keys = ["keys", "rsa/getrandom"]
 # re-export that already brings SHA-1, rather than opening a second path
 # to `sha2`.
 tls = ["keys", "split", "rsa/sha2", "dep:rustls", "dep:x509-cert"]
+# `adb pair`: put a key on a device that has never seen it. Builds on
+# `tls`, because pairing runs inside a TLS session and presents the same
+# certificate, and because the password is partly derived from that
+# session's key material.
+pairing = ["tls", "dep:curve25519-dalek", "dep:subtle", "dep:hkdf", "dep:aes-gcm"]
 
 [dev-dependencies]
 bytes = "1"
@@ -168,6 +202,12 @@ rand_chacha = "0.3"
 tempfile = "3"
 # Integration tests decode the ADB public-key blob independently.
 base64ct = { version = "1", features = ["alloc"] }
+# The pairing test writes the device's half of the cipher out again
+# rather than borrowing the crate's, so both sides agree on the key
+# derivation and the nonce independently.
+aes-gcm = { version = "0.10", features = ["aes", "alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 # Every example authenticates, and the key comes from `host-keys`; the
 # runtime is still chosen at the command line, except for the two
