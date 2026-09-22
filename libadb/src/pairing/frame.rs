@@ -53,6 +53,12 @@ pub enum FrameError {
     Kind(u8),
     /// The payload is empty or larger than either side accepts.
     Length(u32),
+    /// A packet of a known kind, at a point in the exchange where the
+    /// other kind was due.
+    Unexpected {
+        got: PacketType,
+        expected: PacketType,
+    },
 }
 
 impl core::fmt::Display for FrameError {
@@ -61,6 +67,9 @@ impl core::fmt::Display for FrameError {
             Self::Version(v) => write!(f, "pairing header version {v}, expected {VERSION}"),
             Self::Kind(k) => write!(f, "pairing packet type {k} is not one we know"),
             Self::Length(n) => write!(f, "pairing payload of {n} bytes is out of range"),
+            Self::Unexpected { got, expected } => {
+                write!(f, "pairing packet is {got:?} where {expected:?} was due")
+            }
         }
     }
 }

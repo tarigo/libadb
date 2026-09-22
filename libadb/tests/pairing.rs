@@ -155,7 +155,17 @@ fn spawn_pairing_device(code: &'static str) -> (SocketAddr, JoinHandle<DeviceOut
         tls.flush().unwrap();
 
         let key_material = spake2.finish(&theirs).unwrap();
-        let mut cipher = DeviceCipher::new(&key_material);
+        let mut cipher = DeviceCipher::new(&key_material[..]);
+
+        // adbd sends its half before it reads ours. That order is what
+        // lets a host tell a wrong code apart from a device that quit:
+        // the block arrives, and will not open.
+        let mut answer = vec![0u8; 8192];
+        answer[0] = 1;
+        answer[1..1 + DEVICE_GUID.len()].copy_from_slice(DEVICE_GUID.as_bytes());
+        let sealed = cipher.seal(&answer);
+        tls.write_all(&frame(1, &sealed)).unwrap();
+        tls.flush().unwrap();
 
         let mut header = [0u8; 6];
         if tls.read_exact(&mut header).is_err() {
@@ -165,25 +175,14 @@ fn spawn_pairing_device(code: &'static str) -> (SocketAddr, JoinHandle<DeviceOut
         let mut sealed = vec![0u8; len];
         tls.read_exact(&mut sealed).unwrap();
 
-        match cipher.open(&sealed) {
-            Ok(block) => {
-                outcome.opened = true;
-                assert_eq!(block.len(), 8192, "the host pads to the full size");
-                assert_eq!(block[0], 0, "type 0 is an RSA public key");
-                let end = block[1..].iter().position(|&b| b == 0).unwrap();
-                outcome.learned_key = Some(String::from_utf8(block[1..1 + end].to_vec()).unwrap());
-
-                let mut answer = vec![0u8; 8192];
-                answer[0] = 1;
-                answer[1..1 + DEVICE_GUID.len()].copy_from_slice(DEVICE_GUID.as_bytes());
-                let sealed = cipher.seal(&answer);
-                let _ = tls.write_all(&frame(1, &sealed));
-                let _ = tls.flush();
-            }
-            Err(()) => {
-                // A device that cannot read the block just goes away.
-            }
+        if let Ok(block) = cipher.open(&sealed) {
+            outcome.opened = true;
+            assert_eq!(block.len(), 8192, "the host pads to the full size");
+            assert_eq!(block[0], 0, "type 0 is an RSA public key");
+            let end = block[1..].iter().position(|&b| b == 0).unwrap();
+            outcome.learned_key = Some(String::from_utf8(block[1..1 + end].to_vec()).unwrap());
         }
+        // A device that could not read the block has nothing more to say.
         outcome
     });
 
@@ -299,8 +298,8 @@ async fn a_wrong_code_is_reported_as_such_and_gives_nothing_away() {
         panic!("a wrong code must not pair");
     };
     assert!(
-        matches!(err, PairingError::WrongCode | PairingError::Closed),
-        "expected a refusal, got {err:?}"
+        matches!(err, PairingError::WrongCode),
+        "expected WrongCode, got {err:?}"
     );
 
     let device = device.join().unwrap();

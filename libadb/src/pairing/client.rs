@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use embedded_io_async::{Read, ReadExactError, Write};
 use rsa::rand_core::CryptoRngCore;
+use zeroize::Zeroizing;
 
 use super::aead::{AeadError, Cipher, TAG_LEN};
 use super::frame::{self, FrameError, PacketType, HEADER_LEN};
@@ -95,10 +96,11 @@ pub struct Paired {
 /// On success the device has `key` and will accept it over TLS from
 /// then on, exactly as it accepts a key approved at a USB prompt.
 ///
-/// A wrong code cannot be told apart from a device that gave up: both
-/// arrive as [`PairingError::WrongCode`], because the protocol offers
-/// nothing finer. The device counts attempts and stops serving after
-/// twenty.
+/// A wrong code arrives as [`PairingError::WrongCode`]: the device
+/// sends its half before it reads ours, and that half will not decrypt
+/// under the key a different code produced. A device that gives up
+/// instead shows as [`PairingError::Closed`]. The device counts
+/// attempts and stops serving after twenty.
 pub async fn pair<T, R>(
     transport: &mut MaybeTls<T>,
     tls: &TlsClientConfig,
@@ -118,13 +120,13 @@ where
     // The password is not the code. It is the code with this session's
     // exporter output appended, which is what stops the exchange being
     // replayed into another session.
-    let mut exported = [0u8; EXPORTER_LEN];
+    let mut exported = Zeroizing::new([0u8; EXPORTER_LEN]);
     transport
-        .export_keying_material(&mut exported, EXPORTER_LABEL, None)
+        .export_keying_material(exported.as_mut(), EXPORTER_LABEL, None)
         .map_err(PairingError::Transport)?;
-    let mut password = Vec::with_capacity(code.len() + EXPORTER_LEN);
+    let mut password = Zeroizing::new(Vec::with_capacity(code.len() + EXPORTER_LEN));
     password.extend_from_slice(code.as_bytes());
-    password.extend_from_slice(&exported);
+    password.extend_from_slice(exported.as_ref());
 
     // The host is Alice. Both sides write before they read.
     let spake2 = Spake2::new(Role::Alice, CLIENT_NAME, SERVER_NAME, &password, rng);
@@ -132,7 +134,7 @@ where
     let theirs = recv(transport, PacketType::Spake2Msg).await?;
 
     let key_material = spake2.finish(&theirs).map_err(PairingError::Spake2)?;
-    let mut cipher = Cipher::new(&key_material).map_err(PairingError::Aead)?;
+    let mut cipher = Cipher::new(key_material.as_ref()).map_err(PairingError::Aead)?;
 
     let mine = peer_info::encode(PeerInfoType::RsaPublicKey, key.public_key_line())
         .map_err(PairingError::PeerInfo)?;
@@ -177,7 +179,10 @@ async fn recv<T: Read + Write>(
     transport.read_exact(&mut header).await?;
     let (kind, len) = frame::decode(&header).map_err(PairingError::Frame)?;
     if kind != expected {
-        return Err(PairingError::Frame(FrameError::Kind(header[1])));
+        return Err(PairingError::Frame(FrameError::Unexpected {
+            got: kind,
+            expected,
+        }));
     }
     let mut payload = vec![0u8; len];
     transport.read_exact(&mut payload).await?;

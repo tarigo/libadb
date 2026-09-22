@@ -26,6 +26,7 @@ use curve25519_dalek::traits::Identity;
 use rsa::rand_core::CryptoRngCore;
 use rsa::sha2::{Digest, Sha512};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zeroize::Zeroizing;
 
 /// `SHA256("edwards25519 point generation seed (M)")`, which happens to
 /// land on the curve at the first try and so is the point itself.
@@ -146,11 +147,11 @@ pub struct Spake2 {
     my_name: Vec<u8>,
     their_name: Vec<u8>,
     /// The ephemeral scalar, a multiple of eight and left unreduced.
-    private_key: [u8; 32],
+    private_key: Zeroizing<[u8; 32]>,
     /// The full SHA-512 of the password, which the transcript absorbs.
-    password_hash: [u8; 64],
+    password_hash: Zeroizing<[u8; 64]>,
     /// The password scalar after the cofactor fix, also unreduced.
-    password_scalar: [u8; 32],
+    password_scalar: Zeroizing<[u8; 32]>,
     my_msg: [u8; 32],
 }
 
@@ -166,21 +167,21 @@ impl Spake2 {
         password: &[u8],
         rng: &mut R,
     ) -> Self {
-        let mut wide = [0u8; 64];
-        rng.fill_bytes(&mut wide);
-        let mut private_key = reduce_wide(&wide);
+        let mut wide = Zeroizing::new([0u8; 64]);
+        rng.fill_bytes(wide.as_mut());
+        let mut private_key = Zeroizing::new(reduce_wide(&wide));
         // Clearing the cofactor on our own scalar is what lets the
         // small-order points in the peer's mask cancel later.
         left_shift_3(&mut private_key);
 
-        let password_hash: [u8; 64] = Sha512::digest(password).into();
-        let password_scalar = Self::password_scalar(&password_hash);
+        let password_hash = Zeroizing::new(Sha512::digest(password).into());
+        let password_scalar = Zeroizing::new(Self::password_scalar(&password_hash));
 
         let mask = match role {
             Role::Alice => Self::point(&M_BYTES),
             Role::Bob => Self::point(&N_BYTES),
         };
-        let base = EdwardsPoint::mul_base(&Scalar::from_bytes_mod_order(private_key));
+        let base = EdwardsPoint::mul_base(&Scalar::from_bytes_mod_order(*private_key));
         let my_msg = (base + mul_raw(&mask, &password_scalar))
             .compress()
             .to_bytes();
@@ -206,7 +207,12 @@ impl Spake2 {
     ///
     /// Nothing here says whether they did. That only shows when the
     /// first encrypted message fails to authenticate.
-    pub fn finish(&self, their_msg: &[u8]) -> Result<[u8; 64], Spake2Error> {
+    ///
+    /// The exchange is used up, whatever the outcome: its scalar is
+    /// for one peer only, and everything secret it holds is zeroed on
+    /// the way out. Take [`message`](Self::message) first if it is
+    /// still needed. The result zeroes itself when dropped.
+    pub fn finish(self, their_msg: &[u8]) -> Result<Zeroizing<[u8; 64]>, Spake2Error> {
         let their_msg: [u8; 32] = their_msg
             .try_into()
             .map_err(|_| Spake2Error::MessageLength(their_msg.len()))?;
@@ -236,8 +242,8 @@ impl Spake2 {
         absorb(&mut hash, alice_msg);
         absorb(&mut hash, bob_msg);
         absorb(&mut hash, &shared);
-        absorb(&mut hash, &self.password_hash);
-        Ok(hash.finalize().into())
+        absorb(&mut hash, self.password_hash.as_ref());
+        Ok(Zeroizing::new(hash.finalize().into()))
     }
 
     /// The password scalar, with BoringSSL's cofactor fix.
@@ -389,17 +395,17 @@ mod tests {
             "c1e770dd362fa9def9dc0d18ac3155345f4f5905362ed252ad5b9828d23484ef"
         );
         assert_eq!(
-            hex(&alice.password_scalar),
+            hex(alice.password_scalar.as_ref()),
             "509a79489dd16b364e842cfce8062a604e3e67ebf2f4aaf828b4f299d7a6605c"
         );
         assert_eq!(
-            hex(&alice.private_key),
+            hex(alice.private_key.as_ref()),
             "d0e31113846fb901851ab16da0423167ce0aa31e960899d4d306afa52387962b"
         );
 
         let key = alice.finish(bob.message()).unwrap();
         assert_eq!(
-            hex(&key),
+            hex(key.as_ref()),
             "517fa9aa29d0d1a5b39490907434cb9d8024c2335d8a30970e04332f8d972da7\
              e9b62a285021dd5e52bbb8d32fa42ff2887f43416b32db4a0cf9eee5db3a665d"
         );
@@ -409,9 +415,10 @@ mod tests {
     fn both_sides_reach_the_same_key_when_the_codes_match() {
         let alice = Spake2::new(Role::Alice, CLIENT, SERVER, b"314159", &mut seed(7));
         let bob = Spake2::new(Role::Bob, SERVER, CLIENT, b"314159", &mut seed(200));
+        let (to_bob, to_alice) = (*alice.message(), *bob.message());
 
-        let from_alice = alice.finish(bob.message()).unwrap();
-        let from_bob = bob.finish(alice.message()).unwrap();
+        let from_alice = alice.finish(&to_alice).unwrap();
+        let from_bob = bob.finish(&to_bob).unwrap();
 
         assert_eq!(from_alice, from_bob);
     }
@@ -422,24 +429,25 @@ mod tests {
         // differ, and only the first encrypted message notices.
         let alice = Spake2::new(Role::Alice, CLIENT, SERVER, b"314159", &mut seed(7));
         let bob = Spake2::new(Role::Bob, SERVER, CLIENT, b"271828", &mut seed(200));
+        let (to_bob, to_alice) = (*alice.message(), *bob.message());
 
-        let from_alice = alice.finish(bob.message()).unwrap();
-        let from_bob = bob.finish(alice.message()).unwrap();
+        let from_alice = alice.finish(&to_alice).unwrap();
+        let from_bob = bob.finish(&to_bob).unwrap();
 
         assert_ne!(from_alice, from_bob);
     }
 
     #[test]
     fn a_message_of_the_wrong_shape_is_refused() {
-        let alice = Spake2::new(Role::Alice, CLIENT, SERVER, b"592781", &mut seed(0));
+        let alice = || Spake2::new(Role::Alice, CLIENT, SERVER, b"592781", &mut seed(0));
 
         assert_eq!(
-            alice.finish(&[0u8; 31]),
+            alice().finish(&[0u8; 31]),
             Err(Spake2Error::MessageLength(31))
         );
         // y = 2 satisfies no point on the curve.
         let mut not_a_point = [0u8; 32];
         not_a_point[0] = 2;
-        assert_eq!(alice.finish(&not_a_point), Err(Spake2Error::NotAPoint));
+        assert_eq!(alice().finish(&not_a_point), Err(Spake2Error::NotAPoint));
     }
 }
