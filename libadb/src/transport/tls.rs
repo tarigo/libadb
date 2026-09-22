@@ -22,6 +22,7 @@ mod inner {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::future::Future;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     use bytes::{Buf, BytesMut};
     use embedded_io::ErrorType;
@@ -305,11 +306,14 @@ mod inner {
                 if !self.conn.is_handshaking() {
                     break;
                 }
+                // What is already in hand comes before the socket.
+                if !self.rx.is_empty() && self.advance().await? > 0 {
+                    continue;
+                }
                 if self.eof {
                     return Err(TlsError::HandshakeClosed);
                 }
                 self.fill().await?;
-                self.advance().await?;
             }
             // The last flight is still queued at this point.
             harvest(&mut self.conn, &mut self.tx);
@@ -490,11 +494,14 @@ mod inner {
             config: &TlsClientConfig,
             pending: &[u8],
         ) -> Result<(), Self::Error> {
-            // `Broken` is the placeholder that lets the value move out
-            // of `&mut self` without unsafe. It also happens to be the
-            // truth if the handshake does not finish.
-            let State::Plain(inner) = core::mem::replace(&mut self.state, State::Broken) else {
-                return Err(TlsError::NotAvailable);
+            // `Broken` stands in while the value is out of `&mut self`, and
+            // stays if the handshake fails. Anything else goes back untouched.
+            let inner = match core::mem::replace(&mut self.state, State::Broken) {
+                State::Plain(inner) => inner,
+                other => {
+                    self.state = other;
+                    return Err(TlsError::NotAvailable);
+                }
             };
 
             let mut session = TlsSession::new(inner, config, pending)?;
@@ -573,33 +580,62 @@ mod inner {
     }
 
     /// What both halves of a split session share.
+    ///
+    /// Lock order is `out`, then `conn`. Records move from rustls into
+    /// `out.pending` under both, so nothing sequenced ever sits in a local
+    /// a dropped future would take with it, and two harvesters cannot
+    /// interleave. `conn` is released before the socket is touched.
     struct TlsShared<T: Splittable> {
-        /// Only ever held across rustls' own work, never across an
-        /// await on the socket. That is what keeps the two locks from
-        /// forming a cycle.
         conn: async_lock::Mutex<Box<ClientConnection>>,
         out: async_lock::Mutex<OutHalf<T::WriteHalf>>,
+        /// Whether `out.pending` may still hold bytes — set while a
+        /// drain runs and left set if it is dropped part way. Lets a
+        /// reader that owes nothing skip the write lock, so idle reads
+        /// never queue behind a writer blocked on the socket.
+        backlog: AtomicBool,
     }
 
     impl<T: Splittable> TlsShared<T> {
-        /// Append `records` to the queue and drain it into the socket.
-        ///
-        /// An empty `records` still drains, which is how a reader
-        /// pushes out what an earlier, dropped write left behind.
-        async fn write_records(&self, records: &[u8]) -> Result<(), TlsError<T::Error>> {
+        /// Run `f` on the engine, move every record it and anything
+        /// before it produced into the queue, and drain the queue into
+        /// the socket.
+        async fn push_with<R>(
+            &self,
+            f: impl FnOnce(&mut ClientConnection) -> R,
+        ) -> Result<R, TlsError<T::Error>> {
             let mut out = self.out.lock().await;
-            out.pending.extend_from_slice(records);
+            let result = {
+                let mut conn = self.conn.lock().await;
+                let result = f(&mut conn);
+                harvest(&mut conn, &mut out.pending);
+                result
+            };
+            self.drain(&mut out).await?;
+            Ok(result)
+        }
+
+        /// Move what rustls has queued into the socket.
+        async fn push(&self) -> Result<(), TlsError<T::Error>> {
+            self.push_with(|_| ()).await
+        }
+
+        /// Write out the queue, resuming where a dropped drain stopped.
+        async fn drain(&self, out: &mut OutHalf<T::WriteHalf>) -> Result<(), TlsError<T::Error>> {
+            self.backlog.store(true, Ordering::Release);
             while !out.pending.is_empty() {
-                let n = {
-                    let OutHalf { half, pending } = &mut *out;
-                    half.write(pending).await.map_err(TlsError::Io)?
-                };
+                let OutHalf { half, pending } = &mut *out;
+                let n = half.write(pending).await.map_err(TlsError::Io)?;
                 if n == 0 {
                     return Err(TlsError::HandshakeClosed);
                 }
-                out.pending.advance(n);
+                pending.advance(n);
             }
+            self.backlog.store(false, Ordering::Release);
             out.half.flush().await.map_err(TlsError::Io)
+        }
+
+        fn has_backlog(&self) -> bool {
+            self.backlog.load(Ordering::Acquire)
         }
     }
 
@@ -631,36 +667,36 @@ mod inner {
                 return Ok(0);
             }
             loop {
-                // Step one: plaintext, if rustls already has some.
-                let owed = {
+                // Plaintext first, under the engine lock alone.
+                let owes = {
                     let mut conn = self.shared.conn.lock().await;
                     match take_plaintext(&mut conn, buf) {
                         Plain::Got(n) => return Ok(n),
                         Plain::Eof => return Ok(0),
                         Plain::Blocked => {}
                     }
-                    let mut owed = BytesMut::new();
-                    harvest(&mut conn, &mut owed);
-                    owed
+                    conn.wants_write()
                 };
 
-                // Step two: no lock on the engine while the socket runs.
-                self.shared.write_records(&owed).await?;
+                // Settle what we owe, or what a dropped write left behind.
+                // Nothing to settle, no write lock.
+                if owes || self.shared.has_backlog() {
+                    self.shared.push().await?;
+                }
 
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
                 if !self.rx.is_empty() {
-                    let (result, owed) = {
+                    let (fed, owes) = {
                         let mut conn = self.shared.conn.lock().await;
-                        let result = feed(&mut conn, &mut self.rx);
-                        let mut owed = BytesMut::new();
-                        harvest(&mut conn, &mut owed);
-                        (result, owed)
+                        let fed = feed(&mut conn, &mut self.rx);
+                        (fed, conn.wants_write())
                     };
-                    if !owed.is_empty() {
-                        self.shared.write_records(&owed).await?;
+                    if owes {
+                        // The alert for a failed decode goes out first.
+                        self.shared.push().await?;
                     }
-                    if result.map_err(TlsError::Tls)? > 0 {
+                    if fed.map_err(TlsError::Tls)? > 0 {
                         continue;
                     }
                 }
@@ -688,27 +724,17 @@ mod inner {
             if buf.is_empty() {
                 return Ok(0);
             }
-            let (n, records) = {
-                let mut conn = self.shared.conn.lock().await;
-                let n = conn.writer().write(buf).map_err(|_| {
-                    TlsError::Tls(rustls::Error::General("tls writer closed".into()))
-                })?;
-                let mut records = BytesMut::new();
-                harvest(&mut conn, &mut records);
-                (n, records)
-            };
-            self.shared.write_records(&records).await?;
-            Ok(n)
+            self.shared
+                .push_with(|conn| {
+                    conn.writer().write(buf).map_err(|_| {
+                        TlsError::Tls(rustls::Error::General("tls writer closed".into()))
+                    })
+                })
+                .await?
         }
 
         async fn flush(&mut self) -> Result<(), Self::Error> {
-            let records = {
-                let mut conn = self.shared.conn.lock().await;
-                let mut records = BytesMut::new();
-                harvest(&mut conn, &mut records);
-                records
-            };
-            self.shared.write_records(&records).await
+            self.shared.push().await
         }
     }
 
@@ -802,6 +828,7 @@ mod inner {
                     let (r, w) = inner.split().map_err(TlsError::Io)?;
                     let shared = Arc::new(TlsShared::<T> {
                         conn: async_lock::Mutex::new(conn),
+                        backlog: AtomicBool::new(!tx.is_empty()),
                         out: async_lock::Mutex::new(OutHalf {
                             half: w,
                             pending: tx,

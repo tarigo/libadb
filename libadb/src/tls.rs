@@ -20,10 +20,11 @@
 //! above. If that is not enough for you, build your own verifier and
 //! pass it through [`TlsClientConfig::from_rustls`].
 //!
-//! # Not covered
+//! # Elsewhere, and not covered
 //!
-//! * `adb pair` — the SPAKE2 exchange that puts a *new* key on a device.
-//!   A key the device already trusts does not need it.
+//! * `adb pair`, which puts a *new* key on a device, lives in
+//!   `crate::pairing` behind the `pairing` feature. A key the device
+//!   already trusts does not need it.
 //! * Finding the port. Wireless debugging picks a fresh one every time
 //!   it is switched on and announces it over DNS-SD; this crate does no
 //!   service discovery, so the caller supplies host and port.
