@@ -307,6 +307,25 @@ impl crate::auth::Authenticator for NoAuth {
     }
 }
 
+/// Signs anything, with a signature no device would accept; enough for
+/// a handshake whose device side is scripted.
+pub(crate) struct Signs;
+
+impl crate::auth::Authenticator for Signs {
+    type Error = NoKey;
+
+    fn sign(
+        &mut self,
+        _token: &[u8],
+    ) -> impl core::future::Future<Output = Result<Vec<u8>, Self::Error>> {
+        core::future::ready(Ok(alloc::vec![0xA5; 256]))
+    }
+
+    fn public_key(&self) -> &[u8] {
+        b"QUJD signs@mock\0"
+    }
+}
+
 pub(crate) fn cnxn() -> Packet {
     Packet::new(
         Command::Connect,

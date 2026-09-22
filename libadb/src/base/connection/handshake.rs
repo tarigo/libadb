@@ -113,51 +113,31 @@ where
         banner: &[u8],
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let pkt = Packet::new(
-            Command::Connect,
-            command::ADB_VERSION,
-            config.max_payload(),
-            banner.to_vec(),
-        );
-        // The device has not told us its version yet, so stay on the
-        // conservative side: a pre-0x0100_0001 peer verifies this packet.
         // The flag outlives the handshake: it moves into the
         // `Connection` that this builds, carrying over an abandoned
         // write from the handshake itself.
         let desync = DesyncFlag::new();
-        send_pkt(&mut transport, &desync, &pkt, Checksum::Compute).await?;
-
         let mut recv_buf = BytesMut::new();
-        let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf, config.max_payload()).await?;
+        let verdict = open(
+            &mut transport,
+            &mut auth,
+            banner,
+            &config,
+            &desync,
+            &mut recv_buf,
+        )
+        .await?;
 
-        let cnxn = match pkt.command {
-            Command::Connect => pkt,
-            Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                match do_auth(
-                    &mut transport,
-                    &desync,
-                    &mut auth,
-                    &mut recv_buf,
-                    pkt.data,
-                    &config,
-                )
-                .await?
-                {
-                    resp if resp.command == Command::StartTls => {
-                        log::debug!("device demands TLS after auth: STLS {:#010x}", resp.arg0);
-                        return Err(ProtocolError::TlsRequired.into());
-                    }
-                    resp => resp,
-                }
+        match verdict.command {
+            Command::Connect => {
+                Self::assemble(transport, desync, recv_buf, banner, config, verdict)
             }
             Command::StartTls => {
-                log::debug!("device demands TLS: STLS version {:#010x}", pkt.arg0);
-                return Err(ProtocolError::TlsRequired.into());
+                log::debug!("device demands TLS: STLS version {:#010x}", verdict.arg0);
+                Err(ProtocolError::TlsRequired.into())
             }
-            other => return Err(ProtocolError::UnexpectedCommand(other).into()),
-        };
-
-        Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
+            other => Err(ProtocolError::UnexpectedCommand(other).into()),
+        }
     }
 
     /// Everything after the device's CNXN: negotiate, parse the banner
@@ -196,12 +176,46 @@ where
     }
 }
 
+/// The half of the handshake both entry points share: send our CNXN
+/// and bring back the device's verdict — its own CNXN once it is
+/// satisfied, or STLS if it will only go on inside TLS.
+///
+/// Authentication happens in here when the device asks for it. Any
+/// other answer is a protocol error, and the caller never sees one.
+pub(crate) async fn open<T: Read + Write, A: Authenticator>(
+    transport: &mut T,
+    auth: &mut A,
+    banner: &[u8],
+    config: &ConnectionConfig,
+    desync: &DesyncFlag,
+    recv_buf: &mut BytesMut,
+) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+    let hello = Packet::new(
+        Command::Connect,
+        command::ADB_VERSION,
+        config.max_payload(),
+        banner.to_vec(),
+    );
+    // The device has not told us its version yet, so stay on the
+    // conservative side: a pre-0x0100_0001 peer verifies this packet.
+    send_pkt(transport, desync, &hello, Checksum::Compute).await?;
+
+    let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
+    match pkt.command {
+        Command::Connect | Command::StartTls => Ok(pkt),
+        Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
+            do_auth(transport, desync, auth, recv_buf, pkt.data, config).await
+        }
+        other => Err(ProtocolError::UnexpectedCommand(other).into()),
+    }
+}
+
 /// Answer the device's AUTH challenge.
 ///
-/// Returns the packet the exchange ended on, which is CNXN when the key
-/// was accepted — or STLS, if the device would rather have TLS. Naming
-/// that here would make a device offering TLS late look like a rejected
-/// key, so the caller classifies it.
+/// Returns the packet the exchange ended on: CNXN when the key was
+/// accepted, or STLS if the device would rather have TLS. Naming that
+/// here would make a device offering TLS late look like a rejected key,
+/// so the caller classifies it. Anything else is a rejection.
 pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     desync: &DesyncFlag,
@@ -230,9 +244,12 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     .await?;
 
     let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-    if resp.command != Command::Auth || resp.arg0 != command::AUTH_TOKEN {
+    match resp.command {
         // CNXN, or STLS: the caller decides what either means.
-        return Ok(resp);
+        Command::Connect | Command::StartTls => return Ok(resp),
+        // A second token: the signature was not enough, offer the key.
+        Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
+        _ => return Err(AuthError::Rejected.into()),
     }
 
     {
@@ -246,7 +263,7 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
         .await?;
 
         let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-        if resp.command != Command::Auth {
+        if matches!(resp.command, Command::Connect | Command::StartTls) {
             return Ok(resp);
         }
     }

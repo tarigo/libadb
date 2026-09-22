@@ -11,7 +11,7 @@
 use bytes::BytesMut;
 use embedded_io::ErrorType;
 
-use super::handshake::{build_host_banner, do_auth, recv_handshake_pkt};
+use super::handshake::{build_host_banner, do_auth, open, recv_handshake_pkt};
 use super::{Connection, ConnectionConfig};
 use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
@@ -79,32 +79,17 @@ where
         tls: &TlsClientConfig,
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let hello = Packet::new(
-            Command::Connect,
-            command::ADB_VERSION,
-            config.max_payload(),
-            banner.to_vec(),
-        );
         let desync = DesyncFlag::new();
-        send_pkt(&mut transport, &desync, &hello, Checksum::Compute).await?;
-
         let mut recv_buf = BytesMut::new();
-        let pkt = recv_handshake_pkt(&mut transport, &mut recv_buf, config.max_payload()).await?;
-
-        let verdict = match pkt.command {
-            Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                do_auth(
-                    &mut transport,
-                    &desync,
-                    &mut auth,
-                    &mut recv_buf,
-                    pkt.data,
-                    &config,
-                )
-                .await?
-            }
-            _ => pkt,
-        };
+        let verdict = open(
+            &mut transport,
+            &mut auth,
+            banner,
+            &config,
+            &desync,
+            &mut recv_buf,
+        )
+        .await?;
 
         let cnxn = match verdict.command {
             Command::Connect => verdict,
