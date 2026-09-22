@@ -13,7 +13,7 @@ keywords = ["adb", "android", "usb", "no_std", "embedded"]
 categories = ["embedded", "no-std", "network-programming", "hardware-support"]
 
 [package.metadata.docs.rs]
-features = ["tokio", "usb", "host-keys", "tls"]
+features = ["tokio", "usb", "host-keys", "tls", "pairing"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]

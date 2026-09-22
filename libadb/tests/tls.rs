@@ -19,7 +19,7 @@ use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
 use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
-use libadb::transport::tls::{MaybeTls, StartTls, TlsError};
+use libadb::transport::tls::{MaybeTls, StartTls};
 use libadb::Splittable;
 
 #[path = "common/common.rs"]
@@ -263,8 +263,8 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
         panic!("a device that refused the key must not hand out a working session");
     };
     assert!(
-        matches!(err, TlsError::Tls(_) | TlsError::HandshakeClosed | TlsError::Io(_)),
-        "expected a TLS-level refusal, got {err:?}"
+        err.is_key_rejected(),
+        "the refusal must be recognised as one, got {err:?}"
     );
     let _ = device.join();
 }
