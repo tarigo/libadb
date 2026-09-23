@@ -49,6 +49,11 @@ mod inner {
         /// The device closed the connection in the middle of the
         /// handshake.
         HandshakeClosed,
+        /// The transport underneath took none of a write. An
+        /// `embedded-io` writer may not do that with bytes on offer, so
+        /// the connection is taken as gone, not as a device refusing
+        /// anything.
+        WriteZero,
         /// TLS was asked of something that cannot do it: a USB
         /// transport, a session already started, or one left unusable
         /// by a handshake that failed.
@@ -61,6 +66,7 @@ mod inner {
                 Self::Io(e) => write!(f, "io: {e}"),
                 Self::Tls(e) => write!(f, "tls: {e}"),
                 Self::HandshakeClosed => f.write_str("tls: device closed during the handshake"),
+                Self::WriteZero => f.write_str("tls: the transport took none of a write"),
                 Self::NotAvailable => f.write_str("tls: not available on this transport"),
             }
         }
@@ -74,7 +80,7 @@ mod inner {
             match self {
                 Self::Io(e) => Some(e),
                 Self::Tls(e) => Some(e),
-                Self::HandshakeClosed | Self::NotAvailable => None,
+                Self::HandshakeClosed | Self::WriteZero | Self::NotAvailable => None,
             }
         }
     }
@@ -84,6 +90,7 @@ mod inner {
             match self {
                 Self::Io(e) => e.kind(),
                 Self::Tls(_) | Self::HandshakeClosed => embedded_io::ErrorKind::Other,
+                Self::WriteZero => embedded_io::ErrorKind::WriteZero,
                 Self::NotAvailable => embedded_io::ErrorKind::Unsupported,
             }
         }
@@ -260,7 +267,7 @@ mod inner {
             while !self.tx.is_empty() {
                 let n = self.inner.write(&self.tx).await.map_err(TlsError::Io)?;
                 if n == 0 {
-                    return Err(TlsError::HandshakeClosed);
+                    return Err(TlsError::WriteZero);
                 }
                 self.tx.advance(n);
             }
@@ -649,7 +656,7 @@ mod inner {
                 let OutHalf { half, pending } = &mut *out;
                 let n = half.write(pending).await.map_err(TlsError::Io)?;
                 if n == 0 {
-                    return Err(TlsError::HandshakeClosed);
+                    return Err(TlsError::WriteZero);
                 }
                 pending.advance(n);
             }
