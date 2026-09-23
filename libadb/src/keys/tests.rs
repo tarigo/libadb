@@ -948,6 +948,25 @@ mod cert {
     }
 
     #[test]
+    fn a_clock_no_certificate_can_carry_is_blamed_on_the_clock() {
+        // A validity spans 1970 to 9999. Outside it the certificate
+        // library says only that encoding failed, which points at the
+        // wrong thing: nothing is wrong with the key or the encoder.
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let before_1970 = UNIX_EPOCH - Duration::from_secs(1);
+        // Early enough in 9999 to start there, too late to last ten years.
+        let late_9999 = UNIX_EPOCH + Duration::from_secs(253_370_764_800);
+
+        for start in [before_1970, late_9999] {
+            let outcome = cert::build_at(&key, &mut test_rng(), start);
+            assert!(
+                matches!(outcome, Err(cert::CertError::Clock)),
+                "a start of {start:?} gave {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
     fn signing_the_certificate_draws_on_the_generator() {
         // The signature is deterministic, so blinding leaves no trace in
         // the output. What it leaves is a consumed stretch of the RNG:

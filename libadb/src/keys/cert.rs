@@ -49,7 +49,8 @@ pub enum CertError {
     Spki(x509_cert::spki::Error),
     /// Signing the certificate body failed.
     Rsa(rsa::Error),
-    /// The clock is before the Unix epoch, so no validity can be built.
+    /// The clock reads a time no certificate can carry: before the Unix
+    /// epoch, or so late that the validity would run past the year 9999.
     Clock,
 }
 
@@ -59,7 +60,7 @@ impl core::fmt::Display for CertError {
             Self::Der(e) => write!(f, "certificate encoding: {e}"),
             Self::Spki(e) => write!(f, "certificate public key: {e}"),
             Self::Rsa(e) => write!(f, "certificate signature: {e}"),
-            Self::Clock => f.write_str("system clock is before the Unix epoch"),
+            Self::Clock => f.write_str("system clock is outside what a certificate can carry"),
         }
     }
 }
@@ -152,7 +153,9 @@ pub fn build_at<R: CryptoRngCore>(
 /// 2049, `GeneralizedTime` after. `x509-cert` hands out the latter for
 /// everything, which `adb` does not and a strict verifier may refuse.
 fn rfc5280_time(at: SystemTime) -> Result<Time, CertError> {
-    let time = Time::try_from(at)?;
+    // Its only failure is a time outside 1970 to 9999, which `x509-cert`
+    // reports as an encoding error; the cause is the clock.
+    let time = Time::try_from(at).map_err(|_| CertError::Clock)?;
     if let Time::GeneralTime(t) = time {
         let date = t.to_date_time();
         if date.year() <= UtcTime::MAX_YEAR {
