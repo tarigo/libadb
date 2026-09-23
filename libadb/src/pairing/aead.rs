@@ -7,9 +7,10 @@
 use alloc::vec::Vec;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes128Gcm, Nonce};
+use aes_gcm::{Aes128Gcm, Key, Nonce};
 use hkdf::Hkdf;
 use rsa::sha2::Sha256;
+use zeroize::Zeroizing;
 
 /// The HKDF info string, without a trailing NUL — AOSP passes
 /// `sizeof(info) - 1`.
@@ -64,11 +65,12 @@ impl Cipher {
     /// salt, as in AOSP.
     pub(crate) fn new(key_material: &[u8]) -> Result<Self, AeadError> {
         let hkdf = Hkdf::<Sha256>::new(None, key_material);
-        let mut key = [0u8; KEY_LEN];
-        hkdf.expand(HKDF_INFO, &mut key)
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        hkdf.expand(HKDF_INFO, key.as_mut())
             .map_err(|_| AeadError::Kdf)?;
         Ok(Self {
-            key: Aes128Gcm::new(&key.into()),
+            // By reference: `into()` would leave an unwiped copy behind.
+            key: Aes128Gcm::new(Key::<Aes128Gcm>::from_slice(key.as_ref())),
             encrypt_counter: 0,
             decrypt_counter: 0,
         })
@@ -120,6 +122,15 @@ impl Cipher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_schedule_wipes_itself_on_drop() {
+        // `aes` clears its round keys only with its own `zeroize`
+        // feature, and `aes-gcm` has no switch that turns it on. A
+        // build without it still pairs, and leaves the key behind.
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wiped_on_drop::<aes::Aes128>();
+    }
 
     fn pair() -> (Cipher, Cipher) {
         let material = [0x5Au8; 64];
