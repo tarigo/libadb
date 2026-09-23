@@ -185,6 +185,7 @@ async fn open_connection(
         conn.device_banner()
             .map(String::from_utf8_lossy)
             .unwrap_or_default()
+            .escape_debug()
     );
     Ok(conn)
 }
