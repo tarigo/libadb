@@ -90,8 +90,11 @@ pub struct Paired {
 /// It is not the port a session later uses, and it stops listening as
 /// soon as one pairing succeeds.
 ///
-/// `code` is the six digits shown beside it. Everything else this needs
-/// it works out for itself.
+/// `code` is the six digits shown beside it, or, when the device
+/// scanned a QR code instead, the password that code carried. Nothing
+/// here insists on six digits for that reason, so check a typed code
+/// before calling: a wrong one costs the device an attempt. Everything
+/// else this needs it works out for itself.
 ///
 /// On success the device has `key` and will accept it over TLS from
 /// then on, exactly as it accepts a key approved at a USB prompt.

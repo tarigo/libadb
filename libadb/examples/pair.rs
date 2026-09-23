@@ -39,6 +39,12 @@ async fn run(target: &str, code: &str) -> Result<(), Box<dyn std::error::Error>>
         .rsplit_once(':')
         .ok_or("expected HOST:PORT, e.g. 192.168.1.5:37421")?;
     let port: u16 = port.parse().map_err(|_| "port is not a number")?;
+    // Here and not in the library, which also pairs with the password
+    // from a QR code. A typo caught now never reaches the device, which
+    // would count it against its twenty attempts.
+    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("the pairing code is six digits".into());
+    }
 
     let key = adb_key_auth::load_or_generate()?;
     // The same certificate a session later presents.
