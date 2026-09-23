@@ -70,8 +70,8 @@ impl core::error::Error for CertError {
         match self {
             Self::Der(e) => Some(e),
             Self::Spki(e) => Some(e),
-            // `rsa::Error` implements the error trait only with std.
-            Self::Rsa(_) | Self::Clock => None,
+            Self::Rsa(e) => Some(e),
+            Self::Clock => None,
         }
     }
 }

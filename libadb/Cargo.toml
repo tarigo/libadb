@@ -188,8 +188,9 @@ host-keys = ["keys", "rsa/getrandom"]
 # very key that authorises a USB connection, and `std` for the clock the
 # certificate is dated by. `rsa/sha2` brings SHA-256 in by the same
 # re-export that already brings SHA-1, rather than opening a second path
-# to `sha2`.
-tls = ["keys", "split", "rsa/sha2", "dep:rustls", "dep:x509-cert"]
+# to `sha2`. `rsa/std`, since std is here anyway, lets `rsa`'s and
+# `pkcs8`'s errors stand as the source of ours.
+tls = ["keys", "split", "rsa/sha2", "rsa/std", "dep:rustls", "dep:x509-cert"]
 # `adb pair`: put a key on a device that has never seen it. Builds on
 # `tls`, because pairing runs inside a TLS session and presents the same
 # certificate, and because the password is partly derived from that

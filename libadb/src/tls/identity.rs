@@ -34,8 +34,7 @@ impl core::error::Error for TlsIdentityError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Certificate(e) => Some(e),
-            // `pkcs8::Error` implements the error trait only with std.
-            Self::PrivateKey(_) => None,
+            Self::PrivateKey(e) => Some(e),
         }
     }
 }
