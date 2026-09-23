@@ -24,6 +24,7 @@ pub type AnyTransportError<R, U = NoUsb> =
 
 /// Why [`connect`] failed. `E` is the backend's own connect error.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConnectError<E> {
     Uri(uri::UriError),
     Tcp(std::io::Error),

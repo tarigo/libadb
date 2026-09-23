@@ -307,12 +307,42 @@ impl crate::auth::Authenticator for NoAuth {
     }
 }
 
+/// Signs anything, with a signature no device would accept; enough for
+/// a handshake whose device side is scripted.
+pub(crate) struct Signs;
+
+impl crate::auth::Authenticator for Signs {
+    type Error = NoKey;
+
+    fn sign(
+        &mut self,
+        _token: &[u8],
+    ) -> impl core::future::Future<Output = Result<Vec<u8>, Self::Error>> {
+        core::future::ready(Ok(alloc::vec![0xA5; 256]))
+    }
+
+    fn public_key(&self) -> &[u8] {
+        b"QUJD signs@mock\0"
+    }
+}
+
 pub(crate) fn cnxn() -> Packet {
     Packet::new(
         Command::Connect,
         command::ADB_VERSION,
         256 * 1024,
         b"device::features=shell_v2".to_vec(),
+    )
+}
+
+/// What an Android 11+ device on the wireless-debugging port answers a
+/// CNXN with: it will speak nothing but TLS from here on.
+pub(crate) fn stls() -> Packet {
+    Packet::new(
+        Command::StartTls,
+        crate::base::protocol::constant::STLS_VERSION,
+        0,
+        Vec::new(),
     )
 }
 

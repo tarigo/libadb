@@ -39,6 +39,8 @@ handler). The `libadb-ffi` crate is where those live.
 | `runtime` | Set by `tokio` and `smol`, not by hand: it lets the examples say they need one of the two |
 | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8 load/save, ADB public-key encoding; `no_std + alloc` |
 | `host-keys` | `keys::store` on top of `keys`: read `~/.android/adbkey`, or generate and persist one; pulls in `std` |
+| `tls`   | ADB over TLS — wireless debugging on Android 11+; implies `keys` and `split`, pulls in `std` |
+| `pairing` | `adb pair`: put a key on a device that has never seen it; implies `tls` |
 
 Features are additive: any combination compiles. Which runtime dials a
 socket and which backend opens a USB device are type arguments
@@ -48,7 +50,7 @@ code talks to. To use the libusb backend, disable defaults and enable
 `rusb` directly:
 
 ```toml
-libadb = { version = "0.4", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.5", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
@@ -57,7 +59,7 @@ The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
 
 ```toml
 [dependencies]
-libadb = { version = "0.4", features = ["tokio"] }
+libadb = { version = "0.5", features = ["tokio"] }
 ```
 
 One-shot command over `shell::v2`:
@@ -175,6 +177,14 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 
 ## Limitations
 
+- Android 11+ wireless debugging needs the `tls` feature and
+  `Connection::connect_tls`. Without it the device answers the handshake
+  with `STLS` and `connect` fails with `ProtocolError::TlsRequired`.
+- `adb pair` needs the `pairing` feature. A key the device already
+  trusts, one approved at a USB prompt, is accepted over TLS without it:
+  adbd checks both against the same store.
+- The wireless-debugging port changes every time the setting is switched
+  on, and this crate does no DNS-SD, so the caller supplies it.
 - With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
   as AOSP's adbd always does; the operation that received a creditless
   one fails with `ShortReadyPayload` rather than having a budget

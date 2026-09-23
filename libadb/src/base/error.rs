@@ -8,6 +8,7 @@ pub use super::protobuf::DecodeError;
 
 /// ADB protocol error, parameterized over the transport IO error type.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error<E> {
     /// Transport IO error.
     Io(E),
@@ -71,6 +72,7 @@ pub enum Error<E> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProtocolError {
     /// Invalid command code.
     InvalidCommand(u32),
@@ -103,18 +105,35 @@ pub enum ProtocolError {
     TooManyBannerProperties,
     /// Too many features in the device banner.
     TooManyBannerFeatures,
+    /// The device answered the handshake with `STLS`: it speaks nothing
+    /// but TLS from here on.
+    ///
+    /// This is how Android 11+ wireless debugging works — the port
+    /// `adb pair` hands out, and the one the "Wireless debugging" pane
+    /// shows. The legacy port `adb tcpip` opens is plain text, and so
+    /// is USB; neither is affected.
+    TlsRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuthError {
     /// Device rejected all authentication attempts.
     Rejected,
     /// The authenticator would not sign the token. Carries what it
     /// said, since that is the only account of the failure there is.
     SignFailed(alloc::string::String),
+    /// The device took the TLS handshake and closed it straight away:
+    /// it does not have the key in the certificate we offered.
+    ///
+    /// TLS 1.3 tells a client nothing when the server rejects its
+    /// certificate — the server speaks first, so the refusal only shows
+    /// once we listen. Authorise the key over USB, or run `adb pair`.
+    TlsKeyNotTrusted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SyncError {
     /// Device returned a `FAIL` response. The message is truncated to
     /// the session buffer when the device sent more than it holds.
@@ -132,6 +151,11 @@ impl fmt::Display for ProtocolError {
             Self::InvalidChecksum => f.write_str("data checksum mismatch"),
             Self::InvalidCommand(c) => f.write_fmt(format_args!("invalid command {}", c)),
             Self::PayloadTooLarge => f.write_str("payload exceeds max_payload"),
+            Self::TlsRequired => f.write_str(
+                "device requires a TLS handshake (Android 11+ wireless debugging); \
+                 build with the `tls` feature and use `Connection::connect_tls`, \
+                 connect over USB, or switch the device to plain TCP with `adb tcpip 5555`",
+            ),
             Self::UnexpectedCommand(c) => f.write_fmt(format_args!("unexpected command {:?}", c)),
             Self::ShortReadyPayload => {
                 f.write_str("delayed-ack READY payload shorter than 4 bytes")
@@ -160,6 +184,9 @@ impl fmt::Display for AuthError {
         match self {
             Self::Rejected => f.write_str("authentication rejected"),
             Self::SignFailed(why) => f.write_fmt(format_args!("authenticator sign failed: {why}")),
+            Self::TlsKeyNotTrusted => f.write_str(
+                "device does not trust this key over TLS; authorise it over USB or run `adb pair`",
+            ),
         }
     }
 }
@@ -278,6 +305,7 @@ impl<E> From<ReverseError> for Error<E> {
 
 /// What the `reverse:` rule service answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReverseError {
     /// The device returned `FAIL`. The message is adbd's own text,
     /// e.g. `bad forward: …` or `listener '…' not found`.
@@ -354,6 +382,24 @@ mod tests {
         assert_eq!(
             show(&ProtocolError::InvalidChecksum),
             "data checksum mismatch"
+        );
+    }
+
+    #[test]
+    fn protocol_display_tls_required_names_a_way_out() {
+        assert_eq!(
+            show(&ProtocolError::TlsRequired),
+            "device requires a TLS handshake (Android 11+ wireless debugging); \
+             build with the `tls` feature and use `Connection::connect_tls`, \
+             connect over USB, or switch the device to plain TCP with `adb tcpip 5555`"
+        );
+    }
+
+    #[test]
+    fn auth_display_tls_key_not_trusted_points_at_pairing() {
+        assert_eq!(
+            show(&AuthError::TlsKeyNotTrusted),
+            "device does not trust this key over TLS; authorise it over USB or run `adb pair`"
         );
     }
 

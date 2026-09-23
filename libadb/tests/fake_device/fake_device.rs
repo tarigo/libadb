@@ -21,8 +21,10 @@
 
 use std::net::SocketAddr;
 
-use libadb::protocol::command::{self, CMD_AUTH, CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_WRTE};
-use libadb::protocol::constant::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
+use libadb::protocol::command::{
+    self, CMD_AUTH, CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_STLS, CMD_WRTE,
+};
+use libadb::protocol::constant::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, STLS_VERSION};
 use libadb::protocol::features::{has_feature, DELAYED_ACK, INITIAL_DELAYED_ACK_BYTES};
 
 use crate::rt::{self, TcpListener, TcpStream};
@@ -108,6 +110,7 @@ pub struct FakeDevice {
     initial_asb: Option<u32>,
     auth: AuthPolicy,
     expect_open_asb: Option<u32>,
+    tls: bool,
 }
 
 impl Default for FakeDevice {
@@ -125,6 +128,7 @@ impl FakeDevice {
             initial_asb: None,
             auth: AuthPolicy::None,
             expect_open_asb: Some(INITIAL_DELAYED_ACK_BYTES),
+            tls: false,
         }
     }
 
@@ -160,6 +164,14 @@ impl FakeDevice {
     /// Use [`FakeSession::is_delayed_ack`] to observe the negotiated state.
     pub fn delayed_ack(mut self, initial_asb: u32) -> Self {
         self.initial_asb = Some(initial_asb);
+        self
+    }
+
+    /// Answer the host's CNXN with `STLS`, the way an Android 11+ device
+    /// on the wireless-debugging port does. The session ends there: this
+    /// fixture speaks no TLS, so only the handshake outcome is testable.
+    pub fn require_tls(mut self) -> Self {
+        self.tls = true;
         self
     }
 
@@ -261,6 +273,11 @@ impl FakeSession {
         self.host_banner = host_banner;
         self.host_max_payload = hdr.arg1;
         self.host_protocol_version = hdr.arg0;
+
+        if config.tls {
+            self.send(CMD_STLS, STLS_VERSION, 0, &[]).await;
+            return;
+        }
 
         match &config.auth {
             AuthPolicy::None => {}

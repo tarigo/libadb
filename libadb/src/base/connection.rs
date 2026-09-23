@@ -983,6 +983,8 @@ where
 
 mod config;
 mod handshake;
+#[cfg(feature = "tls")]
+mod tls;
 
 #[cfg(test)]
 mod tests;

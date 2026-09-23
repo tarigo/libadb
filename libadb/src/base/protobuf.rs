@@ -2,6 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     InvalidLengthPrefix,
     InvalidProtobuf,

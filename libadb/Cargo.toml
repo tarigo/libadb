@@ -13,7 +13,7 @@ keywords = ["adb", "android", "usb", "no_std", "embedded"]
 categories = ["embedded", "no-std", "network-programming", "hardware-support"]
 
 [package.metadata.docs.rs]
-features = ["tokio", "usb", "host-keys"]
+features = ["tokio", "usb", "host-keys", "tls", "pairing"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -98,6 +98,65 @@ optional = true
 default-features = false
 features = ["alloc"]
 
+# ADB over TLS (the `tls` feature): wireless debugging on Android 11+.
+# `x509-cert` is held at 0.2 because 0.3 moved to der/spki 0.8 and
+# signature 3, while everything here stands on der 0.7 / spki 0.7 /
+# signature 2 through `rsa` 0.9. Only its ASN.1 types are used: its
+# certificate builder signs without a CSPRNG, and a private-key
+# operation in this crate is always blinded.
+# `rustls` takes the `ring` provider rather than the default
+# `aws-lc-rs`, which wants cmake and NASM. `tls12` stays off: ADB speaks
+# TLS 1.3 only, and leaving it out keeps a feature-unified build from
+# quietly widening what we accept.
+[dependencies.rustls]
+version = "0.23"
+optional = true
+default-features = false
+features = ["std", "ring", "logging"]
+
+# Pairing (`adb pair`, the `pairing` feature). BoringSSL's SPAKE2 runs
+# on edwards25519, so the curve arithmetic comes from
+# `curve25519-dalek`; the key it agrees on is stretched by HKDF-SHA256
+# and spent on AES-128-GCM. All of them sit on the same `digest` 0.10
+# generation as `rsa` 0.9, so nothing doubles up.
+[dependencies.curve25519-dalek]
+version = "4"
+optional = true
+default-features = false
+features = ["alloc", "precomputed-tables"]
+
+# Constant-time selection, for scalars a timing channel would leak the
+# pairing code through. Already in the tree under `rsa`.
+[dependencies.subtle]
+version = "2"
+optional = true
+default-features = false
+
+[dependencies.hkdf]
+version = "0.12"
+optional = true
+default-features = false
+
+[dependencies.aes-gcm]
+version = "0.10"
+optional = true
+default-features = false
+features = ["aes", "alloc", "zeroize"]
+
+# Named only for its `zeroize` feature, which wipes the key schedule
+# inside the pairing cipher on drop; `aes-gcm` has no switch for it.
+[dependencies.aes]
+version = "0.8"
+optional = true
+default-features = false
+features = ["zeroize"]
+
+[dependencies.x509-cert]
+version = "0.2.5"
+optional = true
+default-features = false
+features = ["std"]
+
 [features]
 default = ["tokio"]
 # Full-duplex Reader/Writer support (the `split` module) with no
@@ -124,6 +183,19 @@ keys = ["dep:rsa", "dep:sha1", "dep:base64ct", "dep:zeroize", "dep:rand_chacha"]
 # the `split` machinery. `rsa/getrandom` is what gives the caller an
 # `OsRng` to hand the constructors.
 host-keys = ["keys", "rsa/getrandom"]
+# ADB over TLS: wireless debugging on Android 11+ (the STLS command).
+# Needs `keys`, because the certificate it presents is signed by the
+# very key that authorises a USB connection, and `std` for the clock the
+# certificate is dated by. `rsa/sha2` brings SHA-256 in by the same
+# re-export that already brings SHA-1, rather than opening a second path
+# to `sha2`. `rsa/std`, since std is here anyway, lets `rsa`'s and
+# `pkcs8`'s errors stand as the source of ours.
+tls = ["keys", "split", "rsa/sha2", "rsa/std", "dep:rustls", "dep:x509-cert"]
+# `adb pair`: put a key on a device that has never seen it. Builds on
+# `tls`, because pairing runs inside a TLS session and presents the same
+# certificate, and because the password is partly derived from that
+# session's key material.
+pairing = ["tls", "dep:curve25519-dalek", "dep:subtle", "dep:hkdf", "dep:aes-gcm", "dep:aes"]
 
 [dev-dependencies]
 bytes = "1"
@@ -139,6 +211,12 @@ rand_chacha = "0.3"
 tempfile = "3"
 # Integration tests decode the ADB public-key blob independently.
 base64ct = { version = "1", features = ["alloc"] }
+# The pairing test writes the device's half of the cipher out again
+# rather than borrowing the crate's, so both sides agree on the key
+# derivation and the nonce independently.
+aes-gcm = { version = "0.10", features = ["aes", "alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 # Every example authenticates, and the key comes from `host-keys`; the
 # runtime is still chosen at the command line, except for the two
@@ -159,6 +237,10 @@ required-features = ["host-keys", "runtime"]
 [[example]]
 name = "shell_v1"
 required-features = ["host-keys", "runtime"]
+
+[[example]]
+name = "pair"
+required-features = ["pairing", "host-keys", "runtime"]
 
 [[example]]
 name = "shell_v2"

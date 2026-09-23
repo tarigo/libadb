@@ -35,6 +35,10 @@ pub mod rusb;
 #[cfg(feature = "split")]
 pub mod common;
 
+/// ADB over TLS: the transport that answers the device's `STLS`.
+#[cfg(feature = "tls")]
+pub mod tls;
+
 #[cfg(any(feature = "tokio", feature = "smol"))]
 pub mod any;
 

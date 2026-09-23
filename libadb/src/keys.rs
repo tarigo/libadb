@@ -14,6 +14,9 @@
 //! seeds its own blinding generator from what the caller supplies, so
 //! nothing drags in `getrandom` behind your back.
 
+/// The self-signed certificate this key presents over TLS.
+#[cfg(feature = "tls")]
+pub mod cert;
 pub(crate) mod pubkey;
 mod record;
 #[cfg(feature = "host-keys")]
@@ -206,6 +209,7 @@ impl Authenticator for AdbKey {
 
 /// Errors from key encoding, conversion and signing.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum KeyError {
     /// The key name contains a NUL, CR or LF, which would corrupt the
     /// public-key line or the AUTH payload carrying it.

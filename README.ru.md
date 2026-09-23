@@ -42,6 +42,8 @@
 | `runtime` | Ставится фичами `tokio` и `smol`, а не вручную: позволяет примерам потребовать любой из двух рантаймов |
 | `keys`  | Встроенный RSA-ключ хоста (`keys::AdbKey`): генерация, чтение и запись PKCS#8, кодирование публичного ключа в формате ADB; `no_std + alloc` |
 | `host-keys` | `keys::store` поверх `keys`: чтение `~/.android/adbkey` либо генерация и сохранение; подтягивает `std` |
+| `tls`   | ADB поверх TLS — беспроводная отладка Android 11+; включает `keys` и `split`, подтягивает `std` |
+| `pairing` | `adb pair`: завести ключ на устройстве, которое его не видело; включает `tls` |
 
 Фичи аддитивны: собирается любая комбинация. Какой рантайм открывает
 сокет и какой бэкенд — USB-устройство, задаётся типами-параметрами
@@ -51,7 +53,7 @@
 включите `rusb` напрямую:
 
 ```toml
-libadb = { version = "0.4", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.5", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 Ядро крейта — `no_std + alloc`; любая рантайм-фича подтягивает `std`.
@@ -60,7 +62,7 @@ libadb = { version = "0.4", default-features = false, features = ["tokio", "rusb
 
 ```toml
 [dependencies]
-libadb = { version = "0.4", features = ["tokio"] }
+libadb = { version = "0.5", features = ["tokio"] }
 ```
 
 Разовая команда через `shell::v2`:
@@ -178,6 +180,14 @@ let conn = Connection::<_>::connect_with_config(
 
 ## Ограничения
 
+- Беспроводной отладке Android 11+ нужна фича `tls` и
+  `Connection::connect_tls`. Без неё устройство отвечает на рукопожатие
+  пакетом `STLS`, и `connect` возвращает `ProtocolError::TlsRequired`.
+- Сопряжению `adb pair` нужна фича `pairing`. Ключ, которому устройство
+  уже доверяет, подтверждённый по USB, принимается по TLS и без неё:
+  adbd сверяет оба с одним хранилищем.
+- Порт беспроводной отладки меняется при каждом включении режима, а
+  обнаружения по DNS-SD в крейте нет, так что порт задаёт вызывающий.
 - При согласованном delayed ack пакет `OKAY` обязан нести 4-байтовый
   кредит, как всегда делает adbd из AOSP; операция, получившая OKAY
   без кредита, завершается ошибкой `ShortReadyPayload`, а не

@@ -5,10 +5,13 @@ use core::future::Future;
 use core::task::Poll;
 
 use super::*;
+use crate::base::error::{AuthError, ProtocolError};
 use crate::base::mock::{
-    abandon, connected_for_select, connected_with_channel, now, two_channels_classic,
-    two_channels_delayed_ack, wrte,
+    abandon, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
+    two_channels_delayed_ack, wrte, Mock, NoAuth, Signs,
 };
+use crate::base::protocol::command::{Command, AUTH_SIGNATURE, AUTH_TOKEN};
+use crate::base::protocol::Packet;
 
 #[test]
 fn a_write_cancelled_between_header_and_payload_desyncs_the_connection() {
@@ -451,4 +454,39 @@ mod incoming {
         assert_eq!(cmd, Command::Close);
         assert_eq!((local, remote), (0, 9));
     }
+}
+
+#[test]
+fn a_device_that_answers_the_handshake_with_stls_says_it_wants_tls() {
+    let mut mock = Mock::new();
+    mock.feed(&stls());
+
+    let Err(err) = now(Connection::<_>::connect(mock, NoAuth, &[])) else {
+        panic!("expected the handshake to refuse a TLS-only device");
+    };
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
+        "expected TlsRequired, got {err:?}"
+    );
+}
+
+#[test]
+fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
+    // The device answered the signature with AUTH again, but not with a
+    // token. That is not a CNXN and must not be assembled into one: a
+    // connection built from it would carry an AUTH payload as its
+    // banner and believe itself authenticated.
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
+    mock.feed(&Packet::new(Command::Auth, AUTH_SIGNATURE, 0, vec![]));
+
+    let Err(err) = now(Connection::<_>::connect(mock, Signs, &[])) else {
+        panic!("a stray AUTH must not become a connection");
+    };
+
+    assert!(
+        matches!(err, Error::Auth(AuthError::Rejected)),
+        "expected Rejected, got {err:?}"
+    );
 }

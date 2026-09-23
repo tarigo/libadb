@@ -149,6 +149,7 @@ mod inner {
 
     /// Reasons USB connect can fail.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum UsbConnectError {
         /// Device enumeration failed.
         Enumerate(std::io::Error),

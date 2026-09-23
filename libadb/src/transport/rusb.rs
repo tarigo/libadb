@@ -209,6 +209,7 @@ mod inner {
 
     /// Errors from the rusb-backed USB transport.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum UsbError {
         /// A libusb transfer or descriptor call failed.
         Transfer(rusb::Error),
@@ -244,6 +245,7 @@ mod inner {
 
     /// Reasons USB connect can fail.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum UsbConnectError {
         /// Initialising a libusb context failed.
         Context(rusb::Error),
