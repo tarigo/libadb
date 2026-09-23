@@ -530,10 +530,9 @@ impl Write for TakesNothing {
 
 rt_test! {
 async fn a_write_that_goes_nowhere_is_not_taken_for_a_refused_key() {
-    // A device that will not have the key may just hang up, so a
-    // handshake cut short counts as a refusal. A transport that takes
-    // no bytes is a different failure, and calling it a refusal would
-    // send the user off to pair a key that was never the problem.
+    // A transport that takes no bytes has refused nothing, and calling
+    // it a refusal would send the user off to pair a key that was never
+    // the problem.
     let mut transport = MaybeTls::plain(TakesNothing);
 
     let err = transport.start_tls(&client_config(), &[]).await.unwrap_err();
@@ -766,6 +765,55 @@ async fn a_usb_transport_connects_through_connect_tls_all_the_same() {
 
     assert!(matches!(conn.transport(), Transport::Usb(_)));
     drop(device);
+}
+}
+
+/// A device that asks for TLS, reads the ClientHello and hangs up,
+/// long before the host's certificate could have reached it.
+fn spawn_device_that_hangs_up_mid_handshake() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
+        socket
+            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
+
+        // All of the ClientHello record, so the close is a clean FIN
+        // rather than a reset over unread bytes.
+        let mut head = [0u8; 5];
+        socket.read_exact(&mut head).unwrap();
+        let mut hello = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+        socket.read_exact(&mut hello).unwrap();
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_device_that_hangs_up_mid_handshake_is_not_said_to_refuse_the_key() {
+    // Under TLS 1.3 the host's certificate travels in its last flight,
+    // after the handshake is over on its side. A device gone before
+    // then never saw the key, and pairing again would cure nothing.
+    let (addr, device) = spawn_device_that_hangs_up_mid_handshake();
+
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    let Err(err) =
+        Connection::<_>::connect_tls(transport, test_auth(), &[], &client_config()).await
+    else {
+        panic!("a device that hung up must not hand out a connection");
+    };
+
+    assert!(
+        matches!(err, Error::Io(TlsError::HandshakeClosed)),
+        "expected the handshake cut short, got {err:?}"
+    );
+    device.join().unwrap();
 }
 }
 

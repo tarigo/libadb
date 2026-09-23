@@ -47,7 +47,8 @@ mod inner {
         /// the device sent.
         Tls(rustls::Error),
         /// The device closed the connection in the middle of the
-        /// handshake.
+        /// handshake. Our certificate only goes out once the handshake
+        /// is over on our side, so the device had not seen the key.
         HandshakeClosed,
         /// The transport underneath took none of a write. An
         /// `embedded-io` writer may not do that with bytes on offer, so
@@ -150,8 +151,9 @@ mod inner {
         pub fn is_key_rejected(&self) -> bool {
             match self {
                 Self::Tls(rustls::Error::AlertReceived(a)) => alert_means_rejection(*a),
-                // Some adbd builds just close, with no alert at all.
-                Self::HandshakeClosed => true,
+                // Not `HandshakeClosed`: the key had not gone out yet. An
+                // adbd that refuses by just closing does so after the
+                // handshake, where the first read meets the end of stream.
                 _ => false,
             }
         }
