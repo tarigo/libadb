@@ -300,6 +300,8 @@ async fn a_split_session_reads_and_writes_at_once() {
 enum Step {
     /// Send these bytes.
     Say(&'static [u8]),
+    /// Put these bytes on the socket as they are, outside TLS.
+    Raw(&'static [u8]),
     /// Read until this much plaintext has arrived, then send these bytes.
     Hear(usize, &'static [u8]),
 }
@@ -324,6 +326,10 @@ fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
         for step in orders {
             let answer = match step {
                 Step::Say(bytes) => bytes,
+                Step::Raw(bytes) => {
+                    tls.sock.write_all(bytes).unwrap();
+                    continue;
+                }
                 Step::Hear(total, bytes) => {
                     let mut buf = vec![0u8; 64 * 1024];
                     let mut heard = 0;
@@ -434,6 +440,40 @@ async fn a_write_dropped_on_a_full_socket_still_goes_out_with_the_next_read() {
         .unwrap();
 
     assert_eq!(&buf[..n], b"all of it");
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+/// An application-data record of 32 zero bytes, sealed under no key.
+const BROKEN_RECORD: [u8; 37] = {
+    let mut record = [0u8; 37];
+    record[0] = 0x17;
+    record[1] = 0x03;
+    record[2] = 0x03;
+    record[4] = 32;
+    record
+};
+
+rt_test! {
+async fn a_broken_record_fails_the_read_rather_than_ending_it() {
+    // A record that will not decrypt has to reach the caller as the TLS
+    // failure it is. Read as a clean end of stream, it would pass for a
+    // device that hung up, and a connect takes that for a refused key.
+    let (addr, steps, device) = spawn_quiet_device();
+    let mut transport = connected(addr).await;
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let outcome = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+
+    let Err(err) = outcome else {
+        panic!("a broken record read as {outcome:?}");
+    };
+    assert!(matches!(err, TlsError::Tls(_)), "got {err:?}");
+    assert!(!err.is_key_rejected());
     drop(steps);
     device.join().unwrap();
 }
