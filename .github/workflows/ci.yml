@@ -45,6 +45,9 @@ jobs:
           - tokio,tls,host-keys
           - smol,tls,host-keys
           - tokio,pairing,host-keys
+          # And without `host-keys`, which the tests must not lean on.
+          - tokio,tls
+          - smol,pairing
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,7 +103,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [tokio, smol, "tokio,nusb,rusb", "tokio,smol", "tokio,host-keys", "smol,host-keys", "host-keys", "tokio,tls,host-keys", "smol,tls,host-keys", "tokio,pairing,host-keys"]
+        features: [tokio, smol, "tokio,nusb,rusb", "tokio,smol", "tokio,host-keys", "smol,host-keys", "host-keys", "tokio,tls,host-keys", "smol,tls,host-keys", "tokio,pairing,host-keys", "tokio,tls", "smol,pairing"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

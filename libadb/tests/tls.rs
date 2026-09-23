@@ -696,6 +696,7 @@ fn test_auth() -> AdbKey {
 /// They need a device whose store already holds `~/.android/adbkey`,
 /// which is any device that has ever been authorised over USB. Without
 /// the variable they do nothing, so CI is unaffected.
+#[cfg(feature = "host-keys")]
 fn device_address() -> Option<SocketAddr> {
     std::env::var("LIBADB_TLS_DEVICE")
         .ok()?
@@ -704,6 +705,7 @@ fn device_address() -> Option<SocketAddr> {
         .ok()
 }
 
+#[cfg(feature = "host-keys")]
 async fn real_device_key() -> AdbKey {
     let home = std::env::var("HOME").expect("HOME");
     let dir = std::path::PathBuf::from(home).join(".android");
@@ -711,6 +713,7 @@ async fn real_device_key() -> AdbKey {
 }
 
 rt_test! {
+#[cfg(feature = "host-keys")]
 async fn a_real_device_serves_a_split_connection_over_tls() {
     let Some(addr) = device_address() else {
         return;

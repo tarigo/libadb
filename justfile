@@ -11,7 +11,7 @@
 
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
-lib_features := "tokio smol tokio,usb tokio,rusb tokio,smol tokio,nusb,rusb smol,usb smol,rusb tokio,host-keys smol,host-keys host-keys tokio,tls,host-keys smol,tls,host-keys tokio,pairing,host-keys"
+lib_features := "tokio smol tokio,usb tokio,rusb tokio,smol tokio,nusb,rusb smol,usb smol,rusb tokio,host-keys smol,host-keys host-keys tokio,tls,host-keys smol,tls,host-keys tokio,pairing,host-keys tokio,tls smol,pairing"
 ffi_features := "usb rusb nusb,rusb"
 # Documentation is built per narrow combination: an intra-doc link to a
 # type behind another feature only breaks when that feature is off.
