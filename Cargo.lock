@@ -21,6 +21,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -35,6 +36,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -762,6 +764,7 @@ dependencies = [
 name = "libadb"
 version = "0.5.0"
 dependencies = [
+ "aes",
  "aes-gcm",
  "async-lock",
  "base64ct",

@@ -141,7 +141,15 @@ default-features = false
 version = "0.10"
 optional = true
 default-features = false
-features = ["aes", "alloc"]
+features = ["aes", "alloc", "zeroize"]
+
+# Named only for its `zeroize` feature, which wipes the key schedule
+# inside the pairing cipher on drop; `aes-gcm` has no switch for it.
+[dependencies.aes]
+version = "0.8"
+optional = true
+default-features = false
+features = ["zeroize"]
 
 [dependencies.x509-cert]
 version = "0.2.5"
@@ -186,7 +194,7 @@ tls = ["keys", "split", "rsa/sha2", "dep:rustls", "dep:x509-cert"]
 # `tls`, because pairing runs inside a TLS session and presents the same
 # certificate, and because the password is partly derived from that
 # session's key material.
-pairing = ["tls", "dep:curve25519-dalek", "dep:subtle", "dep:hkdf", "dep:aes-gcm"]
+pairing = ["tls", "dep:curve25519-dalek", "dep:subtle", "dep:hkdf", "dep:aes-gcm", "dep:aes"]
 
 [dev-dependencies]
 bytes = "1"
