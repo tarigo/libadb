@@ -20,6 +20,7 @@ use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
 use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
+use libadb::transport::common::Transport;
 use libadb::transport::tls::{MaybeTls, StartTls, TlsError};
 use libadb::Splittable;
 
@@ -744,6 +745,26 @@ async fn a_device_that_never_asks_for_tls_is_served_in_the_clear() {
     .expect("a plain device still connects");
 
     assert!(conn.transport().is_plain(), "nothing was upgraded");
+    drop(device);
+}
+}
+
+rt_test! {
+async fn a_usb_transport_connects_through_connect_tls_all_the_same() {
+    // adbd never offers STLS over USB, and the USB half cannot start
+    // TLS at all, so this works only because TLS is started on the
+    // device's say-so, never up front. A socket stands in for the USB
+    // half: the variant is what matters, not the wire.
+    let (handle, addr) = fake_device::FakeDevice::new().bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+
+    let usb = rt::wrap(rt::connect(addr).await);
+    let transport = Transport::<MaybeTls<rt::AdbTransport>, _>::Usb(usb);
+    let conn = Connection::<_>::connect_tls(transport, test_auth(), &[], &client_config())
+        .await
+        .expect("USB connects through connect_tls as it does through connect");
+
+    assert!(matches!(conn.transport(), Transport::Usb(_)));
     drop(device);
 }
 }
