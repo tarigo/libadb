@@ -20,7 +20,7 @@ use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
 use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
-use libadb::transport::tls::{MaybeTls, StartTls};
+use libadb::transport::tls::{MaybeTls, StartTls, TlsError};
 use libadb::Splittable;
 
 #[path = "common/common.rs"]
@@ -436,6 +436,40 @@ async fn a_write_dropped_on_a_full_socket_still_goes_out_with_the_next_read() {
     assert_eq!(&buf[..n], b"all of it");
     drop(steps);
     device.join().unwrap();
+}
+}
+
+/// A transport whose every write takes nothing.
+struct TakesNothing;
+
+impl embedded_io_async::ErrorType for TakesNothing {
+    type Error = core::convert::Infallible;
+}
+
+impl Read for TakesNothing {
+    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
+        Ok(0)
+    }
+}
+
+impl Write for TakesNothing {
+    async fn write(&mut self, _buf: &[u8]) -> Result<usize, Self::Error> {
+        Ok(0)
+    }
+}
+
+rt_test! {
+async fn a_write_that_goes_nowhere_is_not_taken_for_a_refused_key() {
+    // A device that will not have the key may just hang up, so a
+    // handshake cut short counts as a refusal. A transport that takes
+    // no bytes is a different failure, and calling it a refusal would
+    // send the user off to pair a key that was never the problem.
+    let mut transport = MaybeTls::plain(TakesNothing);
+
+    let err = transport.start_tls(&client_config(), &[]).await.unwrap_err();
+
+    assert!(matches!(err, TlsError::WriteZero), "got {err:?}");
+    assert!(!err.is_key_rejected());
 }
 }
 
