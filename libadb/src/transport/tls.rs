@@ -588,10 +588,13 @@ mod inner {
     struct TlsShared<T: Splittable> {
         conn: async_lock::Mutex<Box<ClientConnection>>,
         out: async_lock::Mutex<OutHalf<T::WriteHalf>>,
-        /// Whether `out.pending` may still hold bytes — set while a
-        /// drain runs and left set if it is dropped part way. Lets a
-        /// reader that owes nothing skip the write lock, so idle reads
-        /// never queue behind a writer blocked on the socket.
+        /// Whether `out.pending` may still hold bytes: set while a drain
+        /// runs, cleared once it has flushed, and left set if it is
+        /// dropped part way. A reader that owes nothing drains the queue
+        /// only if this is up and the write lock is free, so it never
+        /// queues behind a writer blocked on the socket. A drain dropped
+        /// while that reader waits on the socket goes out on its next
+        /// pass, or with the next write.
         backlog: AtomicBool,
     }
 
@@ -604,19 +607,39 @@ mod inner {
             f: impl FnOnce(&mut ClientConnection) -> R,
         ) -> Result<R, TlsError<T::Error>> {
             let mut out = self.out.lock().await;
+            self.push_locked(&mut out, f).await
+        }
+
+        /// [`push_with`](Self::push_with), for a caller already holding
+        /// `out`.
+        async fn push_locked<R>(
+            &self,
+            out: &mut OutHalf<T::WriteHalf>,
+            f: impl FnOnce(&mut ClientConnection) -> R,
+        ) -> Result<R, TlsError<T::Error>> {
             let result = {
                 let mut conn = self.conn.lock().await;
                 let result = f(&mut conn);
                 harvest(&mut conn, &mut out.pending);
                 result
             };
-            self.drain(&mut out).await?;
+            self.drain(out).await?;
             Ok(result)
         }
 
         /// Move what rustls has queued into the socket.
         async fn push(&self) -> Result<(), TlsError<T::Error>> {
             self.push_with(|_| ()).await
+        }
+
+        /// Push out what a dropped drain left behind, unless someone
+        /// holds the write lock. Whoever does drains the whole queue
+        /// before letting go, or is dropped and leaves the flag up.
+        async fn settle_backlog(&self) -> Result<(), TlsError<T::Error>> {
+            match self.out.try_lock() {
+                Some(mut out) => self.push_locked(&mut out, |_| ()).await,
+                None => Ok(()),
+            }
         }
 
         /// Write out the queue, resuming where a dropped drain stopped.
@@ -630,8 +653,11 @@ mod inner {
                 }
                 pending.advance(n);
             }
+            // Not before the flush: one dropped part way can leave bytes
+            // in the half underneath.
+            out.half.flush().await.map_err(TlsError::Io)?;
             self.backlog.store(false, Ordering::Release);
-            out.half.flush().await.map_err(TlsError::Io)
+            Ok(())
         }
 
         fn has_backlog(&self) -> bool {
@@ -679,9 +705,11 @@ mod inner {
                 };
 
                 // Settle what we owe, or what a dropped write left behind.
-                // Nothing to settle, no write lock.
-                if owes || self.shared.has_backlog() {
+                // Only what we owe is worth waiting for the write lock.
+                if owes {
                     self.shared.push().await?;
+                } else if self.shared.has_backlog() {
+                    self.shared.settle_backlog().await?;
                 }
 
                 // Decrypt what is in hand before going back to the socket, or

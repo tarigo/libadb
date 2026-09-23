@@ -9,7 +9,8 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 
 use embedded_io_async::{Read, Write};
@@ -119,6 +120,22 @@ impl ClientCertVerifier for ClientPolicy {
     }
 }
 
+/// The device's side of TLS 1.3, taking or refusing the host's key.
+fn device_config(policy: KeyPolicy) -> Arc<ServerConfig> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let (cert, key) = device_identity();
+    let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_client_cert_verifier(Arc::new(ClientPolicy {
+            accept: policy == KeyPolicy::Accept,
+            provider,
+        }))
+        .with_single_cert(vec![cert], key)
+        .unwrap();
+    Arc::new(config)
+}
+
 /// What the fake device did, so a test can check the host's side of it.
 struct DeviceReport {
     /// The public key inside the certificate the host offered, in DER.
@@ -137,20 +154,10 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let (cert, key) = device_identity();
-        let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_client_cert_verifier(Arc::new(ClientPolicy {
-                accept: policy == KeyPolicy::Accept,
-                provider,
-            }))
-            .with_single_cert(vec![cert], key)
-            .unwrap();
+        let config = device_config(policy);
 
         let (socket, _) = listener.accept().unwrap();
-        let conn = ServerConnection::new(Arc::new(config)).unwrap();
+        let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
 
         let mut report = DeviceReport {
@@ -289,6 +296,149 @@ async fn a_split_session_reads_and_writes_at_once() {
 }
 }
 
+/// What a [`spawn_quiet_device`] does next.
+enum Step {
+    /// Send these bytes.
+    Say(&'static [u8]),
+    /// Read until this much plaintext has arrived, then send these bytes.
+    Hear(usize, &'static [u8]),
+}
+
+/// A device that finishes the handshake and then reads nothing until
+/// told to, so a test can fill the socket towards it first. It hangs up
+/// once the sender is dropped.
+fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (steps, orders) = mpsc::channel();
+
+    let handle = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).unwrap();
+        }
+        tls.flush().unwrap();
+
+        for step in orders {
+            let answer = match step {
+                Step::Say(bytes) => bytes,
+                Step::Hear(total, bytes) => {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    let mut heard = 0;
+                    while heard < total {
+                        match tls.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => heard += n,
+                        }
+                    }
+                    bytes
+                }
+            };
+            tls.write_all(answer).unwrap();
+            tls.flush().unwrap();
+        }
+    });
+
+    (addr, steps, handle)
+}
+
+/// Wait until `written` has stopped moving: the writer is stuck on a
+/// full socket, inside its drain, holding the write lock. Returns where
+/// it stopped.
+async fn stalled(written: &AtomicUsize) -> usize {
+    let mut last = usize::MAX;
+    let mut still = 0;
+    while still < 6 {
+        rt::sleep_ms(50).await;
+        let now = written.load(Ordering::Relaxed);
+        if now == last {
+            still += 1;
+        } else {
+            last = now;
+            still = 0;
+        }
+    }
+    last
+}
+
+rt_test! {
+async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
+    // The device reads nothing, so the writer ends up blocked inside
+    // its drain with the write lock held. A read that queued for that
+    // lock would stop reading the socket, and a peer that will not read
+    // until it has been read from would then leave both sides stuck.
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut reader, mut writer) = connected(addr).await.split().unwrap();
+
+    let written = Arc::new(AtomicUsize::new(0));
+    let flood = rt::spawn({
+        let written = Arc::clone(&written);
+        async move {
+            let chunk = [0x5a; 4096];
+            while let Ok(n) = writer.write(&chunk).await {
+                written.fetch_add(n, Ordering::Relaxed);
+            }
+        }
+    });
+    let stuck_at = stalled(&written).await;
+
+    steps.send(Step::Say(b"hello")).unwrap();
+    let mut buf = [0u8; 16];
+    let n = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read queued behind the stuck writer")
+        .unwrap();
+
+    assert_eq!(&buf[..n], b"hello");
+    assert_eq!(
+        written.load(Ordering::Relaxed),
+        stuck_at,
+        "the writer must still be stuck, or the read proved nothing"
+    );
+    // Hanging up unblocks the writer with an error, which ends it.
+    drop(steps);
+    device.join().unwrap();
+    rt::join(flood).await;
+}
+}
+
+rt_test! {
+async fn a_write_dropped_on_a_full_socket_still_goes_out_with_the_next_read() {
+    // The records a dropped write sealed sit in the queue with nobody
+    // left to send them. The next read has to push them out, or the
+    // device waits for the end of a message that never comes.
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut reader, mut writer) = connected(addr).await.split().unwrap();
+
+    let chunk = [0xa5; 4096];
+    let mut sealed = 0;
+    loop {
+        match rt::timeout_ms(300, writer.write(&chunk)).await {
+            Some(n) => sealed += n.unwrap(),
+            None => {
+                // Dropped inside its drain. Its plaintext went into
+                // rustls whole before the socket blocked, so it counts.
+                sealed += chunk.len();
+                break;
+            }
+        }
+    }
+
+    steps.send(Step::Hear(sealed, b"all of it")).unwrap();
+    let mut buf = [0u8; 16];
+    let n = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the dropped write never finished reaching the device")
+        .unwrap();
+
+    assert_eq!(&buf[..n], b"all of it");
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
 rt_test! {
 async fn a_plain_transport_still_splits_and_passes_bytes_through() {
     // Without an upgrade the wrapper must be invisible, because the
@@ -380,17 +530,7 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let (cert, key) = device_identity();
-        let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_client_cert_verifier(Arc::new(ClientPolicy {
-                accept: policy == KeyPolicy::Accept,
-                provider,
-            }))
-            .with_single_cert(vec![cert], key)
-            .unwrap();
+        let config = device_config(policy);
 
         let (mut socket, _) = listener.accept().unwrap();
 
@@ -410,7 +550,7 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
         };
 
         // From here on, TLS.
-        let conn = ServerConnection::new(Arc::new(config)).unwrap();
+        let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         // The device speaks first inside the session.
         if tls
