@@ -64,7 +64,21 @@ impl<E: core::fmt::Display> core::fmt::Display for PairingError<E> {
     }
 }
 
-impl<E> core::error::Error for PairingError<E> where E: core::error::Error + 'static {}
+impl<E> core::error::Error for PairingError<E>
+where
+    E: core::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Transport(e) => Some(e),
+            Self::Frame(e) => Some(e),
+            Self::Spake2(e) => Some(e),
+            Self::Aead(e) => Some(e),
+            Self::PeerInfo(e) => Some(e),
+            Self::Closed | Self::WrongCode => None,
+        }
+    }
+}
 
 impl<E> From<ReadExactError<TlsError<E>>> for PairingError<E> {
     fn from(e: ReadExactError<TlsError<E>>) -> Self {
@@ -190,4 +204,32 @@ async fn recv<T: Read + Write>(
     let mut payload = vec![0u8; len];
     transport.read_exact(&mut payload).await?;
     Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use core::convert::Infallible;
+    use core::error::Error as _;
+
+    #[test]
+    fn a_failure_underneath_is_the_source() {
+        // Display names the inner failure already; `source` is what lets
+        // a report walk down to it, say to the I/O error under a pairing
+        // that died on the socket.
+        let wrapped: [PairingError<Infallible>; 5] = [
+            PairingError::Transport(TlsError::HandshakeClosed),
+            PairingError::Frame(FrameError::Version(2)),
+            PairingError::Spake2(Spake2Error::NotAPoint),
+            PairingError::Aead(AeadError::Decrypt),
+            PairingError::PeerInfo(PeerInfoError::NotUtf8),
+        ];
+        for error in &wrapped {
+            assert!(error.source().is_some(), "{error:?} hides what it wraps");
+        }
+        for error in [PairingError::<Infallible>::Closed, PairingError::WrongCode] {
+            assert!(error.source().is_none(), "{error:?} wraps nothing");
+        }
+    }
 }
