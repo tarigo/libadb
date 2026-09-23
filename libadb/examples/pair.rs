@@ -57,7 +57,8 @@ async fn run(target: &str, code: &str) -> Result<(), Box<dyn std::error::Error>>
 
     let paired = pair(&mut transport, &tls, &key, code, &mut OsRng).await?;
 
-    eprintln!("[*] paired. device guid: {}", paired.guid);
+    // The device chose these bytes; escaped, they cannot drive the terminal.
+    eprintln!("[*] paired. device guid: {}", paired.guid.escape_debug());
     eprintln!("[*] it now accepts this key on its wireless-debugging port");
     Ok(())
 }
