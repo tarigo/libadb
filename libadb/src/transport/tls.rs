@@ -372,9 +372,11 @@ mod inner {
                     Plain::Blocked => {}
                 }
                 // Reading can owe the peer a record: a key update, or
-                // the answer to a close_notify.
+                // the answer to a close_notify. A socket that will not take
+                // it is for the writer to report; what is in hand is read
+                // first.
                 harvest(&mut self.conn, &mut self.tx);
-                self.flush_tx().await?;
+                let _ = self.flush_tx().await;
 
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
@@ -721,11 +723,13 @@ mod inner {
                 };
 
                 // Settle what we owe, or what a dropped write left behind.
-                // Only what we owe is worth waiting for the write lock.
+                // Only what we owe is worth waiting for the write lock. A
+                // socket that will not take it is for the writer to report;
+                // what is in hand is read first.
                 if owes {
-                    self.shared.push().await?;
+                    let _ = self.shared.push().await;
                 } else if self.shared.has_backlog() {
-                    self.shared.settle_backlog().await?;
+                    let _ = self.shared.settle_backlog().await;
                 }
 
                 // Decrypt what is in hand before going back to the socket, or
@@ -737,8 +741,9 @@ mod inner {
                         (fed, conn.wants_write())
                     };
                     if owes {
-                        // The alert for a failed decode goes out first.
-                        self.shared.push().await?;
+                        // The alert for a failed decode goes out first, if
+                        // the socket still takes it.
+                        let _ = self.shared.push().await;
                     }
                     if fed.map_err(TlsError::Tls)? > 0 {
                         continue;
