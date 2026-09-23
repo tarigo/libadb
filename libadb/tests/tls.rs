@@ -145,6 +145,19 @@ struct DeviceReport {
     received: Vec<u8>,
     /// Whether the handshake completed on the device's side.
     handshake_ok: bool,
+    /// Whether the device turned the host's certificate down.
+    refused_key: bool,
+}
+
+/// Whether a device-side failure was the device's own verifier turning
+/// the host's certificate down, rather than anything else going wrong.
+fn refused_the_key(error: &std::io::Error) -> bool {
+    matches!(
+        error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        Some(rustls::Error::InvalidCertificate(_))
+    )
 }
 
 /// Start a device that demands TLS. It answers whatever the host sends
@@ -165,6 +178,7 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
             client_spki: None,
             received: Vec::new(),
             handshake_ok: false,
+            refused_key: false,
         };
 
         // The handshake runs on the first read.
@@ -183,8 +197,8 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
                 let _ = tls.write_all(&echo);
                 let _ = tls.flush();
             }
-            Err(_) => {
-                report.handshake_ok = false;
+            Err(e) => {
+                report.refused_key = refused_the_key(&e);
             }
         }
         report
@@ -257,24 +271,25 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
     let stream = rt::connect(addr).await;
     let mut transport = MaybeTls::plain(rt::wrap(stream));
 
-    let handshake = transport.start_tls(&client_config(), &[]).await;
+    // The certificate leaves in the host's last flight, so the device
+    // cannot have judged it yet.
+    transport
+        .start_tls(&client_config(), &[])
+        .await
+        .expect("the handshake completes on the host's side");
     let mut buf = [0u8; 64];
-    let outcome = match handshake {
-        // The usual case: the handshake "succeeded" and the refusal is
-        // waiting in the stream.
-        Ok(()) => transport.read(&mut buf).await.map(|_| ()),
-        // Some timings surface it during the handshake instead.
-        Err(e) => Err(e),
-    };
-
-    let Err(err) = outcome else {
+    let Err(err) = transport.read(&mut buf).await else {
         panic!("a device that refused the key must not hand out a working session");
     };
+
     assert!(
-        err.is_key_rejected(),
-        "the refusal must be recognised as one, got {err:?}"
+        matches!(err, TlsError::Tls(rustls::Error::AlertReceived(_))) && err.is_key_rejected(),
+        "the refusal must arrive as an alert and be recognised as one, got {err:?}"
     );
-    let _ = device.join();
+    assert!(
+        device.join().unwrap().refused_key,
+        "the device turned the key down itself"
+    );
 }
 }
 
@@ -390,6 +405,7 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
         }
     });
     let stuck_at = stalled(&written).await;
+    assert!(stuck_at > 0, "the writer never got going, so nothing is tested");
 
     steps.send(Step::Say(b"hello")).unwrap();
     let mut buf = [0u8; 16];
@@ -779,6 +795,8 @@ struct HandshakeReport {
     /// Whether the host repeated its CNXN inside the session. It must
     /// not: the device speaks first there.
     repeated_cnxn: bool,
+    /// Whether the device turned the host's certificate down.
+    refused_key: bool,
 }
 
 /// A device that demands TLS and then talks ADB inside it.
@@ -804,16 +822,15 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
             host_stls: (arg0, arg1),
             host_stls_payload: payload.len(),
             repeated_cnxn: false,
+            refused_key: false,
         };
 
         // From here on, TLS.
         let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         // The device speaks first inside the session.
-        if tls
-            .write_all(&header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER))
-            .is_err()
-        {
+        if let Err(e) = tls.write_all(&header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER)) {
+            report.refused_key = refused_the_key(&e);
             return report;
         }
         let _ = tls.flush();
@@ -876,7 +893,12 @@ async fn a_key_the_device_will_not_have_is_named_as_such() {
         matches!(err, Error::Auth(libadb::error::AuthError::TlsKeyNotTrusted)),
         "expected TlsKeyNotTrusted, got {err:?}"
     );
-    let _ = device.join();
+    // And it was the device's verdict on the key, not some other way of
+    // coming to an end, which the connect path would read the same way.
+    assert!(
+        device.join().unwrap().refused_key,
+        "the device turned the key down itself"
+    );
 }
 }
 
@@ -979,37 +1001,38 @@ fn test_auth() -> AdbKey {
 // Against a real device, when one is offered
 // ---------------------------------------------------------------------
 
-/// Point `LIBADB_TLS_DEVICE` at a wireless-debugging port to run these:
+/// Point `LIBADB_TLS_DEVICE` at a wireless-debugging port and ask for
+/// the ignored tests to run these:
 ///
 /// ```text
-/// LIBADB_TLS_DEVICE=192.168.1.5:41234 cargo test --features tokio,tls,host-keys --test tls
+/// LIBADB_TLS_DEVICE=192.168.1.5:41234 cargo test --features tokio,tls,host-keys --test tls -- --ignored
 /// ```
 ///
 /// They need a device whose store already holds `~/.android/adbkey`,
-/// which is any device that has ever been authorised over USB. Without
-/// the variable they do nothing, so CI is unaffected.
+/// which is any device that has ever been authorised over USB. Left
+/// alone they show as ignored, not as passed.
 #[cfg(feature = "host-keys")]
-fn device_address() -> Option<SocketAddr> {
+fn device_address() -> SocketAddr {
     std::env::var("LIBADB_TLS_DEVICE")
-        .ok()?
+        .expect("LIBADB_TLS_DEVICE names the device's wireless-debugging port")
         .parse()
-        .map_err(|e| panic!("LIBADB_TLS_DEVICE is not an address: {e}"))
-        .ok()
+        .expect("LIBADB_TLS_DEVICE is HOST:PORT")
 }
 
 #[cfg(feature = "host-keys")]
 async fn real_device_key() -> AdbKey {
     let home = std::env::var("HOME").expect("HOME");
     let dir = std::path::PathBuf::from(home).join(".android");
-    libadb::keys::store::load_or_generate(&dir, &mut OsRng, "libadb@test").unwrap()
+    // Load, never generate: a fresh key is one no device has seen.
+    libadb::keys::store::load(&dir, &mut OsRng, "libadb@test")
+        .expect("~/.android/adbkey, the key a USB prompt approved")
 }
 
 rt_test! {
 #[cfg(feature = "host-keys")]
+#[ignore = "needs a device: set LIBADB_TLS_DEVICE and pass --ignored"]
 async fn a_real_device_serves_a_split_connection_over_tls() {
-    let Some(addr) = device_address() else {
-        return;
-    };
+    let addr = device_address();
     // The split halves are a code path of their own, with their own
     // locking, so a live device is worth the trouble here even though
     // the local server already covers the unsplit one.

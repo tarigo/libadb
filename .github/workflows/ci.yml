@@ -100,6 +100,8 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # A test that hangs should fail the run, not hold it for six hours.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -121,6 +123,7 @@ jobs:
 
   test_ffi:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -146,6 +149,8 @@ jobs:
   # write token but never checks out or executes anything from the repo.
   coverage:
     runs-on: ubuntu-latest
+    # Instrumented, so slower; a hang still fails the run.
+    timeout-minutes: 30
     permissions:
       contents: read
     outputs:
