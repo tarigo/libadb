@@ -25,6 +25,7 @@ use libadb::keys::rsa::rand_core::OsRng;
 use libadb::pairing::pair;
 use libadb::tls::{TlsClientConfig, TlsIdentity};
 use libadb::transport::tls::MaybeTls;
+use libadb::uri::{self, Uri};
 
 #[cfg(feature = "tokio")]
 type Rt = libadb::transport::runtime::Tokio;
@@ -35,10 +36,11 @@ type Rt = libadb::transport::runtime::Smol;
 mod adb_key_auth;
 
 async fn run(target: &str, code: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (host, port) = target
-        .rsplit_once(':')
-        .ok_or("expected HOST:PORT, e.g. 192.168.1.5:37421")?;
-    let port: u16 = port.parse().map_err(|_| "port is not a number")?;
+    // The crate's own parser, for the brackets around an IPv6 address.
+    let uri = format!("tcp://{target}");
+    let Ok(Uri::Tcp { host, port }) = uri::parse(&uri) else {
+        return Err("expected HOST:PORT, e.g. 192.168.1.5:37421 or [fe80::1]:37421".into());
+    };
     // Here and not in the library, which also pairs with the password
     // from a QR code. A typo caught now never reaches the device, which
     // would count it against its twenty attempts.
@@ -51,7 +53,7 @@ async fn run(target: &str, code: &str) -> Result<(), Box<dyn std::error::Error>>
     let identity = TlsIdentity::from_key(&key, &mut OsRng)?;
     let tls = TlsClientConfig::adb(&identity)?;
 
-    eprintln!("[*] pairing with {host}:{port} ...");
+    eprintln!("[*] pairing with {target} ...");
     let socket = <Rt as libadb::transport::runtime::Runtime>::connect_tcp(host, port).await?;
     let mut transport = MaybeTls::plain(socket);
 
