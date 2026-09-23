@@ -97,8 +97,16 @@ mod inner {
         }
     }
 
+    /// Keeps [`StartTls`] to this crate's transports.
+    mod sealed {
+        pub trait Sealed {}
+    }
+
     /// A transport that can put a TLS session on top of itself.
-    pub trait StartTls: Read + Write {
+    ///
+    /// Sealed: only this crate's transports implement it, so a method
+    /// can be added later without breaking anyone.
+    pub trait StartTls: Read + Write + sealed::Sealed {
         /// Start TLS 1.3 as the client and carry the handshake through.
         ///
         /// `pending` is ciphertext already taken off the wire by a
@@ -238,7 +246,7 @@ mod inner {
     }
 
     /// A TLS session over one transport, before anyone splits it.
-    pub struct TlsSession<T> {
+    pub(crate) struct TlsSession<T> {
         inner: T,
         conn: Box<ClientConnection>,
         /// Ciphertext read off the wire and not yet decrypted. A field
@@ -506,6 +514,8 @@ mod inner {
         }
     }
 
+    impl<T: Read + Write> sealed::Sealed for MaybeTls<T> {}
+
     impl<T: Read + Write> StartTls for MaybeTls<T> {
         async fn start_tls(
             &mut self,
@@ -547,6 +557,13 @@ mod inner {
                 State::Broken => false,
             }
         }
+    }
+
+    impl<T, U> sealed::Sealed for Transport<MaybeTls<T>, U>
+    where
+        T: Read + Write,
+        U: Read + Write,
+    {
     }
 
     impl<T, U> StartTls for Transport<MaybeTls<T>, U>

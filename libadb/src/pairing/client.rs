@@ -91,6 +91,7 @@ impl<E> From<ReadExactError<TlsError<E>>> for PairingError<E> {
 
 /// What the device tells us once it has taken the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Paired {
     /// The device's GUID, which is also the name it advertises its
     /// connect port under.
