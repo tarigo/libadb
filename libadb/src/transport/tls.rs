@@ -210,8 +210,10 @@ mod inner {
             Ok(0) => Plain::Eof,
             Ok(n) => Plain::Got(n),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Plain::Blocked,
-            // A peer gone without `close_notify`. To the layer above that is
-            // still the end of the stream.
+            // Its only other failure: `read_tls` met the end of the stream
+            // without a `close_notify`, which to the layer above is still
+            // the end of the stream. A broken record never shows here; it
+            // fails in `process_new_packets`.
             Err(_) => Plain::Eof,
         }
     }
