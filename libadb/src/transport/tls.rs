@@ -122,6 +122,13 @@ mod inner {
     }
 
     /// Alerts a device sends when it will not have the key.
+    ///
+    /// adbd refuses from its certificate callback, which BoringSSL
+    /// answers with `certificate_unknown`; the rest are the other
+    /// certificate alerts a TLS stack might pick instead. Generic ones
+    /// such as `handshake_failure` or `decrypt_error` stay out: they
+    /// mean the handshake broke for some other reason, and calling that
+    /// a refusal would send the user off to pair for nothing.
     fn alert_means_rejection(alert: rustls::AlertDescription) -> bool {
         use rustls::AlertDescription as A;
         matches!(
@@ -134,8 +141,6 @@ mod inner {
                 | A::CertificateUnknown
                 | A::UnknownCA
                 | A::AccessDenied
-                | A::DecryptError
-                | A::HandshakeFailure
         )
     }
 

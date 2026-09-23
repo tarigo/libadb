@@ -479,6 +479,35 @@ async fn a_broken_record_fails_the_read_rather_than_ending_it() {
 }
 }
 
+#[test]
+fn only_an_alert_about_the_certificate_counts_as_a_refused_key() {
+    // adbd turns a key away with `certificate_unknown`. A generic alert
+    // is a handshake that failed for some other reason, and reporting
+    // it as a refused key would have the user pair a key that is fine.
+    use rustls::AlertDescription as A;
+    let refused = |alert: A| {
+        TlsError::<core::convert::Infallible>::Tls(rustls::Error::AlertReceived(alert))
+            .is_key_rejected()
+    };
+
+    for alert in [
+        A::CertificateUnknown,
+        A::BadCertificate,
+        A::CertificateRequired,
+        A::AccessDenied,
+    ] {
+        assert!(refused(alert), "{alert:?} is a refusal");
+    }
+    for alert in [
+        A::HandshakeFailure,
+        A::DecryptError,
+        A::ProtocolVersion,
+        A::InternalError,
+    ] {
+        assert!(!refused(alert), "{alert:?} says nothing about the key");
+    }
+}
+
 /// A transport whose every write takes nothing.
 struct TakesNothing;
 
