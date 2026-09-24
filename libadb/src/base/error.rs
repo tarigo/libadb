@@ -183,8 +183,8 @@ impl fmt::Display for ProtocolError {
             Self::InvalidChecksum => f.write_str("data checksum mismatch"),
             Self::InvalidCommand(c) => f.write_fmt(format_args!("invalid command {}", c)),
             Self::PayloadTooLarge => f.write_str("payload exceeds max_payload"),
-            // No word of `connect_tls`: this text also reaches the C
-            // callers of libadb-ffi, which has no TLS to offer them.
+            // No word of `connect_tls`: a build without `tls` has none
+            // to offer, and libadb-ffi words its own advice for C.
             Self::TlsRequired => f.write_str(
                 "device requires a TLS handshake (Android 11+ wireless debugging) \
                  that this connection does not do; connect over USB, \
