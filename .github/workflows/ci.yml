@@ -79,7 +79,8 @@ jobs:
           - rusb
           - nusb,rusb
           - tls
-          - tls,usb
+          - pairing
+          - pairing,usb
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -129,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", usb, rusb, tls]
+        features: ["", usb, rusb, tls, pairing]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -269,6 +270,7 @@ jobs:
           - { package: libadb-ffi, features: "rusb" }
           - { package: libadb-ffi, features: "nusb" }
           - { package: libadb-ffi, features: "tls" }
+          - { package: libadb-ffi, features: "pairing" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -302,6 +304,7 @@ jobs:
           - { package: libadb-ffi, features: "rusb" }
           - { package: libadb-ffi, features: "nusb" }
           - { package: libadb-ffi, features: "tls" }
+          - { package: libadb-ffi, features: "pairing" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87.0

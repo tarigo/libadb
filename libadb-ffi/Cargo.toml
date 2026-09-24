@@ -13,7 +13,7 @@ keywords = ["adb", "android", "ffi", "c-api"]
 categories = ["api-bindings", "external-ffi-bindings"]
 
 [package.metadata.docs.rs]
-features = ["usb", "tls"]
+features = ["usb", "pairing"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -29,6 +29,12 @@ embedded-io-async = { version = "0.6", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The pairing test writes the device's half of the cipher out again
+# rather than borrowing the crate's, so both sides agree on the key
+# derivation and the nonce independently.
+aes-gcm = { version = "0.10", features = ["aes", "alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 # TCP support is always compiled in and runs on the crate's own
 # blocking executor — no async runtime is linked. USB backends are
@@ -43,3 +49,7 @@ usb = ["nusb"]
 # (Android 11+) with TLS 1.3, presenting the caller's key in a
 # certificate. Opt-in like the core's: it pulls in rustls and ring.
 tls = ["libadb/tls"]
+# `pairing` adds `adb_pair`, the `adb pair` exchange. It implies `tls`:
+# the exchange runs inside a TLS session and presents the same
+# certificate a connection later does.
+pairing = ["tls", "libadb/pairing"]

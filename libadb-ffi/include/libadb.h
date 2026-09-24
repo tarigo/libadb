@@ -45,6 +45,10 @@ typedef enum {
      * without the `tls` feature, or the key sits behind an
      * adb_authenticator_t. adb_last_error() says which. */
     ADB_ERR_TLS_REQUIRED    = 11,
+    /* adb_pair(): the device did not take the key. The code did not
+     * match, or the device ended the exchange itself (dialog dismissed,
+     * attempts used up); adb_last_error() says which. */
+    ADB_ERR_PAIRING         = 12,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
 
@@ -172,6 +176,63 @@ const char *adb_key_public_key(const adb_key_t *key);
 
 /* Release a handle from adb_key_load_or_generate(). NULL is a no-op. */
 void adb_key_free(adb_key_t *key);
+
+/* ---- pairing (Android 11+ wireless debugging) ---------------------
+ *
+ * Present only when libadb-ffi is built with --features pairing: the
+ * symbol does not exist otherwise, and a program calling it fails to
+ * link rather than at run time.
+ */
+
+/*
+ * Pair with a device: put the caller's key into its trusted store
+ * through "Pair device with pairing code" on the device's Wireless
+ * debugging screen (SPAKE2 inside TLS, as `adb pair` does). A key the
+ * device already trusts — one confirmed at a USB prompt — needs none
+ * of this; adbd checks both against the same store.
+ *
+ *   uri            "tcp://HOST:PORT": the *pairing* port shown beside
+ *                  the code. It is not the port the device connects
+ *                  on, it changes each time the dialog opens, and it
+ *                  stops listening once one pairing succeeds. usb://
+ *                  is refused with ADB_ERR_INVALID_URI.
+ *   priv_key_pem   PKCS#8 PEM RSA private key, as adb_connect() takes it
+ *   pub_key        the matching ADB-format public key line. The text
+ *                  after the base64 blob ("user@host") is the name the
+ *                  device lists this host under. A blob that does not
+ *                  belong to the private key is ADB_ERR_INVALID_ARG.
+ *   code           the code on the dialog: six digits when typed, or
+ *                  the password a QR code carried. Only emptiness is
+ *                  checked here — validate a typed code yourself, since
+ *                  a wrong one costs the device one of its attempts,
+ *                  and it stops serving after twenty.
+ *   guid, guid_cap, out_guid_len
+ *                  receive the device's GUID — the name it announces
+ *                  its connect port under over DNS-SD
+ *                  (_adb-tls-connect._tcp) — not NUL-terminated, with
+ *                  the truncate-and-report convention of
+ *                  adb_connection_features(); either pointer may be
+ *                  NULL.
+ *
+ * Returns ADB_OK once the device has stored the key, whatever became
+ * of the GUID copy: by then the pairing is done and the port is gone,
+ * so a short buffer is no reason to fail. From then on the same
+ * priv_key_pem / pub_key connect over TLS through adb_connect().
+ *
+ * ADB_ERR_PAIRING is the device saying no (wrong code, or it ended the
+ * exchange); ADB_ERR_CONNECT means nothing answered at that address,
+ * typically a pairing port that has already closed; ADB_ERR_IO is a
+ * connection that broke part way. Blocks until the exchange ends;
+ * there is no timeout.
+ */
+adb_status_t adb_pair(
+    const char *uri,
+    const char *priv_key_pem,
+    const char *pub_key,
+    const char *code,
+    uint8_t    *guid,
+    size_t      guid_cap,
+    size_t     *out_guid_len);
 
 /* Set receive/send timeouts on a tcp:// connection, in milliseconds;
  * 0 disables the corresponding timeout. USB transports have no such

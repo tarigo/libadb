@@ -32,16 +32,21 @@ impl FfiAuthenticator {
         })
     }
 
-    /// The TLS profile this key connects with: a self-signed certificate
-    /// carrying its public key. Building one signs the certificate, so
-    /// it is done once per connect, and only when a TCP device may ask
-    /// for it.
+    /// The TLS profile this key connects with. Built once per connect,
+    /// and only when a TCP device may ask for it.
     #[cfg(feature = "tls")]
     pub(crate) fn tls_config(&self) -> Result<TlsClientConfig, String> {
-        let identity =
-            TlsIdentity::from_key(&self.key, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
-        TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))
+        tls_config_for(&self.key)
     }
+}
+
+/// The TLS profile `key` connects with: a self-signed certificate
+/// carrying its public key. Building one signs the certificate, which
+/// is the slow part of a TLS connection.
+#[cfg(feature = "tls")]
+pub(crate) fn tls_config_for(key: &AdbKey) -> Result<TlsClientConfig, String> {
+    let identity = TlsIdentity::from_key(key, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
+    TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))
 }
 
 impl Authenticator for FfiAuthenticator {
