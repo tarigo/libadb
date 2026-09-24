@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 
@@ -13,10 +13,13 @@ pub const CMD_OPEN: u32 = 0x4e45_504f;
 pub const CMD_OKAY: u32 = 0x5941_4b4f;
 pub const CMD_WRTE: u32 = 0x4554_5257;
 pub const CMD_CLSE: u32 = 0x4553_4c43;
+pub const CMD_STLS: u32 = 0x534c_5453;
 
 /// Protocol version that skips payload checksums, so neither side has to
 /// compute them.
 pub const VERSION: u32 = 0x0100_0001;
+/// The one STLS version there is.
+pub const STLS_VERSION: u32 = 0x0100_0000;
 /// Small enough that a frame has to be split across many WRTEs, which
 /// is where interleaving shows up.
 pub const MAX_PAYLOAD: u32 = 1024;
@@ -34,7 +37,7 @@ pub fn header(cmd: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
     v
 }
 
-pub fn read_packet(stream: &mut TcpStream) -> Option<(u32, u32, Vec<u8>)> {
+pub fn read_packet<S: Read>(stream: &mut S) -> Option<(u32, u32, Vec<u8>)> {
     let mut h = [0u8; 24];
     stream.read_exact(&mut h).ok()?;
     let cmd = u32::from_le_bytes([h[0], h[1], h[2], h[3]]);
@@ -45,6 +48,27 @@ pub fn read_packet(stream: &mut TcpStream) -> Option<(u32, u32, Vec<u8>)> {
         stream.read_exact(&mut payload).ok()?;
     }
     Some((cmd, arg0, payload))
+}
+
+/// A device that answers CNXN with STLS and then only waits for the
+/// host to hang up, as one that got no STLS back would.
+pub fn fake_adbd_demanding_tls() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (cmd, _, _) = read_packet(&mut stream).expect("the host opens with CNXN");
+        assert_eq!(cmd, CMD_CNXN, "the host opens with CNXN");
+        stream
+            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .unwrap();
+        // Whatever follows is not a packet — a host able to answer would
+        // send its own STLS and a ClientHello — so it is drained as
+        // bytes rather than parsed as a length.
+        let mut sink = [0u8; 4096];
+        while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+    });
+    (addr, handle)
 }
 
 /// A device that accepts one connection, opens one channel and records

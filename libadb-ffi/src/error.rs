@@ -3,7 +3,7 @@ use alloc::format;
 use core::cell::RefCell;
 use core::ffi::c_char;
 
-use libadb::base::error::{Error, ReverseError};
+use libadb::base::error::{Error, ProtocolError, ReverseError};
 
 use crate::transport::FfiConnectError;
 
@@ -25,8 +25,25 @@ pub enum AdbStatus {
     /// The device's reverse rule service refused the request; the
     /// device's own message is in [`adb_last_error`].
     Reverse = 10,
+    /// The device answered the handshake with `STLS` (Android 11+
+    /// wireless debugging) and this call cannot start TLS: the library
+    /// was built without the `tls` feature, or the key sits behind an
+    /// [`adb_authenticator_t`](crate::adb_authenticator_t). The message
+    /// says which.
+    TlsRequired = 11,
     Internal = 255,
 }
+
+/// The core's advice names `Connection::connect_tls`, which a C caller
+/// cannot follow; this is the advice that applies to the C API.
+#[cfg(not(feature = "tls"))]
+const TLS_REQUIRED: &str = "device requires TLS (Android 11+ wireless debugging): \
+    build libadb-ffi with the `tls` feature, connect over USB, \
+    or switch the device to plain TCP with `adb tcpip 5555`";
+#[cfg(feature = "tls")]
+const TLS_REQUIRED: &str = "device requires TLS (Android 11+ wireless debugging), \
+    which only adb_connect with the private key can start: \
+    adb_connect_with_authenticator stays in the clear";
 
 std::thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
@@ -73,6 +90,10 @@ pub(crate) fn fail_ffi_connect(e: FfiConnectError) -> AdbStatus {
 
 pub(crate) fn fail_error<E: core::fmt::Display>(e: Error<E>) -> AdbStatus {
     let status = match &e {
+        Error::Protocol(ProtocolError::TlsRequired) => {
+            set(TLS_REQUIRED);
+            return AdbStatus::TlsRequired;
+        }
         Error::Io(_) | Error::UnexpectedEof => AdbStatus::Io,
         Error::Auth(_) => AdbStatus::Auth,
         Error::Protocol(_) => AdbStatus::Protocol,
