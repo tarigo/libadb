@@ -8,6 +8,8 @@ use core::future::Future;
 use libadb::base::auth::Authenticator;
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::AdbKey;
+#[cfg(feature = "tls")]
+use libadb::tls::{TlsClientConfig, TlsIdentity};
 
 use crate::error::AdbStatus;
 
@@ -28,6 +30,17 @@ impl FfiAuthenticator {
             key,
             public_key: normalize_public_key(pub_key),
         })
+    }
+
+    /// The TLS profile this key connects with: a self-signed certificate
+    /// carrying its public key. Building one signs the certificate, so
+    /// it is done once per connect, and only when a TCP device may ask
+    /// for it.
+    #[cfg(feature = "tls")]
+    pub(crate) fn tls_config(&self) -> Result<TlsClientConfig, String> {
+        let identity =
+            TlsIdentity::from_key(&self.key, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
+        TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))
     }
 }
 
@@ -59,6 +72,11 @@ fn normalize_public_key(pub_key: &[u8]) -> Vec<u8> {
 /// the actual signature length through `out_length`. Returning any
 /// non-[`AdbStatus::Ok`] value aborts authentication and is reported
 /// to the caller as [`AdbStatus::Auth`].
+///
+/// It signs the AUTH token only. TLS 1.3 client authentication needs
+/// an RSA-PSS signature over the handshake transcript and a
+/// certificate, neither of which this callback can supply, so a
+/// connection through it stays in the clear.
 pub type AdbSignFn = unsafe extern "C" fn(
     user_data: *mut c_void,
     token: *const u8,
