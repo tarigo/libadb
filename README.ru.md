@@ -181,8 +181,10 @@ let conn = Connection::<_>::connect_with_config(
 ## Ограничения
 
 - Беспроводной отладке Android 11+ нужна фича `tls` и
-  `Connection::connect_tls`. Без неё устройство отвечает на рукопожатие
-  пакетом `STLS`, и `connect` возвращает `ProtocolError::TlsRequired`.
+  `Connection::connect_tls`; в C ABI — собственная фича `tls` у
+  `libadb-ffi` и обычный `adb_connect`. Без неё устройство отвечает на
+  рукопожатие пакетом `STLS`, и `connect` возвращает
+  `ProtocolError::TlsRequired` (из C — `ADB_ERR_TLS_REQUIRED`).
 - Сопряжению `adb pair` нужна фича `pairing`. Ключ, которому устройство
   уже доверяет, подтверждённый по USB, принимается по TLS и без неё:
   adbd сверяет оба с одним хранилищем.
@@ -258,13 +260,17 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
   `~/.android/adbkey` либо создать его при первом запуске, без `adb`
 - пользовательские аутентификаторы (`adb_connect_with_authenticator`) —
   когда приватный ключ живёт вне процесса (HSM, удалённый подписант)
+- беспроводная отладка Android 11+ (`--features tls`) — `adb_connect`
+  отвечает на `STLS` устройства сессией TLS 1.3 с тем же ключом;
+  `adb_connect_with_authenticator` остаётся в открытую
 - открытие/чтение/запись/закрытие канала
 - сессия `shell_v2` с кадрированием, stdin и ресайзом PTY
 - структурированные запросы фичей (`adb_connection_has_feature`,
   `adb_feature_name`, `adb_connection_features`)
 
 Сборка (async-рантайм не линкуется вовсе; для USB-транспорта добавьте
-`--features usb` или `--features rusb`):
+`--features usb` или `--features rusb`, для беспроводной отладки —
+`--features tls`):
 
 ```sh
 cargo build -p libadb-ffi
