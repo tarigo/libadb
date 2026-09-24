@@ -4,6 +4,8 @@ use core::cell::RefCell;
 use core::ffi::c_char;
 
 use libadb::base::error::{Error, ProtocolError, ReverseError};
+#[cfg(feature = "pairing")]
+use libadb::pairing::{AeadError, PairingError};
 
 use crate::transport::FfiConnectError;
 
@@ -31,6 +33,10 @@ pub enum AdbStatus {
     /// [`adb_authenticator_t`](crate::adb_authenticator_t). The message
     /// says which.
     TlsRequired = 11,
+    /// `adb_pair`: the device did not take the key. The code did not
+    /// match, or the device ended the exchange itself (dialog
+    /// dismissed, attempts used up); [`adb_last_error`] says which.
+    Pairing = 12,
     Internal = 255,
 }
 
@@ -77,6 +83,39 @@ pub(crate) fn fail_auth(msg: impl core::fmt::Display) -> AdbStatus {
 pub(crate) fn fail_internal(msg: impl core::fmt::Display) -> AdbStatus {
     set(msg);
     AdbStatus::Internal
+}
+
+#[cfg(feature = "pairing")]
+pub(crate) fn fail_invalid_uri(msg: impl core::fmt::Display) -> AdbStatus {
+    set(msg);
+    AdbStatus::InvalidUri
+}
+
+/// The verdict on a pairing that did not end with the key on the
+/// device.
+#[cfg(feature = "pairing")]
+pub(crate) fn fail_pairing(e: PairingError<std::io::Error>) -> AdbStatus {
+    let status = match &e {
+        // The device's block arrived and did not open: the code did
+        // not match.
+        PairingError::WrongCode => AdbStatus::Pairing,
+        // EOF mid-exchange is the device ending it — dialog dismissed,
+        // attempts used up — a verdict, not a network fault that a
+        // retry would cure.
+        PairingError::Closed => AdbStatus::Pairing,
+        // `pair` folds this into `WrongCode` today; kept for the day
+        // it does not.
+        PairingError::Aead(AeadError::Decrypt) => AdbStatus::Pairing,
+        // Our own cipher failing on our own side.
+        PairingError::Aead(_) => AdbStatus::Internal,
+        PairingError::Transport(_) => AdbStatus::Io,
+        PairingError::Frame(_) | PairingError::Spake2(_) | PairingError::PeerInfo(_) => {
+            AdbStatus::Protocol
+        }
+        _ => AdbStatus::Internal,
+    };
+    set(e);
+    status
 }
 
 pub(crate) fn fail_ffi_connect(e: FfiConnectError) -> AdbStatus {

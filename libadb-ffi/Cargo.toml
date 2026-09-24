@@ -13,7 +13,7 @@ keywords = ["adb", "android", "ffi", "c-api"]
 categories = ["api-bindings", "external-ffi-bindings"]
 
 [package.metadata.docs.rs]
-features = ["usb", "tls"]
+features = ["usb", "pairing"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -43,3 +43,7 @@ usb = ["nusb"]
 # (Android 11+) with TLS 1.3, presenting the caller's key in a
 # certificate. Opt-in like the core's: it pulls in rustls and ring.
 tls = ["libadb/tls"]
+# `pairing` adds `adb_pair`, the `adb pair` exchange. It implies `tls`:
+# the exchange runs inside a TLS session and presents the same
+# certificate a connection later does.
+pairing = ["tls", "libadb/pairing"]
