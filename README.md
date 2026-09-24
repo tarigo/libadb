@@ -178,8 +178,10 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
 ## Limitations
 
 - Android 11+ wireless debugging needs the `tls` feature and
-  `Connection::connect_tls`. Without it the device answers the handshake
-  with `STLS` and `connect` fails with `ProtocolError::TlsRequired`.
+  `Connection::connect_tls`; in the C ABI, `libadb-ffi`'s own `tls`
+  feature and plain `adb_connect`. Without it the device answers the
+  handshake with `STLS` and `connect` fails with
+  `ProtocolError::TlsRequired` (`ADB_ERR_TLS_REQUIRED` from C).
 - `adb pair` needs the `pairing` feature. A key the device already
   trusts, one approved at a USB prompt, is accepted over TLS without it:
   adbd checks both against the same store.
@@ -251,13 +253,17 @@ transport so callers see a fully blocking API. The header lives at
   create one on first run, no `adb` installation needed
 - caller-supplied authenticators (`adb_connect_with_authenticator`) —
   for private keys living outside the process (HSM, remote signer)
+- Android 11+ wireless debugging (`--features tls`) — `adb_connect`
+  answers the device's `STLS` with TLS 1.3, presenting the same key;
+  `adb_connect_with_authenticator` stays in the clear
 - channel open/read/write/close
 - `shell_v2` session with framing, stdin, PTY resize
 - structured feature queries (`adb_connection_has_feature`,
   `adb_feature_name`, `adb_connection_features`)
 
 Build (no async runtime is linked; add `--features usb` or
-`--features rusb` for USB transport support):
+`--features rusb` for USB transport support, `--features tls` for
+wireless debugging):
 
 ```sh
 cargo build -p libadb-ffi
