@@ -50,6 +50,7 @@ use libadb::base::channel::ChannelId;
 use libadb::base::connection::Connection;
 use libadb::reverse;
 use libadb::split::{Reader, SplitIncoming, Writer};
+use libadb::Splittable;
 
 use transport::FfiTransport;
 
@@ -65,9 +66,13 @@ pub use shell::{
     adb_shell_set_window_size, adb_shell_t, adb_shell_write_stdin,
 };
 
-pub(crate) type FfiReader = Reader<FfiTransport, FfiTransport>;
-pub(crate) type FfiWriter = Writer<FfiTransport>;
-pub(crate) type FfiIncoming = SplitIncoming<FfiTransport>;
+// The halves a connection splits into: with TLS in the picture they are
+// no longer the transport itself.
+pub(crate) type FfiReadHalf = <FfiTransport as Splittable>::ReadHalf;
+pub(crate) type FfiWriteHalf = <FfiTransport as Splittable>::WriteHalf;
+pub(crate) type FfiReader = Reader<FfiReadHalf, FfiWriteHalf>;
+pub(crate) type FfiWriter = Writer<FfiWriteHalf>;
+pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 
 fn encode_channel_id(ch: ChannelId) -> u64 {
     ((ch.local_id() as u64) << 32) | (ch.slot() as u32 as u64)
@@ -211,13 +216,9 @@ unsafe fn handshake<A: Authenticator>(
     banner_bytes: &[u8],
     out: *mut *mut adb_connection_t,
 ) -> AdbStatus {
-    let t = match transport::connect(uri) {
-        Ok(t) => t,
+    let (t, tcp_socket) = match transport::connect(uri) {
+        Ok(opened) => opened,
         Err(e) => return error::fail_ffi_connect(e),
-    };
-    let tcp_socket = match transport::tcp_socket_of(&t) {
-        Ok(s) => s,
-        Err(e) => return error::fail_ffi_connect(transport::FfiConnectError::Tcp(e)),
     };
 
     let conn = ffi_try!(Connection::connect_with_raw_banner(t, auth, banner_bytes));

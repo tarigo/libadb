@@ -13,7 +13,7 @@ keywords = ["adb", "android", "ffi", "c-api"]
 categories = ["api-bindings", "external-ffi-bindings"]
 
 [package.metadata.docs.rs]
-features = ["usb"]
+features = ["usb", "tls"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -39,3 +39,7 @@ default = []
 nusb = ["libadb/nusb"]
 rusb = ["libadb/rusb"]
 usb = ["nusb"]
+# `tls` lets `adb_connect` answer a wireless-debugging device's STLS
+# (Android 11+) with TLS 1.3, presenting the caller's key in a
+# certificate. Opt-in like the core's: it pulls in rustls and ring.
+tls = ["libadb/tls"]
