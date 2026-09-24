@@ -29,6 +29,12 @@ embedded-io-async = { version = "0.6", features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The pairing test writes the device's half of the cipher out again
+# rather than borrowing the crate's, so both sides agree on the key
+# derivation and the nonce independently.
+aes-gcm = { version = "0.10", features = ["aes", "alloc"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 # TCP support is always compiled in and runs on the crate's own
 # blocking executor — no async runtime is linked. USB backends are
