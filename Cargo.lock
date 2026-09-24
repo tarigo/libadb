@@ -799,9 +799,12 @@ dependencies = [
 name = "libadb-ffi"
 version = "0.5.0"
 dependencies = [
+ "aes-gcm",
  "embedded-io",
  "embedded-io-async",
+ "hkdf",
  "libadb",
+ "sha2",
  "tempfile",
 ]
 
