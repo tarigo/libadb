@@ -12,7 +12,7 @@
 # Feature sets. CI keeps its own matrix for parallelism; these are the
 # lists a full local run walks.
 lib_features := "tokio smol tokio,usb tokio,rusb tokio,smol tokio,nusb,rusb smol,usb smol,rusb tokio,host-keys smol,host-keys host-keys tokio,tls,host-keys smol,tls,host-keys tokio,pairing,host-keys tokio,tls smol,pairing"
-ffi_features := "usb rusb nusb,rusb tls tls,usb"
+ffi_features := "usb rusb nusb,rusb tls pairing pairing,usb"
 # Documentation is built per narrow combination: an intra-doc link to a
 # type behind another feature only breaks when that feature is off.
 doc_features := "tokio smol tokio,rusb smol,nusb tokio,host-keys tokio,tls,host-keys tokio,pairing,host-keys tokio,smol,nusb,rusb"
@@ -167,13 +167,23 @@ all-features:
 
 # --- things that are not plain cargo ----------------------------------
 
-# Build the C example against the cdylib. `just ffi-example tls` builds
-# the library that serves a wireless-debugging port.
-ffi-example features="":
+# Build the C examples against the cdylib. `ffi_pair` links only when
+# the library has `pairing`, which also serves a wireless-debugging
+# port, so that is the default; other feature sets build `ffi_shell`
+# alone.
+ffi-example features="pairing":
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo build -p libadb-ffi --features "{{features}}"
     cc -I libadb-ffi/include -o target/ffi_shell libadb-ffi/examples/ffi_shell.c \
         -L target/debug -ladb -lpthread -ldl -lm
-    @echo "built target/ffi_shell"
+    echo "built target/ffi_shell"
+    case "{{features}}" in
+        *pairing*)
+            cc -I libadb-ffi/include -o target/ffi_pair libadb-ffi/examples/ffi_pair.c \
+                -L target/debug -ladb -lpthread -ldl -lm
+            echo "built target/ffi_pair" ;;
+    esac
 
 # How a stack is moved after its bottom changed or merged:
 #

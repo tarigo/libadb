@@ -182,9 +182,10 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
   feature and plain `adb_connect`. Without it the device answers the
   handshake with `STLS` and `connect` fails with
   `ProtocolError::TlsRequired` (`ADB_ERR_TLS_REQUIRED` from C).
-- `adb pair` needs the `pairing` feature. A key the device already
-  trusts, one approved at a USB prompt, is accepted over TLS without it:
-  adbd checks both against the same store.
+- `adb pair` needs the `pairing` feature — on `libadb-ffi` too, where
+  it adds `adb_pair`. A key the device already trusts, one approved at
+  a USB prompt, is accepted over TLS without it: adbd checks both
+  against the same store.
 - The wireless-debugging port changes every time the setting is switched
   on, and this crate does no DNS-SD, so the caller supplies it.
 - With delayed ack negotiated, an `OKAY` must carry its 4-byte credit,
@@ -256,6 +257,9 @@ transport so callers see a fully blocking API. The header lives at
 - Android 11+ wireless debugging (`--features tls`) — `adb_connect`
   answers the device's `STLS` with TLS 1.3, presenting the same key;
   `adb_connect_with_authenticator` stays in the clear
+- `adb pair` (`adb_pair`, `--features pairing`, which implies `tls`) —
+  put the key on a device that has never seen it, through its pairing
+  dialog
 - channel open/read/write/close
 - `shell_v2` session with framing, stdin, PTY resize
 - structured feature queries (`adb_connection_has_feature`,
@@ -263,16 +267,20 @@ transport so callers see a fully blocking API. The header lives at
 
 Build (no async runtime is linked; add `--features usb` or
 `--features rusb` for USB transport support, `--features tls` for
-wireless debugging):
+wireless debugging, `--features pairing` for `adb_pair` as well):
 
 ```sh
-cargo build -p libadb-ffi
+cargo build -p libadb-ffi --features pairing
 cc -I libadb-ffi/include -o ffi_shell libadb-ffi/examples/ffi_shell.c \
+   -L target/debug -ladb -lpthread -ldl -lm
+cc -I libadb-ffi/include -o ffi_pair libadb-ffi/examples/ffi_pair.c \
    -L target/debug -ladb -lpthread -ldl -lm
 ```
 
 A full interactive-shell C client is in
-[`libadb-ffi/examples/ffi_shell.c`](libadb-ffi/examples/ffi_shell.c).
+[`libadb-ffi/examples/ffi_shell.c`](libadb-ffi/examples/ffi_shell.c),
+and `adb pair` from C in
+[`libadb-ffi/examples/ffi_pair.c`](libadb-ffi/examples/ffi_pair.c).
 
 ## Layout
 
@@ -291,6 +299,7 @@ libadb-ffi/                # C ABI (cdylib + staticlib + rlib)
   src/                     C entry points + RSA Authenticator
   include/libadb.h         C header
   examples/ffi_shell.c     interactive shell client in C
+  examples/ffi_pair.c      adb pair in C
 fuzz/                      cargo-fuzz targets (excluded from workspace)
 ```
 

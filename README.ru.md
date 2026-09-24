@@ -185,9 +185,10 @@ let conn = Connection::<_>::connect_with_config(
   `libadb-ffi` и обычный `adb_connect`. Без неё устройство отвечает на
   рукопожатие пакетом `STLS`, и `connect` возвращает
   `ProtocolError::TlsRequired` (из C — `ADB_ERR_TLS_REQUIRED`).
-- Сопряжению `adb pair` нужна фича `pairing`. Ключ, которому устройство
-  уже доверяет, подтверждённый по USB, принимается по TLS и без неё:
-  adbd сверяет оба с одним хранилищем.
+- Сопряжению `adb pair` нужна фича `pairing` — и у `libadb-ffi` тоже,
+  где она добавляет `adb_pair`. Ключ, которому устройство уже доверяет,
+  подтверждённый по USB, принимается по TLS и без неё: adbd сверяет оба
+  с одним хранилищем.
 - Порт беспроводной отладки меняется при каждом включении режима, а
   обнаружения по DNS-SD в крейте нет, так что порт задаёт вызывающий.
 - При согласованном delayed ack пакет `OKAY` обязан нести 4-байтовый
@@ -263,6 +264,9 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 - беспроводная отладка Android 11+ (`--features tls`) — `adb_connect`
   отвечает на `STLS` устройства сессией TLS 1.3 с тем же ключом;
   `adb_connect_with_authenticator` остаётся в открытую
+- сопряжение `adb pair` (`adb_pair`, `--features pairing`, влечёт
+  `tls`) — положить ключ на устройство, которое его ещё не видело,
+  через диалог сопряжения
 - открытие/чтение/запись/закрытие канала
 - сессия `shell_v2` с кадрированием, stdin и ресайзом PTY
 - структурированные запросы фичей (`adb_connection_has_feature`,
@@ -270,16 +274,20 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 
 Сборка (async-рантайм не линкуется вовсе; для USB-транспорта добавьте
 `--features usb` или `--features rusb`, для беспроводной отладки —
-`--features tls`):
+`--features tls`, для `adb_pair` — `--features pairing`):
 
 ```sh
-cargo build -p libadb-ffi
+cargo build -p libadb-ffi --features pairing
 cc -I libadb-ffi/include -o ffi_shell libadb-ffi/examples/ffi_shell.c \
+   -L target/debug -ladb -lpthread -ldl -lm
+cc -I libadb-ffi/include -o ffi_pair libadb-ffi/examples/ffi_pair.c \
    -L target/debug -ladb -lpthread -ldl -lm
 ```
 
 Интерактивный shell-клиент на C целиком — в
-[`libadb-ffi/examples/ffi_shell.c`](libadb-ffi/examples/ffi_shell.c).
+[`libadb-ffi/examples/ffi_shell.c`](libadb-ffi/examples/ffi_shell.c),
+сопряжение из C — в
+[`libadb-ffi/examples/ffi_pair.c`](libadb-ffi/examples/ffi_pair.c).
 
 ## Структура
 
@@ -298,6 +306,7 @@ libadb-ffi/                # C ABI (cdylib + staticlib + rlib)
   src/                     точки входа C + RSA Authenticator
   include/libadb.h         C-заголовок
   examples/ffi_shell.c     интерактивный shell-клиент на C
+  examples/ffi_pair.c      сопряжение adb pair на C
 fuzz/                      цели cargo-fuzz (вне воркспейса)
 ```
 
