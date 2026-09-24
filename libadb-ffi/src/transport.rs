@@ -3,7 +3,7 @@ use embedded_io_async::{Read, Write};
 use std::io;
 use std::net::TcpStream;
 
-use libadb::transport::common::{Transport, TransportError};
+use libadb::transport::common::Transport;
 use libadb::uri::{self, Uri};
 use libadb::Splittable;
 
@@ -55,9 +55,25 @@ impl Splittable for BlockingTcp {
     }
 }
 
-pub(crate) type FfiTransport = Transport<BlockingTcp, Usb>;
-pub(crate) type FfiTransportError =
-    TransportError<io::Error, <Usb as embedded_io::ErrorType>::Error>;
+/// The TCP half: able to start TLS when the build can answer STLS.
+#[cfg(feature = "tls")]
+pub(crate) type FfiTcp = libadb::transport::tls::MaybeTls<BlockingTcp>;
+#[cfg(not(feature = "tls"))]
+pub(crate) type FfiTcp = BlockingTcp;
+
+pub(crate) type FfiTransport = Transport<FfiTcp, Usb>;
+pub(crate) type FfiTransportError = <FfiTransport as ErrorType>::Error;
+
+fn tcp(plain: BlockingTcp) -> FfiTcp {
+    #[cfg(feature = "tls")]
+    {
+        libadb::transport::tls::MaybeTls::plain(plain)
+    }
+    #[cfg(not(feature = "tls"))]
+    {
+        plain
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum FfiConnectError {
@@ -81,30 +97,32 @@ impl core::fmt::Display for FfiConnectError {
     }
 }
 
-/// A second handle to the transport's TCP socket, for socket options;
-/// `Ok(None)` for USB transports. A clone failure is an error, not a
-/// USB lookalike — the caller fails the connect rather than producing
-/// a TCP connection whose timeout setter claims there is no socket.
-pub(crate) fn tcp_socket_of(t: &FfiTransport) -> Result<Option<TcpStream>, std::io::Error> {
-    match t {
-        FfiTransport::Tcp(BlockingTcp(s)) => s.try_clone().map(Some),
-        FfiTransport::Usb(_) => Ok(None),
-    }
+/// Open the socket a `tcp://` URI names, Nagle off: ADB paces itself
+/// by acknowledgements, and Nagle would hold each one back.
+pub(crate) fn connect_tcp(host: &str, port: u16) -> Result<BlockingTcp, io::Error> {
+    let stream = TcpStream::connect((host, port))?;
+    stream.set_nodelay(true)?;
+    Ok(BlockingTcp(stream))
 }
 
-pub(crate) fn connect(uri_str: &str) -> Result<FfiTransport, FfiConnectError> {
+/// Open the transport `uri` names. Over `tcp://` a second handle to the
+/// socket comes along, for socket options: `MaybeTls` keeps its stream
+/// to itself, so the clone is taken before wrapping. A clone failure
+/// fails the connect rather than producing a connection whose timeout
+/// setter claims there is no socket.
+pub(crate) fn connect(uri_str: &str) -> Result<(FfiTransport, Option<TcpStream>), FfiConnectError> {
     let uri = uri::parse(uri_str).map_err(FfiConnectError::Uri)?;
     match uri {
         Uri::Tcp { host, port } => {
-            let stream = TcpStream::connect((host, port)).map_err(FfiConnectError::Tcp)?;
-            stream.set_nodelay(true).map_err(FfiConnectError::Tcp)?;
-            Ok(FfiTransport::Tcp(BlockingTcp(stream)))
+            let plain = connect_tcp(host, port).map_err(FfiConnectError::Tcp)?;
+            let socket = plain.0.try_clone().map_err(FfiConnectError::Tcp)?;
+            Ok((FfiTransport::Tcp(tcp(plain)), Some(socket)))
         }
         Uri::Usb(selector) => {
             #[cfg(any(feature = "nusb", feature = "rusb"))]
             {
                 connect_by_selector(selector)
-                    .map(FfiTransport::Usb)
+                    .map(|usb| (FfiTransport::Usb(usb), None))
                     .map_err(FfiConnectError::Usb)
             }
             #[cfg(not(any(feature = "nusb", feature = "rusb")))]
