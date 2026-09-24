@@ -18,6 +18,11 @@
 //! backend) or `rusb` (libusb); the two backends are mutually
 //! exclusive.
 //!
+//! `tls` answers a wireless-debugging device's `STLS` (Android 11+)
+//! from [`adb_connect`] with TLS 1.3, presenting the caller's key in a
+//! certificate; without it such a device is [`AdbStatus::TlsRequired`].
+//! [`adb_connect_with_authenticator`] stays in the clear either way.
+//!
 //! [`Reader`]: libadb::Reader
 //! [`Writer`]: libadb::Writer
 
@@ -48,6 +53,8 @@ use std::sync::Mutex;
 use libadb::base::auth::Authenticator;
 use libadb::base::channel::ChannelId;
 use libadb::base::connection::Connection;
+#[cfg(feature = "tls")]
+use libadb::base::connection::ConnectionConfig;
 use libadb::reverse;
 use libadb::split::{Reader, SplitIncoming, Writer};
 use libadb::Splittable;
@@ -130,6 +137,20 @@ const _: fn() = || {
 /// On success `*out` is set to a freshly-allocated handle that must be
 /// released with [`adb_connection_free`].
 ///
+/// Wireless debugging (Android 11+): the port the "Wireless debugging"
+/// pane shows answers the handshake with `STLS` and speaks TLS 1.3 from
+/// then on. Built with the `tls` feature, this call takes that up: it
+/// presents a certificate carrying the key in `priv_key_pem`, so a key
+/// the device already trusts — confirmed at a USB prompt, or paired —
+/// needs nothing more, and one it does not trust is
+/// [`AdbStatus::Auth`]. Without the feature the call is
+/// [`AdbStatus::TlsRequired`]. The port changes every time the setting
+/// is switched on and this library does no DNS-SD, so the caller
+/// supplies it. The legacy port `adb tcpip` opens, and USB, stay in the
+/// clear either way. A certificate that cannot be built for the key —
+/// the system clock outside what a certificate can carry, for one — is
+/// [`AdbStatus::Internal`].
+///
 /// # Safety
 /// All pointers must be valid null-terminated C strings. `out` must
 /// point to a writable `adb_connection_t*`.
@@ -167,7 +188,7 @@ pub unsafe extern "C" fn adb_connect(
         Err(e) => return error::fail_auth(e),
     };
 
-    handshake(uri, auth, banner_bytes, out)
+    handshake(uri, out, |t| connect_with_key(t, auth, banner_bytes))
 }
 
 /// Like [`adb_connect`], but uses a caller-supplied [`adb_authenticator_t`]
@@ -177,6 +198,13 @@ pub unsafe extern "C" fn adb_connect(
 /// in an HSM, a remote signing service, or a non-PKCS#8 key store. The
 /// [`sign`](adb_authenticator_t::sign) callback runs synchronously
 /// during the handshake.
+///
+/// Plaintext only: the callback signs the 20-byte AUTH token, while TLS
+/// 1.3 client authentication needs an RSA-PSS signature over the
+/// handshake transcript and a certificate, neither of which it can
+/// produce. Against a wireless-debugging port this call is
+/// [`AdbStatus::TlsRequired`] whatever the build; use [`adb_connect`]
+/// with the private key there.
 ///
 /// # Safety
 /// `uri` and `banner` must be valid null-terminated C strings.
@@ -207,21 +235,25 @@ pub unsafe extern "C" fn adb_connect_with_authenticator(
         Err(e) => return error::fail_invalid_arg(e),
     };
 
-    handshake(uri, auth, banner_bytes, out)
+    handshake(uri, out, |t| connect_plain(t, auth, banner_bytes))
 }
 
-unsafe fn handshake<A: Authenticator>(
+/// Open `uri`, run `connect` over the transport, and box the split
+/// result into a handle.
+unsafe fn handshake(
     uri: &str,
-    auth: A,
-    banner_bytes: &[u8],
     out: *mut *mut adb_connection_t,
+    connect: impl FnOnce(FfiTransport) -> Result<Connection<FfiTransport>, AdbStatus>,
 ) -> AdbStatus {
     let (t, tcp_socket) = match transport::connect(uri) {
         Ok(opened) => opened,
         Err(e) => return error::fail_ffi_connect(e),
     };
 
-    let conn = ffi_try!(Connection::connect_with_raw_banner(t, auth, banner_bytes));
+    let conn = match connect(t) {
+        Ok(c) => c,
+        Err(status) => return status,
+    };
 
     let (reader, writer) = match conn.split() {
         Ok(pair) => pair,
@@ -236,6 +268,50 @@ unsafe fn handshake<A: Authenticator>(
     });
     *out = Box::into_raw(boxed);
     AdbStatus::Ok
+}
+
+/// The plain handshake, as every connect ran it before `tls`.
+fn connect_plain<A: Authenticator>(
+    t: FfiTransport,
+    auth: A,
+    banner: &[u8],
+) -> Result<Connection<FfiTransport>, AdbStatus> {
+    block_on::block_on(Connection::connect_with_raw_banner(t, auth, banner))
+        .map_err(error::fail_error)
+}
+
+/// What `adb_connect` runs: TLS if a TCP device asks for it. adbd never
+/// offers STLS over USB, and the certificate costs an RSA signature, so
+/// only a `tcp://` connect pays for it.
+#[cfg(feature = "tls")]
+fn connect_with_key(
+    t: FfiTransport,
+    auth: auth::FfiAuthenticator,
+    banner: &[u8],
+) -> Result<Connection<FfiTransport>, AdbStatus> {
+    match t {
+        FfiTransport::Tcp(_) => {
+            let tls = auth.tls_config().map_err(error::fail_internal)?;
+            block_on::block_on(Connection::connect_tls_with_raw_banner_and_config(
+                t,
+                auth,
+                banner,
+                &tls,
+                ConnectionConfig::new(),
+            ))
+            .map_err(error::fail_error)
+        }
+        FfiTransport::Usb(_) => connect_plain(t, auth, banner),
+    }
+}
+
+#[cfg(not(feature = "tls"))]
+fn connect_with_key(
+    t: FfiTransport,
+    auth: auth::FfiAuthenticator,
+    banner: &[u8],
+) -> Result<Connection<FfiTransport>, AdbStatus> {
+    connect_plain(t, auth, banner)
 }
 
 /// Set receive/send timeouts on a `tcp://` connection, in
@@ -260,6 +336,11 @@ unsafe fn handshake<A: Authenticator>(
 /// with [`AdbStatus::Desynchronized`] — metadata queries and this
 /// setter still answer. Set it only where tearing the connection down
 /// beats blocking; for a recoverable bound, use the read timeout.
+///
+/// Both hold on a TLS (wireless-debugging) connection too: the timeouts
+/// sit on the socket underneath, a timed-out read leaves the session
+/// and the partial packet intact, and a timed-out write is the same
+/// abandoned packet.
 ///
 /// # Safety
 /// `conn` must be a valid handle.

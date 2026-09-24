@@ -40,6 +40,11 @@ typedef enum {
     /* The device's reverse rule service refused the request; the
      * device's own message is in adb_last_error(). */
     ADB_ERR_REVERSE         = 10,
+    /* The device answered the handshake with STLS (Android 11+ wireless
+     * debugging) and this call cannot start TLS: the library was built
+     * without the `tls` feature, or the key sits behind an
+     * adb_authenticator_t. adb_last_error() says which. */
+    ADB_ERR_TLS_REQUIRED    = 11,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
 
@@ -51,6 +56,19 @@ typedef enum {
  *   pub_key        ADB-format public key blob (contents of ~/.android/adbkey.pub)
  *   banner         identity banner, e.g. "host::features=shell_v2,delayed_ack"
  *   out            receives a handle; release with adb_connection_free().
+ *
+ * Wireless debugging (Android 11+): the port the "Wireless debugging"
+ * pane shows answers the handshake with STLS and speaks TLS 1.3 from
+ * then on. Built with the `tls` feature, adb_connect takes that up: it
+ * presents a certificate carrying the key in priv_key_pem, so a key the
+ * device already trusts — confirmed at a USB prompt, or paired — needs
+ * nothing more, and a key it does not trust is ADB_ERR_AUTH. Without
+ * the feature the call is ADB_ERR_TLS_REQUIRED. The port changes every
+ * time the setting is switched on and the library does no DNS-SD, so
+ * the caller supplies it. The legacy port `adb tcpip` opens, and USB,
+ * stay in the clear either way. A certificate that cannot be built for
+ * the key — the system clock outside what a certificate can carry, for
+ * one — is ADB_ERR_INTERNAL.
  */
 adb_status_t adb_connect(
     const char        *uri,
@@ -96,6 +114,13 @@ typedef struct {
  * Like adb_connect(), but uses a caller-supplied authenticator instead
  * of the built-in RSA/PEM signer. Use this when the private key lives
  * outside the host process (HSM, remote signer, non-PKCS#8 store).
+ *
+ * Plaintext only: the callback signs the 20-byte AUTH token, while TLS
+ * 1.3 client authentication needs an RSA-PSS signature over the
+ * handshake transcript and a certificate, neither of which it can
+ * produce. Against a wireless-debugging port this is
+ * ADB_ERR_TLS_REQUIRED whatever the build; use adb_connect with the
+ * private key there.
  */
 adb_status_t adb_connect_with_authenticator(
     const char                *uri,
@@ -161,7 +186,11 @@ void adb_key_free(adb_key_t *key);
  * device has partially seen, so the connection is marked
  * desynchronized and every later channel operation fails with
  * ADB_ERR_DESYNCHRONIZED (metadata queries and this setter still
- * answer). Prefer the read timeout for a recoverable bound. */
+ * answer). Both hold on a TLS (wireless-debugging) connection too: the
+ * timeouts sit on the socket underneath, a timed-out read leaves the
+ * session and the partial packet intact, and a timed-out write is the
+ * same abandoned packet. Prefer the read timeout for a recoverable
+ * bound. */
 adb_status_t adb_connection_set_io_timeout_ms(
     adb_connection_t *conn,
     uint32_t          read_ms,
