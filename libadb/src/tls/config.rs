@@ -10,8 +10,8 @@ use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
 use super::TlsIdentity;
 
-/// What the certificate is nominally issued to. The device never checks
-/// it, and SNI is switched off, so it never reaches the wire either.
+/// The name rustls asks for. SNI is off, so the device never sees it,
+/// and `AcceptAnyDevice` checks the certificate against nothing.
 const PLACEHOLDER_SERVER_NAME: &str = "adb";
 
 /// Why a client profile could not be built.

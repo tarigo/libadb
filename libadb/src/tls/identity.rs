@@ -86,7 +86,10 @@ impl TlsIdentity {
         self.certificate.as_ref()
     }
 
-    /// The chain and key in the shape `rustls` asks for.
+    /// The chain and key in the shape `rustls` asks for. `rustls` wipes
+    /// this copy of the key once it has parsed it, but the parsed key
+    /// lives in the `ClientConfig` for as long as that does, and nothing
+    /// wipes it.
     pub(crate) fn rustls_parts(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         (
             vec![self.certificate.clone()],

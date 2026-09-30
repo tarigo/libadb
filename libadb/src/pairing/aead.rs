@@ -25,11 +25,6 @@ pub(crate) const TAG_LEN: usize = 16;
 /// The cipher for one pairing session. Each direction counts its
 /// own nonces from zero, as the peer does.
 ///
-/// Nothing but opening can fail. The key is sixteen bytes, where HKDF
-/// could stretch to thousands, and the one message sealed is a
-/// `PeerInfo` block of a few kilobytes, where GCM refuses only past
-/// 64 GiB.
-///
 /// Dropping it wipes the AES key schedule, but not the GHASH subkey.
 /// `polyval`, which holds that, clears it only with a feature of its
 /// own, and on x86 not even then: there its state sits behind
@@ -81,9 +76,10 @@ impl Cipher {
         sealed
     }
 
-    /// Decrypt one message, spending a nonce; `None` if it does not
-    /// authenticate. With pairing that means one thing: the codes did
-    /// not match, so the two sides hold different keys.
+    /// Decrypt one message; `None` if it does not authenticate. Only a
+    /// message that opens spends a nonce. With pairing a failure means
+    /// one thing: the codes did not match, so the two sides hold
+    /// different keys.
     pub(crate) fn open(&mut self, ciphertext: &[u8]) -> Option<Vec<u8>> {
         let nonce = Self::nonce(self.decrypt_counter);
         let opened = self

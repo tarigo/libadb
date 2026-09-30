@@ -36,7 +36,8 @@ const SHA256_WITH_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.
 /// How long the certificate stays valid. AOSP uses ten 365-day years.
 const LIFETIME: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 10);
 
-/// Subject and issuer, in the order AOSP writes them.
+/// Subject and issuer, written RFC 4514 style, last RDN first: they
+/// encode as C, O, CN, which is the order AOSP writes them in.
 const DISTINGUISHED_NAME: &str = "CN=Adb,O=Android,C=US";
 
 /// Why a certificate could not be built.
@@ -165,7 +166,9 @@ fn rfc5280_time(at: SystemTime) -> Result<Time, CertError> {
     Ok(time)
 }
 
-/// The three extensions AOSP puts on the certificate.
+/// The three extensions AOSP puts on the certificate. `to_extension`
+/// marks the first two critical and the key identifier not, as AOSP
+/// does.
 fn extensions(name: &Name, spki: &SubjectPublicKeyInfoOwned) -> Result<Vec<Extension>, CertError> {
     let mut out = Vec::with_capacity(3);
 

@@ -157,7 +157,7 @@ where
 
     let answer = recv(transport, PacketType::PeerInfo).await?;
     if answer.len() != peer_info::SIZE + TAG_LEN {
-        // The device checks our block's size the same way.
+        // The device refuses a block of any other size too.
         return Err(PairingError::PeerInfo(PeerInfoError::Size(
             answer.len().saturating_sub(TAG_LEN),
         )));

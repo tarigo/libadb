@@ -99,15 +99,11 @@ default-features = false
 features = ["alloc"]
 
 # ADB over TLS (the `tls` feature): wireless debugging on Android 11+.
-# `x509-cert` is held at 0.2 because 0.3 moved to der/spki 0.8 and
-# signature 3, while everything here stands on der 0.7 / spki 0.7 /
-# signature 2 through `rsa` 0.9. Only its ASN.1 types are used: its
-# certificate builder signs without a CSPRNG, and a private-key
-# operation in this crate is always blinded.
 # `rustls` takes the `ring` provider rather than the default
-# `aws-lc-rs`, which wants cmake and NASM. `tls12` stays off: ADB speaks
-# TLS 1.3 only, and leaving it out keeps a feature-unified build from
-# quietly widening what we accept.
+# `aws-lc-rs`, which wants cmake and NASM. `tls12` stays off, as ADB
+# speaks TLS 1.3 only; another crate in the build may still switch it
+# on, which is why `TlsClientConfig::adb` names its version and provider
+# outright.
 [dependencies.rustls]
 version = "0.23"
 optional = true
@@ -151,6 +147,11 @@ optional = true
 default-features = false
 features = ["zeroize"]
 
+# `x509-cert` is held at 0.2 because 0.3 moved to der/spki 0.8 and
+# signature 3, while everything here stands on der 0.7 / spki 0.7 /
+# signature 2 through `rsa` 0.9. Only its ASN.1 types are used: its
+# certificate builder signs without a CSPRNG, and a private-key
+# operation in this crate is always blinded.
 [dependencies.x509-cert]
 version = "0.2.5"
 optional = true
@@ -185,16 +186,17 @@ keys = ["dep:rsa", "dep:sha1", "dep:base64ct", "dep:zeroize", "dep:rand_chacha"]
 host-keys = ["keys", "rsa/getrandom"]
 # ADB over TLS: wireless debugging on Android 11+ (the STLS command).
 # Needs `keys`, because the certificate it presents is signed by the
-# very key that authorises a USB connection, and `std` for the clock the
-# certificate is dated by. `rsa/sha2` brings SHA-256 in by the same
-# re-export that already brings SHA-1, rather than opening a second path
-# to `sha2`. `rsa/std`, since std is here anyway, lets `rsa`'s and
-# `pkcs8`'s errors stand as the source of ours.
+# very key that authorises a USB connection, and `split`, which brings
+# `std` (for the clock the certificate is dated by) along with the
+# transport traits and the lock that the split halves of a session
+# share. `rsa/sha2` takes SHA-256 from `rsa`'s re-export rather than
+# opening a second path to `sha2`. `rsa/std`, since std is here anyway,
+# lets `rsa`'s and `pkcs8`'s errors stand as the source of ours.
 tls = ["keys", "split", "rsa/sha2", "rsa/std", "dep:rustls", "dep:x509-cert"]
 # `adb pair`: put a key on a device that has never seen it. Builds on
-# `tls`, because pairing runs inside a TLS session and presents the same
-# certificate, and because the password is partly derived from that
-# session's key material.
+# `tls`, because pairing runs inside a TLS session and presents a
+# certificate signed by the same key, and because the password is partly
+# derived from that session's key material.
 pairing = ["tls", "dep:curve25519-dalek", "dep:subtle", "dep:hkdf", "dep:aes-gcm", "dep:aes"]
 
 [dev-dependencies]
