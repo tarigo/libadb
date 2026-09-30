@@ -12,16 +12,11 @@
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{cert, AdbKey};
 use libadb::pairing::{pair, PairingError, Role, Spake2};
-use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
-use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
-use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
+use libadb::tls::rustls::{ServerConnection, StreamOwned};
 use libadb::transport::tls::MaybeTls;
 
 #[path = "common/common.rs"]
@@ -36,65 +31,15 @@ mod rt;
 #[path = "test_key/test_key.rs"]
 mod test_key;
 
+#[path = "tls_device/tls_device.rs"]
+mod tls_device;
+
+use tls_device::{client_config, device_config, host_key, KeyPolicy};
+
 const EXPORTER_LABEL: &[u8] = b"adb-label\0";
 const CLIENT_NAME: &[u8] = b"adb pair client\0";
 const SERVER_NAME: &[u8] = b"adb pair server\0";
 const DEVICE_GUID: &str = "adb-fake-device-guid";
-
-fn host_key() -> AdbKey {
-    AdbKey::from_pkcs8_pem(test_key::PKCS8_PEM, &mut OsRng, test_key::NAME).unwrap()
-}
-
-#[derive(Debug)]
-struct AcceptAnyClient {
-    provider: Arc<rustls::crypto::CryptoProvider>,
-}
-
-impl ClientCertVerifier for AcceptAnyClient {
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _now: UnixTime,
-    ) -> Result<ClientCertVerified, rustls::Error> {
-        Ok(ClientCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Err(rustls::Error::PeerIncompatible(
-            rustls::PeerIncompatible::Tls12NotOffered,
-        ))
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
 
 /// What the device came away with.
 #[derive(Debug, Default)]
@@ -111,23 +56,12 @@ fn spawn_pairing_device(code: &'static str) -> (SocketAddr, JoinHandle<DeviceOut
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        // The pairing server mints a throwaway certificate per run.
-        let key = AdbKey::generate(&mut OsRng, "device@fake").unwrap();
-        let der = cert::build(&key, &mut OsRng).unwrap();
-        let pkcs8 = key.to_pkcs8_der().unwrap();
-        let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_client_cert_verifier(Arc::new(AcceptAnyClient { provider }))
-            .with_single_cert(
-                vec![CertificateDer::from(der)],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8.as_bytes().to_vec())),
-            )
-            .unwrap();
+        // The pairing server mints a throwaway certificate per run, and
+        // asks for the host's.
+        let config = device_config(KeyPolicy::Accept);
 
         let (socket, _) = listener.accept().unwrap();
-        let conn = ServerConnection::new(Arc::new(config)).unwrap();
+        let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         let mut outcome = DeviceOutcome::default();
 
@@ -249,11 +183,6 @@ async fn client(addr: SocketAddr) -> MaybeTls<rt::AdbTransport> {
     MaybeTls::plain(rt::wrap(rt::connect(addr).await))
 }
 
-fn tls_config() -> TlsClientConfig {
-    let identity = TlsIdentity::from_key(&host_key(), &mut OsRng).unwrap();
-    TlsClientConfig::adb(&identity).unwrap()
-}
-
 rt_test! {
 async fn the_right_code_hands_the_device_our_key() {
     let (addr, device) = spawn_pairing_device("592781");
@@ -261,7 +190,7 @@ async fn the_right_code_hands_the_device_our_key() {
 
     let paired = pair(
         &mut client(addr).await,
-        &tls_config(),
+        &client_config(),
         &key,
         "592781",
         &mut OsRng,
@@ -287,7 +216,7 @@ async fn a_wrong_code_is_reported_as_such_and_gives_nothing_away() {
 
     let outcome = pair(
         &mut client(addr).await,
-        &tls_config(),
+        &client_config(),
         &host_key(),
         "000000",
         &mut OsRng,
