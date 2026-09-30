@@ -134,23 +134,20 @@ where
             );
         }
 
+        // A TLS 1.3 server says nothing before our ClientHello, so bytes
+        // already here came in the clear behind the STLS. The session
+        // would take them for a broken record; name them for what they are.
+        if !recv_buf.is_empty() {
+            return Err(ProtocolError::DataAfterStls.into());
+        }
+
         let reply = Packet::new(Command::StartTls, STLS_VERSION, 0, alloc::vec::Vec::new());
         send_pkt(transport, desync, &reply, Checksum::Compute).await?;
-
-        // Anything left in the buffer is early ciphertext, not an
-        // error. In practice the device waits and it is empty.
-        let pending = core::mem::take(recv_buf);
-        if !pending.is_empty() {
-            log::debug!("{} bytes arrived alongside STLS", pending.len());
-        }
 
         // Nothing here is the device refusing our key: the certificate
         // leaves in our last flight, once the handshake is over on our
         // side, so the device has not seen it yet.
-        transport
-            .start_tls(tls, &pending)
-            .await
-            .map_err(Error::Io)?;
+        transport.start_tls(tls).await.map_err(Error::Io)?;
 
         // The host does not repeat its CNXN. The device sends one from
         // inside the session, and that is the first thing to arrive.

@@ -113,6 +113,12 @@ pub enum ProtocolError {
     /// shows. The legacy port `adb tcpip` opens is plain text, and so
     /// is USB; neither is affected.
     TlsRequired,
+    /// More arrived in the clear behind the device's `STLS`.
+    ///
+    /// A TLS 1.3 server says nothing before the client's hello, so
+    /// whatever follows `STLS` before the session starts is another
+    /// plaintext packet, not the beginning of TLS.
+    DataAfterStls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +172,9 @@ impl fmt::Display for ProtocolError {
                  build with the `tls` feature and use `Connection::connect_tls`, \
                  connect over USB, or switch the device to plain TCP with `adb tcpip 5555`",
             ),
+            Self::DataAfterStls => {
+                f.write_str("device sent more in the clear after STLS, where only TLS may follow")
+            }
             Self::UnexpectedCommand(c) => f.write_fmt(format_args!("unexpected command {:?}", c)),
             Self::ShortReadyPayload => {
                 f.write_str("delayed-ack READY payload shorter than 4 bytes")
@@ -406,6 +415,14 @@ mod tests {
             "device requires a TLS handshake (Android 11+ wireless debugging); \
              build with the `tls` feature and use `Connection::connect_tls`, \
              connect over USB, or switch the device to plain TCP with `adb tcpip 5555`"
+        );
+    }
+
+    #[test]
+    fn protocol_display_data_after_stls() {
+        assert_eq!(
+            show(&ProtocolError::DataAfterStls),
+            "device sent more in the clear after STLS, where only TLS may follow"
         );
     }
 
