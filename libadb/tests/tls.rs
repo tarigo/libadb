@@ -315,6 +315,40 @@ async fn a_split_session_can_still_say_it_is_done() {
 }
 
 rt_test! {
+async fn nothing_is_written_after_shutdown() {
+    // rustls would still seal application data behind the
+    // `close_notify`, which tells the peer there is nothing more.
+    let (addr, device) = spawn_device_that_waits_for_the_end();
+    let mut transport = connected(addr).await;
+
+    rt::within("the shutdown", transport.shutdown())
+        .await
+        .unwrap();
+    let wrote = transport.write(b"after").await;
+
+    assert!(matches!(wrote, Err(TlsError::Closed)), "got {wrote:?}");
+    drop(transport);
+    assert!(device.join().unwrap(), "the device never saw close_notify");
+}
+}
+
+rt_test! {
+async fn nothing_is_written_after_a_split_shutdown() {
+    let (addr, device) = spawn_device_that_waits_for_the_end();
+    let (reader, mut writer) = connected(addr).await.split().unwrap();
+
+    rt::within("the shutdown", writer.shutdown())
+        .await
+        .unwrap();
+    let wrote = writer.write(b"after").await;
+
+    assert!(matches!(wrote, Err(TlsError::Closed)), "got {wrote:?}");
+    drop((reader, writer));
+    assert!(device.join().unwrap(), "the device never saw close_notify");
+}
+}
+
+rt_test! {
 async fn a_split_session_that_just_hangs_up_is_told_apart() {
     // The same device, left without `close_notify`, so the test above
     // shows what it claims to.
@@ -420,7 +454,7 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
             returned.store(true, Ordering::Relaxed);
         }
     });
-    faults.until_holding().await;
+    rt::within("the write to be held", faults.until_holding()).await;
 
     steps.send(Step::Say(b"hello")).unwrap();
     let mut buf = [0u8; 16];
@@ -435,7 +469,7 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
         "the writer must still be stuck, or the read proved nothing"
     );
     faults.held.store(false, Ordering::Relaxed);
-    rt::join(held).await;
+    rt::within("the held writer", rt::join(held)).await;
     drop(steps);
     device.join().unwrap();
 }
@@ -978,7 +1012,7 @@ async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
         let _ = writer.write(b"held").await;
         let _ = writer.flush().await;
     });
-    faults.until_holding().await;
+    rt::within("the write to be held", faults.until_holding()).await;
 
     steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
     let mut buf = [0u8; 16];
@@ -988,7 +1022,7 @@ async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
     assert!(matches!(outcome, Err(TlsError::Tls(_))), "got {outcome:?}");
 
     faults.held.store(false, Ordering::Relaxed);
-    rt::join(held).await;
+    rt::within("the held writer", rt::join(held)).await;
     drop(steps);
     device.join().unwrap();
 }
