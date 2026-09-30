@@ -11,7 +11,7 @@
 use bytes::BytesMut;
 use embedded_io::ErrorType;
 
-use super::handshake::{build_host_banner, do_auth, open, recv_handshake_pkt};
+use super::handshake::{build_host_banner, do_auth, open, recv_handshake_pkt, Verdict};
 use super::{Connection, ConnectionConfig};
 use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
@@ -94,21 +94,20 @@ where
         )
         .await?;
 
-        let cnxn = match verdict.command {
-            Command::Connect => verdict,
-            Command::StartTls => {
+        let cnxn = match verdict {
+            Verdict::Connected(cnxn) => cnxn,
+            Verdict::StartTls(offer) => {
                 Self::upgrade(
                     &mut transport,
                     &desync,
                     &mut auth,
                     &mut recv_buf,
-                    verdict,
+                    offer,
                     tls,
                     &config,
                 )
                 .await?
             }
-            other => return Err(ProtocolError::UnexpectedCommand(other).into()),
         };
 
         Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
@@ -151,28 +150,25 @@ where
 
         // The host does not repeat its CNXN. The device sends one from
         // inside the session, and that is the first thing to arrive.
-        let pkt = match recv_handshake_pkt(transport, recv_buf, config.max_payload()).await {
-            Ok(pkt) => pkt,
-            // Not a byte of a CNXN. A device that closes over our key looks
-            // like this, and so does one that took the key and went away.
-            Err(Error::UnexpectedEof) if recv_buf.is_empty() => {
-                log::debug!("device closed the TLS session before its CNXN");
-                return Err(AuthError::TlsClosedBeforeConnect.into());
-            }
-            // Part of one means the device let us in, so the end of the
-            // stream stays what it is.
-            Err(e) => return Err(Self::verdict_on(e)),
-        };
+        let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload())
+            .await
+            .map_err(|e| Self::verdict_on(e, recv_buf))?;
 
         match pkt.command {
             Command::Connect => Ok(pkt),
-            // Not seen on any device so far, but cheap to honour.
+            // Not seen on any device so far, but cheap to honour. The
+            // exchange only puts the CNXN off, so what goes wrong in it is
+            // judged as it would have been without it.
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                let resp = do_auth(transport, desync, auth, recv_buf, pkt.data, config).await?;
-                if resp.command == Command::Connect {
-                    Ok(resp)
-                } else {
-                    Err(AuthError::Rejected.into())
+                let verdict = do_auth(transport, desync, auth, recv_buf, pkt.data, config)
+                    .await
+                    .map_err(|e| Self::verdict_on(e, recv_buf))?;
+                match verdict {
+                    Verdict::Connected(cnxn) => Ok(cnxn),
+                    // Inside the session already, where STLS is out of turn.
+                    Verdict::StartTls(_) => {
+                        Err(ProtocolError::UnexpectedCommand(Command::StartTls).into())
+                    }
                 }
             }
             other => Err(ProtocolError::UnexpectedCommand(other).into()),
@@ -189,10 +185,22 @@ where
         }
     }
 
-    /// The same judgement, for a failure already wrapped by the frame
-    /// reader.
-    fn verdict_on(error: Error<<T as ErrorType>::Error>) -> Error<<T as ErrorType>::Error> {
+    /// The same judgement, for a failure met inside the session before
+    /// the device's CNXN, with `recv_buf` holding whatever of a packet
+    /// had arrived.
+    fn verdict_on(
+        error: Error<<T as ErrorType>::Error>,
+        recv_buf: &BytesMut,
+    ) -> Error<<T as ErrorType>::Error> {
         match error {
+            // Not a byte of a CNXN. A device that closes over our key looks
+            // like this, and so does one that took the key and went away.
+            // Part of one means the device let us in, so the end of the
+            // stream stays what it is.
+            Error::UnexpectedEof if recv_buf.is_empty() => {
+                log::debug!("device closed the TLS session before its CNXN");
+                AuthError::TlsClosedBeforeConnect.into()
+            }
             Error::Io(e) => Self::verdict(e),
             other => other,
         }
