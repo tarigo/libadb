@@ -22,7 +22,6 @@ mod inner {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::future::Future;
-    use core::sync::atomic::{AtomicBool, Ordering};
     use std::sync::OnceLock;
 
     use bytes::{Buf, BytesMut};
@@ -37,6 +36,11 @@ mod inner {
     /// Landing zone for one socket read. A TLS record tops out a little
     /// over 16 KiB, so one of these swallows a whole record.
     const CHUNK: usize = 16 * 1024 + 512;
+
+    /// How much sealed output a write leaves queued before the next one
+    /// sends it first. Below this, writes only queue, so a packet's
+    /// header and payload leave together on the flush that ends it.
+    const QUEUE_LIMIT: usize = 64 * 1024;
 
     /// Why a TLS transport failed.
     #[derive(Debug)]
@@ -241,6 +245,63 @@ mod inner {
         }
     }
 
+    /// Ciphertext on its way in, for either kind of session.
+    struct Inbound {
+        /// Read off the wire and not yet decrypted. A field rather than a
+        /// local, so a dropped read loses nothing.
+        rx: BytesMut,
+        /// Where one socket read lands before it is committed to `rx`.
+        scratch: Vec<u8>,
+        /// Whether the transport underneath has ended.
+        eof: bool,
+    }
+
+    impl Inbound {
+        fn new() -> Self {
+            Self {
+                rx: BytesMut::with_capacity(CHUNK),
+                scratch: vec![0u8; CHUNK],
+                eof: false,
+            }
+        }
+
+        /// Read one chunk of ciphertext off the wire.
+        async fn fill<R: Read>(&mut self, inner: &mut R) -> Result<(), TlsError<R::Error>> {
+            // Into `scratch`, not `rx`: a read dropped mid-await must not
+            // leave `rx` holding bytes that never arrived.
+            let n = inner.read(&mut self.scratch).await.map_err(TlsError::Io)?;
+            if n == 0 {
+                self.eof = true;
+            } else {
+                self.rx.extend_from_slice(&self.scratch[..n]);
+            }
+            Ok(())
+        }
+    }
+
+    /// Write out `queue`, resuming where a dropped call left off.
+    async fn send_queue<W: Write>(
+        w: &mut W,
+        queue: &mut BytesMut,
+    ) -> Result<(), TlsError<W::Error>> {
+        while !queue.is_empty() {
+            let n = w.write(queue).await.map_err(TlsError::Io)?;
+            if n == 0 {
+                return Err(TlsError::WriteZero);
+            }
+            queue.advance(n);
+        }
+        Ok(())
+    }
+
+    /// Hand rustls plaintext to seal; returns how much it took.
+    fn write_plain<E>(conn: &mut ClientConnection, buf: &[u8]) -> Result<usize, TlsError<E>> {
+        use std::io::Write as _;
+        conn.writer()
+            .write(buf)
+            .map_err(|_| TlsError::Tls(rustls::Error::General("tls writer closed".into())))
+    }
+
     /// Build the engine.
     fn engine(config: &TlsClientConfig) -> Result<Box<ClientConnection>, rustls::Error> {
         let conn =
@@ -252,16 +313,12 @@ mod inner {
     pub(crate) struct TlsSession<T> {
         inner: T,
         conn: Box<ClientConnection>,
-        /// Ciphertext read off the wire and not yet decrypted. A field
-        /// rather than a local, so a dropped read loses nothing.
-        rx: BytesMut,
-        /// Records produced and not yet written, already advanced past
-        /// whatever the socket took. A dropped write resumes here
-        /// instead of leaving half a record behind.
+        inbound: Inbound,
+        /// Records sealed and not yet written, already advanced past
+        /// whatever the socket took, so a dropped call resumes here
+        /// instead of leaving half a record behind. They go out on a
+        /// flush, or once there are `QUEUE_LIMIT` of them.
         tx: BytesMut,
-        /// Where one socket read lands before it is committed to `rx`.
-        scratch: Vec<u8>,
-        eof: bool,
         /// The failure the session met, kept so that every call after it
         /// reports it too. Set before anything awaits, so a dropped call
         /// cannot take it along.
@@ -274,42 +331,17 @@ mod inner {
             Ok(Self {
                 inner,
                 conn,
-                rx: BytesMut::with_capacity(CHUNK),
+                inbound: Inbound::new(),
                 tx: BytesMut::new(),
-                scratch: vec![0u8; CHUNK],
-                eof: false,
                 failed: None,
             })
         }
 
-        /// Write out everything queued, resuming where a dropped write
-        /// left off.
+        /// Write out everything queued and flush the transport, resuming
+        /// where a dropped call left off.
         async fn flush_tx(&mut self) -> Result<(), TlsError<T::Error>> {
-            while !self.tx.is_empty() {
-                let n = self.inner.write(&self.tx).await.map_err(TlsError::Io)?;
-                if n == 0 {
-                    return Err(TlsError::WriteZero);
-                }
-                self.tx.advance(n);
-            }
+            send_queue(&mut self.inner, &mut self.tx).await?;
             self.inner.flush().await.map_err(TlsError::Io)
-        }
-
-        /// Read one chunk of ciphertext off the wire.
-        async fn fill(&mut self) -> Result<(), TlsError<T::Error>> {
-            // Into `scratch`, not `rx`: a read dropped mid-await must not
-            // leave `rx` holding bytes that never arrived.
-            let n = self
-                .inner
-                .read(&mut self.scratch)
-                .await
-                .map_err(TlsError::Io)?;
-            if n == 0 {
-                self.eof = true;
-            } else {
-                self.rx.extend_from_slice(&self.scratch[..n]);
-            }
-            Ok(())
         }
 
         /// Let rustls decrypt what is in hand; returns how much it took.
@@ -319,7 +351,7 @@ mod inner {
         /// carry: sending it from here would hold the caller up behind the
         /// socket.
         fn advance(&mut self) -> Result<usize, TlsError<T::Error>> {
-            feed(&mut self.conn, &mut self.rx).map_err(|e| {
+            feed(&mut self.conn, &mut self.inbound.rx).map_err(|e| {
                 self.failed = Some(e.clone());
                 TlsError::Tls(e)
             })
@@ -347,7 +379,7 @@ mod inner {
                 // What is already in hand comes before the socket, and the
                 // socket only once rustls has taken all of it. Reading on
                 // while it takes none would pile up whatever the peer sends.
-                if !self.rx.is_empty() {
+                if !self.inbound.rx.is_empty() {
                     match self.advance() {
                         Ok(0) => return Err(TlsError::HandshakeClosed),
                         Ok(_) => continue,
@@ -356,10 +388,10 @@ mod inner {
                         Err(_) => return self.failure().await,
                     }
                 }
-                if self.eof {
+                if self.inbound.eof {
                     return Err(TlsError::HandshakeClosed);
                 }
-                self.fill().await?;
+                self.inbound.fill(&mut self.inner).await?;
             }
             // The last flight is still queued at this point.
             harvest(&mut self.conn, &mut self.tx);
@@ -406,14 +438,11 @@ mod inner {
                 if let Some(e) = &self.failed {
                     return Err(TlsError::Tls(e.clone()));
                 }
-                // A write dropped part way leaves its records queued with
-                // nobody to send them. A socket that will not take them is
-                // for the writer to report; what is in hand is read first.
-                let _ = self.flush_tx().await;
 
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
-                if !self.rx.is_empty() {
+                // Nothing here writes: what is queued is the writer's to send.
+                if !self.inbound.rx.is_empty() {
                     match self.advance() {
                         // What rustls will not take follows a `close_notify`.
                         Ok(0) => return Ok(0),
@@ -422,27 +451,29 @@ mod inner {
                         Ok(_) | Err(_) => continue,
                     }
                 }
-                if self.eof {
+                if self.inbound.eof {
                     return Ok(0);
                 }
-                self.fill().await?;
+                self.inbound.fill(&mut self.inner).await?;
             }
         }
     }
 
     impl<T: Read + Write> Write for TlsSession<T> {
+        /// Seals `buf` into the queue; nothing awaits after that, so a
+        /// write dropped anywhere has committed nothing it did not report.
+        /// What earlier writes queued goes out first once there is
+        /// `QUEUE_LIMIT` of it, and otherwise waits for a flush.
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            use std::io::Write as _;
             if buf.is_empty() {
                 return Ok(0);
             }
             self.failure().await?;
-            let n =
-                self.conn.writer().write(buf).map_err(|_| {
-                    TlsError::Tls(rustls::Error::General("tls writer closed".into()))
-                })?;
+            if self.tx.len() >= QUEUE_LIMIT {
+                send_queue(&mut self.inner, &mut self.tx).await?;
+            }
+            let n = write_plain(&mut self.conn, buf)?;
             harvest(&mut self.conn, &mut self.tx);
-            self.flush_tx().await?;
             Ok(n)
         }
 
@@ -466,14 +497,13 @@ mod inner {
     ///
     /// Reads lose nothing when dropped, as far as the transport
     /// underneath allows; see
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety). Writes
-    /// over TLS are another matter: `write` hands rustls up to 64 KiB
-    /// before it waits on the socket, so one dropped part way may have
-    /// committed bytes that still go out but were never reported, and
-    /// retrying it sends them twice. A plain write commits nothing the
-    /// transport did not take. This crate's own traffic is safe either
-    /// way: a packet cut short marks the connection
-    /// [`Desynchronized`](crate::Error::Desynchronized).
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety). Nor do
+    /// writes: over TLS, `write` seals what it takes into a queue and
+    /// returns without waiting again, so a write dropped part way has
+    /// committed nothing it did not report. The queue is what waits on
+    /// the socket. It goes out on `flush`, or with a later write once it
+    /// has grown to 64 KiB, as with any buffered writer; call `flush`
+    /// when a message is done.
     pub struct MaybeTls<T: Read + Write> {
         state: State<T>,
     }
@@ -658,114 +688,75 @@ mod inner {
     /// Lock order is `out`, then `conn`. Records move from rustls into
     /// `out.pending` under both, so nothing sequenced ever sits in a local
     /// a dropped future would take with it, and two harvesters cannot
-    /// interleave. `conn` is released before the socket is touched.
+    /// interleave. `conn` is released before the socket is touched. The
+    /// reader takes `conn` alone and never `out`, which is why it cannot
+    /// end up waiting behind a writer stuck on the socket.
     struct TlsShared<T: Splittable> {
         conn: async_lock::Mutex<Box<ClientConnection>>,
         out: async_lock::Mutex<OutHalf<T::WriteHalf>>,
-        /// Whether `out.pending` may still hold bytes: set while a drain
-        /// runs, cleared once it has flushed, and left set if it is
-        /// dropped part way. A reader drains the queue only if this is up
-        /// and the write lock is free, so it never queues behind a writer
-        /// blocked on the socket. A drain dropped while that reader waits
-        /// on the socket goes out on its next pass, or with the next
-        /// write.
-        backlog: AtomicBool,
         /// The failure the session met, kept so that every call after it
         /// reports it too. The reader sets it under `conn`, where a writer
         /// looks before it hands rustls anything, so none slips past.
         failed: OnceLock<rustls::Error>,
     }
 
+    impl<WH: Write> OutHalf<WH> {
+        /// Write out the queue and flush the half underneath, resuming
+        /// where a dropped call stopped.
+        async fn drain(&mut self) -> Result<(), TlsError<WH::Error>> {
+            send_queue(&mut self.half, &mut self.pending).await?;
+            self.half.flush().await.map_err(TlsError::Io)
+        }
+    }
+
     impl<T: Splittable> TlsShared<T> {
-        /// Run `f` on the engine, move every record it and anything
-        /// before it produced into the queue, and drain the queue into
-        /// the socket.
+        /// Run `f` on the engine and queue every record it, and anything
+        /// before it, produced.
+        ///
+        /// Once the session has failed, `f` does not run: what gets queued
+        /// is the alert for the failure, and the failure is the answer.
+        async fn queue<R>(
+            &self,
+            out: &mut OutHalf<T::WriteHalf>,
+            f: impl FnOnce(&mut ClientConnection) -> R,
+        ) -> Result<R, rustls::Error> {
+            let mut conn = self.conn.lock().await;
+            let result = match self.failed.get() {
+                Some(e) => Err(e.clone()),
+                None => Ok(f(&mut conn)),
+            };
+            harvest(&mut conn, &mut out.pending);
+            result
+        }
+
+        /// [`queue`](Self::queue) what `f` produces and send it all. A
+        /// failed session sends the alert for its failure, if the socket
+        /// takes it, and answers with the failure either way.
         async fn push_with<R>(
             &self,
             f: impl FnOnce(&mut ClientConnection) -> R,
         ) -> Result<R, TlsError<T::Error>> {
             let mut out = self.out.lock().await;
-            self.push_locked(&mut out, f).await
-        }
-
-        /// [`push_with`](Self::push_with), for a caller already holding
-        /// `out`.
-        ///
-        /// Once the session has failed, `f` does not run: the push carries
-        /// the alert for the failure, if the socket takes it, and the
-        /// failure is the answer either way.
-        async fn push_locked<R>(
-            &self,
-            out: &mut OutHalf<T::WriteHalf>,
-            f: impl FnOnce(&mut ClientConnection) -> R,
-        ) -> Result<R, TlsError<T::Error>> {
-            let result = {
-                let mut conn = self.conn.lock().await;
-                let result = match self.failed.get() {
-                    Some(e) => Err(e.clone()),
-                    None => Ok(f(&mut conn)),
-                };
-                harvest(&mut conn, &mut out.pending);
-                result
-            };
-            let drained = self.drain(out).await;
+            let result = self.queue(&mut out, f).await;
+            let drained = out.drain().await;
             match result {
                 Ok(result) => drained.map(|()| result),
                 Err(e) => Err(TlsError::Tls(e)),
             }
-        }
-
-        /// Move what rustls has queued into the socket.
-        async fn push(&self) -> Result<(), TlsError<T::Error>> {
-            self.push_with(|_| ()).await
-        }
-
-        /// Push out what a dropped drain left behind, unless someone
-        /// holds the write lock. Whoever does drains the whole queue
-        /// before letting go, or is dropped and leaves the flag up.
-        async fn settle_backlog(&self) -> Result<(), TlsError<T::Error>> {
-            match self.out.try_lock() {
-                Some(mut out) => self.push_locked(&mut out, |_| ()).await,
-                None => Ok(()),
-            }
-        }
-
-        /// Write out the queue, resuming where a dropped drain stopped.
-        async fn drain(&self, out: &mut OutHalf<T::WriteHalf>) -> Result<(), TlsError<T::Error>> {
-            self.backlog.store(true, Ordering::Release);
-            while !out.pending.is_empty() {
-                let OutHalf { half, pending } = &mut *out;
-                let n = half.write(pending).await.map_err(TlsError::Io)?;
-                if n == 0 {
-                    return Err(TlsError::WriteZero);
-                }
-                pending.advance(n);
-            }
-            // Not before the flush: one dropped part way can leave bytes
-            // in the half underneath.
-            out.half.flush().await.map_err(TlsError::Io)?;
-            self.backlog.store(false, Ordering::Release);
-            Ok(())
-        }
-
-        fn has_backlog(&self) -> bool {
-            self.backlog.load(Ordering::Acquire)
         }
     }
 
     /// The read half of a TLS session.
     pub struct TlsReadHalf<T: Splittable> {
         inner: T::ReadHalf,
-        rx: BytesMut,
-        scratch: Vec<u8>,
-        eof: bool,
+        inbound: Inbound,
         shared: Arc<TlsShared<T>>,
     }
 
     /// The write half of a TLS session.
     ///
-    /// A write dropped part way may already have handed rustls bytes it
-    /// never reported; see [`MaybeTls`] under *Cancellation*.
+    /// Writes queue and `flush` sends, as for [`MaybeTls`]; see there
+    /// under *Cancellation*.
     pub struct TlsWriteHalf<T: Splittable> {
         shared: Arc<TlsShared<T>>,
     }
@@ -798,25 +789,15 @@ mod inner {
                     return Err(TlsError::Tls(e.clone()));
                 }
 
-                // Settle what a dropped write left behind, if the write lock
-                // is free; whoever holds it drains the queue itself. A socket
-                // that will not take it is for the writer to report; what is
-                // in hand is read first.
-                if self.shared.has_backlog() {
-                    let _ = self.shared.settle_backlog().await;
-                }
-
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
-                if !self.rx.is_empty() {
+                if !self.inbound.rx.is_empty() {
                     let fed = {
                         let mut conn = self.shared.conn.lock().await;
                         // Kept under `conn`, where the writer looks. The alert
                         // rustls raises stays queued in the engine for the
-                        // writer to carry: waiting on the write lock to send it
-                        // from here would stall the read behind a writer stuck
-                        // on the socket.
-                        feed(&mut conn, &mut self.rx).inspect_err(|e| {
+                        // writer to carry: nothing on the read side writes.
+                        feed(&mut conn, &mut self.inbound.rx).inspect_err(|e| {
                             let _ = self.shared.failed.set(e.clone());
                         })
                     };
@@ -829,19 +810,10 @@ mod inner {
                     }
                 }
 
-                if self.eof {
+                if self.inbound.eof {
                     return Ok(0);
                 }
-                let n = self
-                    .inner
-                    .read(&mut self.scratch)
-                    .await
-                    .map_err(TlsError::Io)?;
-                if n == 0 {
-                    self.eof = true;
-                } else {
-                    self.rx.extend_from_slice(&self.scratch[..n]);
-                }
+                self.inbound.fill(&mut self.inner).await?;
             }
         }
     }
@@ -858,22 +830,33 @@ mod inner {
     }
 
     impl<T: Splittable> Write for TlsWriteHalf<T> {
+        /// Seals `buf` into the queue under the write lock, as an unsplit
+        /// session's `write` does: what earlier writes queued goes out
+        /// first once there is `QUEUE_LIMIT` of it, and the rest waits for
+        /// `flush`.
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-            use std::io::Write as _;
             if buf.is_empty() {
                 return Ok(0);
             }
-            self.shared
-                .push_with(|conn| {
-                    conn.writer().write(buf).map_err(|_| {
-                        TlsError::Tls(rustls::Error::General("tls writer closed".into()))
-                    })
-                })
-                .await?
+            let mut out = self.shared.out.lock().await;
+            if out.pending.len() >= QUEUE_LIMIT {
+                let OutHalf { half, pending } = &mut *out;
+                send_queue(half, pending).await?;
+            }
+            let queued = self.shared.queue(&mut out, |conn| write_plain(conn, buf));
+            match queued.await {
+                Ok(written) => written,
+                // The alert for the failure is queued; it goes out now, if
+                // the socket takes it.
+                Err(e) => {
+                    let _ = out.drain().await;
+                    Err(TlsError::Tls(e))
+                }
+            }
         }
 
         async fn flush(&mut self) -> Result<(), Self::Error> {
-            self.shared.push().await
+            self.shared.push_with(|_| ()).await
         }
     }
 
@@ -895,8 +878,7 @@ mod inner {
 
     /// The write half of a [`MaybeTls`], plain or encrypted.
     ///
-    /// Encrypted, a write dropped part way may already have handed
-    /// rustls bytes it never reported; see [`MaybeTls`] under
+    /// Encrypted, writes queue and `flush` sends; see [`MaybeTls`] under
     /// *Cancellation*.
     pub enum MaybeTlsWrite<T: Splittable> {
         Plain(T::WriteHalf),
@@ -975,16 +957,13 @@ mod inner {
                     let TlsSession {
                         inner,
                         conn,
-                        rx,
+                        inbound,
                         tx,
-                        scratch,
-                        eof,
                         failed,
                     } = session;
                     let (r, w) = inner.split().map_err(TlsError::Io)?;
                     let shared = Arc::new(TlsShared::<T> {
                         conn: async_lock::Mutex::new(conn),
-                        backlog: AtomicBool::new(!tx.is_empty()),
                         out: async_lock::Mutex::new(OutHalf {
                             half: w,
                             pending: tx,
@@ -993,9 +972,7 @@ mod inner {
                     });
                     let read = TlsReadHalf {
                         inner: r,
-                        rx,
-                        scratch,
-                        eof,
+                        inbound,
                         shared: Arc::clone(&shared),
                     };
                     let write = TlsWriteHalf { shared };
