@@ -490,3 +490,38 @@ fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
         "expected Rejected, got {err:?}"
     );
 }
+
+#[test]
+fn a_large_packet_is_zeroed_once_while_select_reads_it() {
+    // `recv_pkt` pins this for the handshake. The read loop stages its
+    // own buffer, and staging it afresh for each 16 KiB read, as TLS
+    // hands them over, zeroed the rest of the packet every time.
+    let big = vec![0x5a; 256 * 1024];
+    let (mut conn, ch) = connected_for_select(|mock| {
+        mock.feed(&wrte(1, &big)).drips(16 * 1024);
+    });
+    let mut buf = vec![0u8; big.len()];
+    let first = now(conn.select_channel(ch, &mut buf, core::future::pending::<()>())).unwrap();
+    assert!(
+        matches!(first, SelectResult::Data(5)),
+        "the small WRTE first"
+    );
+
+    crate::base::wire::ZEROED.with(|zeroed| zeroed.set(0));
+    let mut got = 0;
+    while got < big.len() {
+        match now(conn.select_channel(ch, &mut buf[got..], core::future::pending::<()>())).unwrap()
+        {
+            SelectResult::Data(n) => got += n,
+            SelectResult::Interrupted(()) => unreachable!("the interrupt never fires"),
+        }
+    }
+
+    assert_eq!(buf, big);
+    let zeroed = crate::base::wire::ZEROED.with(|zeroed| zeroed.get());
+    assert!(
+        zeroed <= big.len() + 24 + crate::base::wire::MIN_READ,
+        "zeroed {zeroed} bytes for a {}-byte payload",
+        big.len()
+    );
+}

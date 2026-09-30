@@ -40,6 +40,8 @@ pub(crate) struct Mock {
     /// Reads that report `Pending` before any data comes back.
     slow_reads: usize,
     cancel_safe: bool,
+    /// Cap on what one read hands back; 0 means none.
+    drip: usize,
 }
 
 impl Mock {
@@ -50,7 +52,15 @@ impl Mock {
             stall_write: None,
             slow_reads: 0,
             cancel_safe: true,
+            drip: 0,
         }
+    }
+
+    /// Hand back at most `n` bytes a read, as TLS hands back a record at
+    /// a time.
+    pub(crate) fn drips(&mut self, n: usize) -> &mut Self {
+        self.drip = n;
+        self
     }
 
     pub(crate) fn feed(&mut self, pkt: &Packet) -> &mut Self {
@@ -88,7 +98,11 @@ impl embedded_io::ErrorType for Mock {
 
 impl Mock {
     fn pull(&mut self, buf: &mut [u8]) -> usize {
-        let n = buf.len().min(self.inbound.len());
+        let cap = match self.drip {
+            0 => buf.len(),
+            drip => buf.len().min(drip),
+        };
+        let n = cap.min(self.inbound.len());
         for slot in buf.iter_mut().take(n) {
             *slot = self.inbound.pop_front().unwrap();
         }

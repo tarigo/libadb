@@ -825,42 +825,51 @@ where
                 let mut staged = Staged::new(&mut this.recv_buf, want);
                 let transport = &mut this.transport;
 
-                let wakeup = if cancel_safe {
-                    let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
+                // Read into the one stretch until the packet is whole, as
+                // `recv_pkt` does. There is nothing to dispatch before then,
+                // and `interrupt` is asked afresh for each read.
+                loop {
+                    let wakeup = if cancel_safe {
+                        let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
 
-                    core::future::poll_fn(|cx| {
-                        if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
-                            return Poll::Ready(Ok(Wakeup::Interrupt(val)));
+                        core::future::poll_fn(|cx| {
+                            if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
+                                return Poll::Ready(Ok(Wakeup::Interrupt(val)));
+                            }
+                            match read_fut.as_mut().poll(cx) {
+                                Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::UnexpectedEof)),
+                                Poll::Ready(Ok(n)) => Poll::Ready(Ok(Wakeup::Read(n))),
+                                Poll::Ready(Err(e)) => Poll::Ready(Err(Error::Io(e))),
+                                Poll::Pending => Poll::Pending,
+                            }
+                        })
+                        .await?
+                    } else {
+                        // The transport loses whatever it has already been
+                        // handed if a read is dropped, so `interrupt` only
+                        // gets its answer between reads: due now, or once
+                        // this read has run its course.
+                        let due =
+                            core::future::poll_fn(|cx| Poll::Ready(interrupt.as_mut().poll(cx)))
+                                .await;
+                        if let Poll::Ready(val) = due {
+                            return Ok(SelectResult::Interrupted(val));
                         }
-                        match read_fut.as_mut().poll(cx) {
-                            Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::UnexpectedEof)),
-                            Poll::Ready(Ok(n)) => Poll::Ready(Ok(Wakeup::Read(n))),
-                            Poll::Ready(Err(e)) => Poll::Ready(Err(Error::Io(e))),
-                            Poll::Pending => Poll::Pending,
+                        match transport.read(staged.spare()).await {
+                            Ok(0) => return Err(Error::UnexpectedEof),
+                            Ok(n) => Wakeup::Read(n),
+                            Err(e) => return Err(Error::Io(e)),
                         }
-                    })
-                    .await?
-                } else {
-                    // The transport loses whatever it has already been
-                    // handed if a read is dropped, so `interrupt` only
-                    // gets its answer between reads: due now, or once
-                    // this read has run its course.
-                    let due =
-                        core::future::poll_fn(|cx| Poll::Ready(interrupt.as_mut().poll(cx))).await;
-                    if let Poll::Ready(val) = due {
-                        return Ok(SelectResult::Interrupted(val));
+                    };
+                    match wakeup {
+                        // `staged` trims the untouched tail as it drops, in
+                        // both arms.
+                        Wakeup::Read(n) => staged.commit(n),
+                        Wakeup::Interrupt(val) => return Ok(SelectResult::Interrupted(val)),
                     }
-                    match transport.read(staged.spare()).await {
-                        Ok(0) => return Err(Error::UnexpectedEof),
-                        Ok(n) => Wakeup::Read(n),
-                        Err(e) => return Err(Error::Io(e)),
+                    if !staged.wants_more() {
+                        break;
                     }
-                };
-                match wakeup {
-                    // `staged` trims the untouched tail as it drops, in
-                    // both arms.
-                    Wakeup::Read(n) => staged.commit(n),
-                    Wakeup::Interrupt(val) => return Ok(SelectResult::Interrupted(val)),
                 }
             }
         }

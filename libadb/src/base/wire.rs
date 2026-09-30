@@ -14,6 +14,9 @@ use super::protocol::{Checksum, MESSAGE_SIZE};
 /// packet that would have arrived in one go.
 pub(crate) const MIN_READ: usize = 4096;
 
+#[cfg(test)]
+pub(crate) use tests::ZEROED;
+
 /// Grows `buf` by `want` bytes and hands out that tail to be read into,
 /// cutting the buffer back to whatever was committed when dropped — so
 /// a failed or cancelled read leaves no placeholder bytes behind.
@@ -26,6 +29,8 @@ impl<'a> Staged<'a> {
     pub(crate) fn new(buf: &'a mut BytesMut, want: usize) -> Self {
         let keep = buf.len();
         buf.resize(keep + want, 0);
+        #[cfg(test)]
+        tests::ZEROED.with(|zeroed| zeroed.set(zeroed.get() + want));
         Self { buf, keep }
     }
 
@@ -35,6 +40,21 @@ impl<'a> Staged<'a> {
 
     pub(crate) fn commit(&mut self, n: usize) {
         self.keep += n;
+    }
+
+    /// Everything committed so far: what was there before, and what has
+    /// been read in since.
+    pub(crate) fn committed(&self) -> &[u8] {
+        &self.buf[..self.keep]
+    }
+
+    /// Whether to read into the same stretch again: the first packet is
+    /// still short, and all it lacks fits in what is left. Staging anew
+    /// for each read would zero the rest of a large packet every time,
+    /// and over TLS a read brings only one 16 KiB record.
+    pub(crate) fn wants_more(&mut self) -> bool {
+        let missing = Packet::missing(self.committed());
+        missing != 0 && missing <= self.spare().len()
     }
 }
 
@@ -136,10 +156,15 @@ pub(crate) async fn recv_pkt<T: Read>(
         }
         let want = Packet::missing(buf).max(MIN_READ);
         let mut staged = Staged::new(buf, want);
-        match t.read(staged.spare()).await {
-            Ok(0) => return Err(Error::UnexpectedEof),
-            Ok(n) => staged.commit(n),
-            Err(e) => return Err(Error::Io(e)),
+        loop {
+            match t.read(staged.spare()).await {
+                Ok(0) => return Err(Error::UnexpectedEof),
+                Ok(n) => staged.commit(n),
+                Err(e) => return Err(Error::Io(e)),
+            }
+            if !staged.wants_more() {
+                break;
+            }
         }
     }
 }
@@ -227,6 +252,12 @@ mod tests {
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
     use std::vec::Vec;
+
+    std::thread_local! {
+        /// Bytes `Staged::new` has zeroed on this thread, for the tests
+        /// that pin how often a packet is staged.
+        pub(crate) static ZEROED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
 
     #[derive(Debug)]
     struct MockErr;
@@ -328,6 +359,27 @@ mod tests {
         async fn flush(&mut self) -> Result<(), MockErr> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_large_packet_is_zeroed_once_however_it_arrives() {
+        // Over TLS a read brings one 16 KiB record. Staging afresh for
+        // each read zeroed the rest of the packet every time: some 33 MiB
+        // of memset for one 1 MiB WRTE.
+        let wire = wire_packet(1 << 20);
+        let mut t = Feeder::dripping(wire.clone(), 16 * 1024);
+        let mut buf = BytesMut::new();
+        ZEROED.with(|zeroed| zeroed.set(0));
+
+        let pkt = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap();
+
+        assert_eq!(pkt.data.len(), 1 << 20);
+        let zeroed = ZEROED.with(|zeroed| zeroed.get());
+        assert!(
+            zeroed <= wire.len() + MIN_READ,
+            "zeroed {zeroed} bytes for a {}-byte packet",
+            wire.len()
+        );
     }
 
     #[test]
