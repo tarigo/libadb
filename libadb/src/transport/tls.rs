@@ -461,6 +461,19 @@ mod inner {
     }
 
     /// A transport that is plain now and may be TLS later.
+    ///
+    /// # Cancellation
+    ///
+    /// Reads lose nothing when dropped, as far as the transport
+    /// underneath allows; see
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety). Writes
+    /// over TLS are another matter: `write` hands rustls up to 64 KiB
+    /// before it waits on the socket, so one dropped part way may have
+    /// committed bytes that still go out but were never reported, and
+    /// retrying it sends them twice. A plain write commits nothing the
+    /// transport did not take. This crate's own traffic is safe either
+    /// way: a packet cut short marks the connection
+    /// [`Desynchronized`](crate::Error::Desynchronized).
     pub struct MaybeTls<T: Read + Write> {
         state: State<T>,
     }
@@ -750,6 +763,9 @@ mod inner {
     }
 
     /// The write half of a TLS session.
+    ///
+    /// A write dropped part way may already have handed rustls bytes it
+    /// never reported; see [`MaybeTls`] under *Cancellation*.
     pub struct TlsWriteHalf<T: Splittable> {
         shared: Arc<TlsShared<T>>,
     }
@@ -878,6 +894,10 @@ mod inner {
     }
 
     /// The write half of a [`MaybeTls`], plain or encrypted.
+    ///
+    /// Encrypted, a write dropped part way may already have handed
+    /// rustls bytes it never reported; see [`MaybeTls`] under
+    /// *Cancellation*.
     pub enum MaybeTlsWrite<T: Splittable> {
         Plain(T::WriteHalf),
         Tls(TlsWriteHalf<T>),
