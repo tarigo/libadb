@@ -362,8 +362,8 @@ async fn nothing_is_written_after_a_split_shutdown() {
 
 rt_test! {
 async fn a_split_session_that_just_hangs_up_is_told_apart() {
-    // The same device, left without `close_notify`, so the test above
-    // shows what it claims to.
+    // The same device, left without `close_notify`, so the tests above
+    // show what they claim to.
     let (addr, device) = spawn_device_that_waits_for_the_end();
     let (reader, writer) = connected(addr).await.split().unwrap();
 
@@ -1122,6 +1122,52 @@ async fn a_split_session_that_met_a_broken_record_stays_failed() {
     assert!(matches!(again, Err(TlsError::Tls(_))), "got {again:?}");
     let wrote = writer.write(b"after").await;
     assert!(matches!(wrote, Err(TlsError::Tls(_))), "got {wrote:?}");
+
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_write_after_shutting_down_a_failed_session_is_refused_as_closed() {
+    // A shutdown closes the session for writes even when it can only
+    // report the failure it met, and the split halves agree.
+    let (addr, steps, device) = spawn_quiet_device();
+    let mut transport = connected(addr).await;
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let read = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(read, Err(TlsError::Tls(_))), "got {read:?}");
+
+    let shut = rt::within("the shutdown", transport.shutdown()).await;
+    assert!(matches!(shut, Err(TlsError::Tls(_))), "got {shut:?}");
+    let wrote = transport.write(b"after").await;
+    assert!(matches!(wrote, Err(TlsError::Closed)), "got {wrote:?}");
+
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_split_write_after_shutting_down_a_failed_session_is_refused_as_closed() {
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut reader, mut writer) = connected(addr).await.split().unwrap();
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let read = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(read, Err(TlsError::Tls(_))), "got {read:?}");
+
+    let shut = rt::within("the shutdown", writer.shutdown()).await;
+    assert!(matches!(shut, Err(TlsError::Tls(_))), "got {shut:?}");
+    let wrote = writer.write(b"after").await;
+    assert!(matches!(wrote, Err(TlsError::Closed)), "got {wrote:?}");
 
     drop(steps);
     device.join().unwrap();

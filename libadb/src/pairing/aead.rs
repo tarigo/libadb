@@ -174,11 +174,11 @@ mod tests {
 
     #[test]
     fn the_first_message_is_byte_for_byte_what_another_library_produces() {
-        // Pins the three things a peer has to agree with us about: the
-        // HKDF info string, the zero salt, and a nonce that is a
-        // little-endian counter in a twelve-byte field. Node's `crypto`
-        // (`hkdfSync` and `aes-128-gcm`, on OpenSSL 3.6) gives the same
-        // bytes from the same inputs.
+        // Pins what a peer has to agree with us about for the first
+        // message: the HKDF info string, the zero salt, and a nonce of
+        // twelve zero bytes. Where the counter sits in later nonces is
+        // pinned above. Node's `crypto` (`hkdfSync` and `aes-128-gcm`, on
+        // OpenSSL 3.6) gives the same bytes from the same inputs.
         let mut cipher = Cipher::new(&[0x5Au8; 64]);
 
         let sealed = cipher.seal(b"adb pairing probe");

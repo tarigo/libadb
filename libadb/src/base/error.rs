@@ -71,8 +71,9 @@ pub enum Error<E> {
     Desynchronized,
 }
 
-/// The device sent what the protocol does not allow at that point, or
-/// began a handshake this connection cannot follow.
+/// What stopped the exchange at the protocol level: something from the
+/// device that breaks the ADB protocol, something of ours it cannot
+/// carry, or a handshake this connection does not follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolError {
@@ -131,7 +132,8 @@ pub enum ProtocolError {
     DataAfterStls,
 }
 
-/// Why the device would not let this host in.
+/// Why the host did not get past authentication: the device refused it
+/// or closed on it, or the authenticator would not sign.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthError {

@@ -147,7 +147,8 @@ fn absorb(hash: &mut Sha512, data: &[u8]) {
 /// One side of SPAKE2 as BoringSSL runs it on edwards25519, which is
 /// what adbd speaks: not RFC 9382, and not what the `spake2` crate
 /// implements. [`pair`](crate::pairing::pair) runs one as
-/// [`Role::Alice`].
+/// [`Role::Alice`]; it is public so that whatever stands in for a
+/// device, a test or an emulator, can run the other side.
 ///
 /// The scalars it holds, and the bytes of the point both sides arrive
 /// at, are wiped as they go. Two kinds of copy are not. SHA-512's

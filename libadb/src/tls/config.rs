@@ -77,9 +77,9 @@ impl TlsClientConfig {
     /// # Errors
     ///
     /// [`TlsConfigError::Rustls`] if `rustls` will not take the
-    /// identity's key. One built by
-    /// [`TlsIdentity::from_key`](crate::tls::TlsIdentity::from_key) does
-    /// not cause it.
+    /// identity's key. `ring` refuses an RSA key whose public exponent is
+    /// below 65537, which [`AdbKey`](crate::keys::AdbKey) accepts down to
+    /// 3; the keys `adb` makes all use 65537.
     pub fn adb(identity: &TlsIdentity) -> Result<Self, TlsConfigError> {
         // Spelled out, not defaulted: a feature-unified build may switch on
         // `tls12` or another provider, and a default would follow it.
