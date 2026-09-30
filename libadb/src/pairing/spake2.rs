@@ -142,6 +142,14 @@ fn absorb(hash: &mut Sha512, data: &[u8]) {
 }
 
 /// One side of a SPAKE2 exchange.
+///
+/// The scalars it holds, and the bytes of the point both sides arrive
+/// at, are wiped as they go. Two kinds of copy are not. SHA-512's
+/// working state: `sha2` 0.10 has no way to clear it, so the hashers
+/// that take in the password and the transcript leave their last state
+/// in memory they free, and the transcript's is as good as the key it
+/// finishes into. And whatever the curve arithmetic leaves on the stack
+/// along the way. The key is used once, for one `PeerInfo` each way.
 pub struct Spake2 {
     role: Role,
     my_name: Vec<u8>,
@@ -228,7 +236,7 @@ impl Spake2 {
             Role::Bob => Self::point(&M_BYTES),
         };
         let unmasked = masked - mul_raw(&peer_mask, &self.password_scalar);
-        let shared = mul_raw(&unmasked, &self.private_key).compress().to_bytes();
+        let shared = Zeroizing::new(mul_raw(&unmasked, &self.private_key).compress().to_bytes());
 
         let (alice_name, bob_name, alice_msg, bob_msg) = match self.role {
             Role::Alice => (&self.my_name, &self.their_name, &self.my_msg, &their_msg),
@@ -241,7 +249,7 @@ impl Spake2 {
         absorb(&mut hash, bob_name);
         absorb(&mut hash, alice_msg);
         absorb(&mut hash, bob_msg);
-        absorb(&mut hash, &shared);
+        absorb(&mut hash, shared.as_ref());
         absorb(&mut hash, self.password_hash.as_ref());
         Ok(Zeroizing::new(hash.finalize().into()))
     }

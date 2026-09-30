@@ -29,6 +29,11 @@ pub(crate) const TAG_LEN: usize = 16;
 /// could stretch to thousands, and the one message sealed is a
 /// `PeerInfo` block of a few kilobytes, where GCM refuses only past
 /// 64 GiB.
+///
+/// Dropping it wipes the AES key schedule, but not the GHASH subkey.
+/// `polyval`, which holds that, clears it only with a feature of its
+/// own, and on x86 not even then: there its state sits behind
+/// `ManuallyDrop` so that the backend can be picked at run time.
 pub(crate) struct Cipher {
     key: Aes128Gcm,
     encrypt_counter: u64,
