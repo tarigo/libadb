@@ -75,6 +75,11 @@ impl TlsClientConfig {
             .map_err(TlsConfigError::Rustls)?;
         // adbd ignores SNI; sending one would only differ from `adb`.
         inner.enable_sni = false;
+        // Nor does `adb` resume. Every device answers to the same
+        // placeholder name, so a ticket from one would go to the next,
+        // in the clear, and a resumed session carries no client
+        // certificate for the device to know the host by.
+        inner.resumption = rustls::client::Resumption::disabled();
 
         Ok(Self {
             inner: Arc::new(inner),

@@ -67,6 +67,8 @@ fn device_identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
 struct ClientPolicy {
     accept: bool,
     provider: Arc<rustls::crypto::CryptoProvider>,
+    /// How many client certificates the device has been shown.
+    shown: Arc<AtomicUsize>,
 }
 
 impl ClientCertVerifier for ClientPolicy {
@@ -80,6 +82,7 @@ impl ClientCertVerifier for ClientPolicy {
         _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
+        self.shown.fetch_add(1, Ordering::Relaxed);
         if self.accept {
             Ok(ClientCertVerified::assertion())
         } else {
@@ -123,6 +126,11 @@ impl ClientCertVerifier for ClientPolicy {
 
 /// The device's side of TLS 1.3, taking or refusing the host's key.
 fn device_config(policy: KeyPolicy) -> Arc<ServerConfig> {
+    device_config_counting(policy, Arc::default())
+}
+
+/// [`device_config`], counting in `shown` the certificates it checks.
+fn device_config_counting(policy: KeyPolicy, shown: Arc<AtomicUsize>) -> Arc<ServerConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let (cert, key) = device_identity();
     let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
@@ -131,6 +139,7 @@ fn device_config(policy: KeyPolicy) -> Arc<ServerConfig> {
         .with_client_cert_verifier(Arc::new(ClientPolicy {
             accept: policy == KeyPolicy::Accept,
             provider,
+            shown,
         }))
         .with_single_cert(vec![cert], key)
         .unwrap();
@@ -257,6 +266,60 @@ async fn the_device_is_shown_the_host_key_inside_the_certificate() {
     // The two certificates differ in their validity dates, so compare
     // the part the device actually looks at.
     assert_eq!(spki_of(&offered), spki_of(&expected));
+}
+}
+
+/// A device that serves two connections from one configuration, whose
+/// session cache would let the second resume the first. Reports how
+/// each handshake went and how many certificates it was shown.
+fn spawn_device_that_would_resume() -> (SocketAddr, JoinHandle<(Vec<rustls::HandshakeKind>, usize)>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let shown = Arc::new(AtomicUsize::new(0));
+        let config = device_config_counting(KeyPolicy::Accept, Arc::clone(&shown));
+        let mut kinds = Vec::new();
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().unwrap();
+            let conn = ServerConnection::new(Arc::clone(&config)).unwrap();
+            let mut tls = StreamOwned::new(conn, socket);
+            // Echoing a message makes the host read past the tickets.
+            let mut buf = [0u8; 64];
+            let n = tls.read(&mut buf).unwrap();
+            tls.write_all(&buf[..n]).unwrap();
+            tls.flush().unwrap();
+            kinds.push(tls.conn.handshake_kind().unwrap());
+            let _ = tls.read(&mut buf);
+        }
+        (kinds, shown.load(Ordering::Relaxed))
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_second_connection_does_not_resume_the_first() {
+    // Every device answers to the one placeholder name, so a ticket from
+    // one would be offered to the next, in the clear, and a device that
+    // took it up would never see the certificate it knows the host by.
+    let (addr, device) = spawn_device_that_would_resume();
+
+    let config = client_config();
+    for _ in 0..2 {
+        let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+        transport.start_tls(&config, &[]).await.unwrap();
+        transport.write(b"ping").await.unwrap();
+        transport.flush().await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = transport.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+    }
+
+    let (kinds, shown) = device.join().unwrap();
+    assert_eq!(kinds, [rustls::HandshakeKind::Full, rustls::HandshakeKind::Full]);
+    assert_eq!(shown, 2, "the device checked the host's certificate both times");
 }
 }
 
