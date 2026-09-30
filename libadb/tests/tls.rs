@@ -1091,7 +1091,9 @@ fn spki_of(der: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------
 
 use libadb::error::{AuthError, ProtocolError};
-use libadb::protocol::command::{CMD_CNXN, CMD_OKAY, CMD_STLS};
+use libadb::protocol::command::{
+    Command, AUTH_SIGNATURE, AUTH_TOKEN, CMD_AUTH, CMD_CNXN, CMD_OKAY, CMD_STLS,
+};
 use libadb::protocol::constant::{ADB_VERSION, STLS_VERSION};
 use libadb::{Connection, Error};
 
@@ -1577,6 +1579,93 @@ async fn a_profile_without_a_client_certificate_is_not_said_to_have_a_refused_ke
         "expected the alert itself, got {err:?}"
     );
     assert!(!device.join().unwrap().refused_key);
+}
+}
+
+/// What a device that asks for AUTH inside TLS does with the signature.
+#[derive(Clone, Copy, Debug)]
+enum AfterSignature {
+    /// Close the session, as over a key it will not have.
+    Close,
+    /// Answer with STLS, which has no place inside TLS.
+    Stls,
+}
+
+/// A device that demands TLS and then, inside it, asks the host to sign
+/// a token instead of sending its CNXN. No AOSP device does; a device
+/// of another make might.
+fn spawn_device_that_authenticates_inside_tls(
+    after: AfterSignature,
+) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
+        socket
+            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
+
+        let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        tls.write_all(&header(CMD_AUTH, AUTH_TOKEN, 0, &[0x42; 20]))
+            .unwrap();
+        tls.flush().unwrap();
+        let (command, arg0, _, _) = read_packet(&mut tls);
+        assert_eq!(
+            (command, arg0),
+            (CMD_AUTH, AUTH_SIGNATURE),
+            "the host signs the token"
+        );
+        match after {
+            AfterSignature::Close => {}
+            AfterSignature::Stls => {
+                tls.write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+                    .unwrap();
+                tls.flush().unwrap();
+            }
+        }
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_close_after_the_signature_inside_tls_is_judged_as_one_before_it() {
+    // The same close one packet earlier is a device that may have
+    // refused the key; after the signature it is no different.
+    let (addr, device) = spawn_device_that_authenticates_inside_tls(AfterSignature::Close);
+
+    let err = failed_connect(addr, &client_config()).await;
+
+    assert!(
+        matches!(err, Error::Auth(AuthError::TlsClosedBeforeConnect)),
+        "got {err:?}"
+    );
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn an_stls_in_answer_to_the_signature_inside_tls_is_out_of_turn() {
+    // A second STLS is a protocol error wherever it comes inside the
+    // session. After the signature it read as a rejected key.
+    let (addr, device) = spawn_device_that_authenticates_inside_tls(AfterSignature::Stls);
+
+    let err = failed_connect(addr, &client_config()).await;
+
+    assert!(
+        matches!(
+            err,
+            Error::Protocol(ProtocolError::UnexpectedCommand(Command::StartTls))
+        ),
+        "got {err:?}"
+    );
+    device.join().unwrap();
 }
 }
 

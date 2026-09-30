@@ -128,15 +128,14 @@ where
         )
         .await?;
 
-        match verdict.command {
-            Command::Connect => {
-                Self::assemble(transport, desync, recv_buf, banner, config, verdict)
+        match verdict {
+            Verdict::Connected(cnxn) => {
+                Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
             }
-            Command::StartTls => {
-                log::debug!("device demands TLS: STLS version {:#010x}", verdict.arg0);
+            Verdict::StartTls(offer) => {
+                log::debug!("device demands TLS: STLS version {:#010x}", offer.arg0);
                 Err(ProtocolError::TlsRequired.into())
             }
-            other => Err(ProtocolError::UnexpectedCommand(other).into()),
         }
     }
 
@@ -176,9 +175,27 @@ where
     }
 }
 
+/// How the device ended the opening exchange.
+pub(crate) enum Verdict {
+    /// Its own CNXN: it is satisfied.
+    Connected(Packet),
+    /// STLS: it will only go on inside TLS.
+    StartTls(Packet),
+}
+
+impl Verdict {
+    /// The verdict `pkt` carries, or `pkt` back if it carries none.
+    fn of(pkt: Packet) -> Result<Self, Packet> {
+        match pkt.command {
+            Command::Connect => Ok(Self::Connected(pkt)),
+            Command::StartTls => Ok(Self::StartTls(pkt)),
+            _ => Err(pkt),
+        }
+    }
+}
+
 /// The half of the handshake both entry points share: send our CNXN
-/// and bring back the device's verdict — its own CNXN once it is
-/// satisfied, or STLS if it will only go on inside TLS.
+/// and bring back the device's verdict.
 ///
 /// Authentication happens in here when the device asks for it. Any
 /// other answer is a protocol error, and the caller never sees one.
@@ -189,7 +206,7 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
     config: &ConnectionConfig,
     desync: &DesyncFlag,
     recv_buf: &mut BytesMut,
-) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
     let hello = Packet::new(
         Command::Connect,
         command::ADB_VERSION,
@@ -201,8 +218,11 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
     send_pkt(transport, desync, &hello, Checksum::Compute).await?;
 
     let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
+    let pkt = match Verdict::of(pkt) {
+        Ok(verdict) => return Ok(verdict),
+        Err(pkt) => pkt,
+    };
     match pkt.command {
-        Command::Connect | Command::StartTls => Ok(pkt),
         Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
             do_auth(transport, desync, auth, recv_buf, pkt.data, config).await
         }
@@ -212,7 +232,7 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
 
 /// Answer the device's AUTH challenge.
 ///
-/// Returns the packet the exchange ended on: CNXN when the key was
+/// Returns the verdict the exchange ended on: CNXN when the key was
 /// accepted, or STLS if the device would rather have TLS. Naming that
 /// here would make a device offering TLS late look like a rejected key,
 /// so the caller classifies it. Anything else is a rejection.
@@ -223,7 +243,7 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     recv_buf: &mut BytesMut,
     token: Bytes,
     config: &ConnectionConfig,
-) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
     // Checked here rather than in each authenticator: a stray
     // length must not reach a signer that may be someone else's.
     if token.len() != command::AUTH_TOKEN_LEN {
@@ -244,9 +264,12 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     .await?;
 
     let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-    match resp.command {
+    let resp = match Verdict::of(resp) {
         // CNXN, or STLS: the caller decides what either means.
-        Command::Connect | Command::StartTls => return Ok(resp),
+        Ok(verdict) => return Ok(verdict),
+        Err(resp) => resp,
+    };
+    match resp.command {
         // A second token: the signature was not enough, offer the key.
         Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
         _ => return Err(AuthError::Rejected.into()),
@@ -263,8 +286,8 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
         .await?;
 
         let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-        if matches!(resp.command, Command::Connect | Command::StartTls) {
-            return Ok(resp);
+        if let Ok(verdict) = Verdict::of(resp) {
+            return Ok(verdict);
         }
     }
 
