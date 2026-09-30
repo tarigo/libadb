@@ -44,7 +44,7 @@ pub struct MsgHeader {
     pub data_check: u32,
 }
 
-fn checksum(payload: &[u8]) -> u32 {
+pub fn checksum(payload: &[u8]) -> u32 {
     payload
         .iter()
         .fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
@@ -62,7 +62,7 @@ fn encode_header(cmd: u32, arg0: u32, arg1: u32, payload: &[u8], dst: &mut [u8; 
     dst[20..24].copy_from_slice(&magic.to_le_bytes());
 }
 
-fn decode_header(src: &[u8; HEADER_SIZE]) -> MsgHeader {
+pub fn decode_header(src: &[u8; HEADER_SIZE]) -> MsgHeader {
     let command = u32::from_le_bytes(src[0..4].try_into().unwrap());
     let magic = u32::from_le_bytes(src[20..24].try_into().unwrap());
     assert_eq!(
