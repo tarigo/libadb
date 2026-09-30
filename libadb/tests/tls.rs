@@ -377,6 +377,60 @@ async fn a_split_session_reads_and_writes_at_once() {
 }
 }
 
+/// A device that reads until the host is done and reports whether the
+/// host said so with `close_notify`, rather than just hanging up.
+fn spawn_device_that_waits_for_the_end() -> (SocketAddr, JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        let mut buf = [0u8; 256];
+        loop {
+            match tls.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                // rustls calls a hangup without `close_notify` a truncation.
+                Err(_) => return false,
+            }
+        }
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_split_session_can_still_say_it_is_done() {
+    // `split` consumes the session, and `shutdown` with it, so a split
+    // connection could only hang up: to the peer, just like one cut short.
+    let (addr, device) = spawn_device_that_waits_for_the_end();
+    let (reader, mut writer) = connected(addr).await.split().unwrap();
+
+    writer.shutdown().await.unwrap();
+    drop((reader, writer));
+
+    assert!(
+        device.join().unwrap(),
+        "the device saw a bare hangup, not close_notify"
+    );
+}
+}
+
+rt_test! {
+async fn a_split_session_that_just_hangs_up_is_told_apart() {
+    // The same device, left without `close_notify`, so the test above
+    // shows what it claims to.
+    let (addr, device) = spawn_device_that_waits_for_the_end();
+    let (reader, writer) = connected(addr).await.split().unwrap();
+
+    drop((reader, writer));
+
+    assert!(!device.join().unwrap(), "a bare hangup passed for close_notify");
+}
+}
+
 /// What a [`spawn_quiet_device`] does next.
 enum Step {
     /// Send these bytes.
