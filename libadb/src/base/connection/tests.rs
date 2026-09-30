@@ -493,9 +493,11 @@ fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
 
 #[test]
 fn a_large_packet_is_zeroed_once_while_select_reads_it() {
-    // `recv_pkt` pins this for the handshake. The read loop stages its
-    // own buffer, and staging it afresh for each 16 KiB read, as TLS
-    // hands them over, zeroed the rest of the packet every time.
+    // The read loop stages its own buffer, apart from `recv_pkt` (whose
+    // twin test in wire.rs covers the handshake), and must zero it once
+    // per packet, not again for each 16 KiB read that TLS hands over.
+    // The bound allows the header and the MIN_READ that a first read is
+    // padded to.
     let big = vec![0x5a; 256 * 1024];
     let (mut conn, ch) = connected_for_select(|mock| {
         mock.feed(&wrte(1, &big)).drips(16 * 1024);
