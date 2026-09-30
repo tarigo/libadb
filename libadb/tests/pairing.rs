@@ -60,7 +60,7 @@ fn spawn_pairing_device(code: &'static str) -> (SocketAddr, JoinHandle<DeviceOut
         // asks for the host's.
         let config = device_config(KeyPolicy::Accept);
 
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         let mut outcome = DeviceOutcome::default();
@@ -188,15 +188,13 @@ async fn the_right_code_hands_the_device_our_key() {
     let (addr, device) = spawn_pairing_device("592781");
     let key = host_key();
 
-    let paired = pair(
-        &mut client(addr).await,
-        &client_config(),
-        &key,
-        "592781",
-        &mut OsRng,
-    )
-    .await
-    .expect("a matching code pairs");
+    let mut transport = client(addr).await;
+    let config = client_config();
+    let mut rng = OsRng;
+    let pairing = pair(&mut transport, &config, &key, "592781", &mut rng);
+    let paired = rt::within("the pairing", pairing)
+        .await
+        .expect("a matching code pairs");
 
     assert_eq!(paired.guid, DEVICE_GUID);
 
@@ -214,14 +212,11 @@ rt_test! {
 async fn a_wrong_code_is_reported_as_such_and_gives_nothing_away() {
     let (addr, device) = spawn_pairing_device("592781");
 
-    let outcome = pair(
-        &mut client(addr).await,
-        &client_config(),
-        &host_key(),
-        "000000",
-        &mut OsRng,
-    )
-    .await;
+    let mut transport = client(addr).await;
+    let (config, key) = (client_config(), host_key());
+    let mut rng = OsRng;
+    let pairing = pair(&mut transport, &config, &key, "000000", &mut rng);
+    let outcome = rt::within("the pairing", pairing).await;
 
     let Err(err) = outcome else {
         panic!("a wrong code must not pair");

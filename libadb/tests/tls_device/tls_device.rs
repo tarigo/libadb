@@ -4,8 +4,10 @@
 
 #![allow(dead_code)]
 
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::{cert, AdbKey};
@@ -15,6 +17,16 @@ use libadb::tls::rustls::{DistinguishedName, ServerConfig};
 use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
 
 use crate::test_key;
+
+/// Take the host's connection, with the timeouts a fake device needs:
+/// a host that stops talking fails its test instead of hanging it.
+pub fn accept(listener: &TcpListener) -> TcpStream {
+    let (socket, _) = listener.accept().unwrap();
+    let limit = Some(Duration::from_secs(5));
+    socket.set_read_timeout(limit).unwrap();
+    socket.set_write_timeout(limit).unwrap();
+    socket
+}
 
 /// The host's key: the one a USB prompt would have approved.
 pub fn host_key() -> AdbKey {
