@@ -358,13 +358,16 @@ mod inner {
         /// Records sealed and not yet written, already advanced past
         /// whatever the socket took, so a dropped call resumes here
         /// instead of leaving half a record behind. They go out on a
-        /// flush, or once there are `QUEUE_LIMIT` of them.
+        /// flush, or with the next write once they come to `QUEUE_LIMIT`
+        /// bytes.
         tx: BytesMut,
-        /// The failure the session met, kept so that every call after it
-        /// reports it too. Set before anything awaits, so a dropped call
-        /// cannot take it along.
+        /// The failure the session met, kept so that every later call
+        /// reports it too; only a write after `shutdown` reports `Closed`
+        /// instead. Set before anything awaits, so a dropped call cannot
+        /// take it along.
         failed: Option<rustls::Error>,
-        /// Whether `shutdown` has queued `close_notify`.
+        /// Whether `shutdown` has been called. Writes are refused from
+        /// then on.
         closed: bool,
     }
 
@@ -401,9 +404,9 @@ mod inner {
             })
         }
 
-        /// Once the session has failed, every call reports that. The alert
-        /// for it goes out with the first write, flush or shutdown after,
-        /// if the socket will take it.
+        /// Once the session has failed, a write, flush or shutdown reports
+        /// that, and the first of them sends the alert for it, if the
+        /// socket will take it.
         async fn failure(&mut self) -> Result<(), TlsError<T::Error>> {
             let Some(e) = self.failed.clone() else {
                 return Ok(());
@@ -453,9 +456,11 @@ mod inner {
 
         /// Send `close_notify` and push it out.
         pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
+            // Up front, as in the split half, so that a write after this is
+            // refused however it ends, a failed session included.
+            self.closed = true;
             self.failure().await?;
             self.conn.send_close_notify();
-            self.closed = true;
             harvest(&mut self.conn, &mut self.tx);
             self.flush_tx().await
         }
@@ -547,8 +552,10 @@ mod inner {
     /// [`Transport::tls_ready`](crate::transport::common::Transport::tls_ready)
     /// does the wrapping for the TCP-or-USB enum.
     ///
-    /// Once `rustls` rejects what the device sent, every later read,
-    /// write, flush and shutdown returns that same [`TlsError::Tls`].
+    /// Once `rustls` rejects what the device sends in a running session,
+    /// every later read, write, flush and shutdown returns that same
+    /// [`TlsError::Tls`], except that a write after
+    /// [`shutdown`](Self::shutdown) is refused with [`TlsError::Closed`].
     /// What decrypted ahead of the failure is still read first.
     ///
     /// # Cancellation
@@ -744,7 +751,8 @@ mod inner {
         /// Wrap a TCP transport in [`MaybeTls`] so that it can start TLS
         /// later, starting none now. A USB transport passes through as it
         /// is: adbd never offers TLS there, and `start_tls` on it fails
-        /// with [`TlsError::NotAvailable`].
+        /// with [`TlsError::NotAvailable`], wrapped in `TransportError::Tcp`
+        /// as every TLS error is.
         pub fn tls_ready(self) -> Transport<MaybeTls<T>, U> {
             match self {
                 Self::Tcp(t) => Transport::Tcp(MaybeTls::plain(t)),
@@ -760,9 +768,10 @@ mod inner {
     /// wait on the socket, so neither can hold the other up.
     struct TlsShared {
         conn: async_lock::Mutex<Box<ClientConnection>>,
-        /// The failure the session met, kept so that every call after it
-        /// reports it too. The reader sets it under `conn`, where a writer
-        /// looks before it hands rustls anything, so none slips past.
+        /// The failure the session met, kept so that every later call
+        /// reports it too; only a write after `shutdown` reports `Closed`
+        /// instead. The reader sets it under `conn`, where a writer looks
+        /// before it hands rustls anything, so none slips past.
         failed: OnceLock<rustls::Error>,
     }
 
@@ -782,7 +791,8 @@ mod inner {
         /// Records sealed and not yet written, advanced past whatever the
         /// socket took, so a dropped call resumes where it stopped.
         pending: BytesMut,
-        /// Whether `shutdown` may have queued `close_notify`.
+        /// Whether `shutdown` has been called. Writes are refused from
+        /// then on, as the `close_notify` may already be queued.
         closed: bool,
         shared: Arc<TlsShared>,
     }

@@ -187,11 +187,12 @@ host-keys = ["keys", "rsa/getrandom"]
 # ADB over TLS: wireless debugging on Android 11+ (the STLS command).
 # Needs `keys`, because the certificate it presents is signed by the
 # very key that authorises a USB connection, and `split`, which brings
-# `std` (for the clock the certificate is dated by) along with the
-# transport traits and the lock that the split halves of a session
-# share. `rsa/sha2` takes SHA-256 from `rsa`'s re-export rather than
-# opening a second path to `sha2`. `rsa/std`, since std is here anyway,
-# lets `rsa`'s and `pkcs8`'s errors stand as the source of ours.
+# `std` (for the clock the certificate is dated by), the `Transport`
+# enum that `MaybeTls` slots into, and the lock that the split halves of
+# a session share. `rsa/sha2` takes SHA-256 from `rsa`'s re-export
+# rather than opening a second path to `sha2`. `rsa/std`, since std is
+# here anyway, lets `rsa`'s and `pkcs8`'s errors stand as the source of
+# ours.
 tls = ["keys", "split", "rsa/sha2", "rsa/std", "dep:rustls", "dep:x509-cert"]
 # `adb pair`: put a key on a device that has never seen it. Builds on
 # `tls`, because pairing runs inside a TLS session and presents a

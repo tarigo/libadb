@@ -238,8 +238,10 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
 /// Answer the device's AUTH challenge.
 ///
 /// Returns the verdict the exchange ended on: CNXN once the key is
-/// accepted, or STLS if the device switches to TLS midway. Any other
-/// answer is [`AuthError::Rejected`].
+/// accepted, or STLS if the device switches to TLS midway. Any AUTH but
+/// the one token that asks for the key is [`AuthError::Rejected`]; a
+/// command with no place in the handshake, such as SYNC, fails as
+/// [`ProtocolError::UnexpectedCommand`].
 pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     desync: &DesyncFlag,
