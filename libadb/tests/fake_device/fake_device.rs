@@ -44,6 +44,7 @@ pub struct MsgHeader {
     pub data_check: u32,
 }
 
+/// The ADB `data_check`: the payload's bytes, summed with wrap.
 pub fn checksum(payload: &[u8]) -> u32 {
     payload
         .iter()
@@ -62,6 +63,8 @@ fn encode_header(cmd: u32, arg0: u32, arg1: u32, payload: &[u8], dst: &mut [u8; 
     dst[20..24].copy_from_slice(&magic.to_le_bytes());
 }
 
+/// Parse a wire header, panicking unless its magic is the command
+/// inverted.
 pub fn decode_header(src: &[u8; HEADER_SIZE]) -> MsgHeader {
     let command = u32::from_le_bytes(src[0..4].try_into().unwrap());
     let magic = u32::from_le_bytes(src[20..24].try_into().unwrap());

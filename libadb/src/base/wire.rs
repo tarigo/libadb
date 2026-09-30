@@ -362,9 +362,10 @@ mod tests {
 
     #[test]
     fn a_large_packet_is_zeroed_once_however_it_arrives() {
-        // Over TLS a read brings one 16 KiB record. Staging afresh for
-        // each read zeroed the rest of the packet every time: some 33 MiB
-        // of memset for one 1 MiB WRTE.
+        // Over TLS a read brings one 16 KiB record. The packet is staged,
+        // and so zeroed, once however many reads fill it; staging afresh
+        // for each would memset some 33 MiB for one 1 MiB WRTE. The slack
+        // is the MIN_READ that the first, header-sized read is padded to.
         let wire = wire_packet(1 << 20);
         let mut t = Feeder::dripping(wire.clone(), 16 * 1024);
         let mut buf = BytesMut::new();

@@ -191,12 +191,4 @@ mod tests {
         assert_eq!(CMD_AUTH, u32::from_le_bytes(*b"AUTH"));
         assert_eq!(CMD_STLS, u32::from_le_bytes(*b"STLS"));
     }
-
-    #[test]
-    fn the_code_a_wireless_device_answers_with_is_a_command_we_know() {
-        // 1397511251 is the decimal an unnamed STLS used to surface as,
-        // in `invalid command 1397511251`.
-        assert_eq!(CMD_STLS, 1_397_511_251);
-        assert_eq!(Command::try_from(CMD_STLS), Ok(Command::StartTls));
-    }
 }

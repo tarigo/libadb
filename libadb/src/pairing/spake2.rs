@@ -400,12 +400,13 @@ mod tests {
 
     #[test]
     fn the_exchange_matches_an_independent_implementation() {
-        // Fixed scalars and a fixed password, against values produced
-        // by a separate implementation written from the same BoringSSL
-        // source. Every constant this pins — the mask points, the
-        // cofactor fix, the length-prefixed transcript, the NUL inside
-        // each name — is one whose absence looks exactly like a wrong
-        // pairing code on the wire.
+        // Fixed scalars and a fixed password, against the values a Python
+        // transcription of BoringSSL's spake25519.cc computes with plain
+        // integers and hashlib, sharing nothing with the arithmetic here.
+        // Every constant this pins — the mask points, the cofactor fix,
+        // the length-prefixed transcript, the trailing NUL on each name —
+        // is one whose absence looks exactly like a wrong pairing code on
+        // the wire.
         let alice = Spake2::new(Role::Alice, CLIENT, SERVER, b"592781", &mut seed(0));
         let bob = Spake2::new(Role::Bob, SERVER, CLIENT, b"592781", &mut seed(64));
 

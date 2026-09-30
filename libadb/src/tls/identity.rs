@@ -133,7 +133,9 @@ impl zeroize::ZeroizeOnDrop for TlsIdentity {}
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_private_key_is_wiped_on_drop() {
+    fn the_identity_keeps_its_zeroize_on_drop_promise() {
+        // Pins only the marker, which is claimed by hand next to the Drop
+        // impl; the wipe itself is that impl, which this cannot see.
         fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         wiped_on_drop::<super::TlsIdentity>();
     }

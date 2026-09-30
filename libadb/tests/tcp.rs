@@ -110,6 +110,28 @@ async fn a_signer_that_refuses_says_why() {
 }
 
 rt_test! {
+async fn a_device_that_demands_tls_is_reported_as_tls_required() {
+    // Android 11+ wireless debugging answers CNXN with STLS. A plain
+    // connection must report that as TlsRequired, whose message names
+    // the ways out, not as an unknown command.
+    let (handle, addr) = FakeDevice::new().require_tls().bind().await;
+    let device = rt::spawn(async move { handle.accept().await });
+    let stream = rt::connect(addr).await;
+
+    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    else {
+        panic!("expected the handshake to refuse a TLS-only device");
+    };
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
+        "expected TlsRequired, got {err:?}"
+    );
+    drop(device);
+}
+}
+
+rt_test! {
 async fn connect_auth_pubkey() {
     let dev = FakeDevice::new().auth(AuthPolicy::RequirePublicKey {
         first_token: [0x11u8; 20].to_vec(),
@@ -678,27 +700,5 @@ async fn require_feature_works_after_connect_with_raw_banner() {
     expect_missing_feature(conn.require_feature(Feature::TrackApp), Feature::TrackApp);
 
     rt::join(device).await;
-}
-}
-
-rt_test! {
-async fn a_device_that_demands_tls_is_named_as_such_not_as_a_raw_command() {
-    // Android 11+ wireless debugging answers CNXN with STLS. Before the
-    // command had a name here, that surfaced as the bare decimal
-    // `invalid command 1397511251`.
-    let (handle, addr) = FakeDevice::new().require_tls().bind().await;
-    let device = rt::spawn(async move { handle.accept().await });
-    let stream = rt::connect(addr).await;
-
-    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
-    else {
-        panic!("expected the handshake to refuse a TLS-only device");
-    };
-
-    assert!(
-        matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
-        "expected TlsRequired, got {err:?}"
-    );
-    drop(device);
 }
 }

@@ -820,15 +820,17 @@ mod cert {
         UNIX_EPOCH + Duration::from_secs(1_700_000_000)
     }
 
-    /// The exact certificate `TEST_KEY_PEM` yields at `fixed_start()`,
-    /// as produced independently by a third-party X.509 library from the
-    /// same key, the same instant and the same field set.
+    /// The exact certificate `TEST_KEY_PEM` yields at `fixed_start()`.
+    /// Ruby's `openssl` extension (`OpenSSL::X509::Certificate`, on
+    /// LibreSSL 3.3.6) builds the same bytes from the same key, the same
+    /// instant and AOSP's fields.
     ///
     /// It pins the encoding: the RFC 5280 choice of `UTCTime` over
     /// `GeneralizedTime`, the omitted `critical DEFAULT FALSE`, the
     /// attribute order inside the name, and the explicit NULL parameters on
     /// the signature algorithm. Any of those drifting is a silent
-    /// incompatibility with what `adb` puts on the wire.
+    /// departure from what `adb` puts on the wire, which a stricter device
+    /// could refuse.
     const GOLDEN_CERT_HEX: &str = "\
         30820317308201ffa003020102020101300d06092a864886f70d01010b0500302d310b30\
         090603550406130255533110300e060355040a0c07416e64726f6964310c300a06035504\
@@ -912,7 +914,7 @@ mod cert {
     }
 
     #[test]
-    fn the_three_extensions_are_the_ones_openssl_would_have_written() {
+    fn the_three_extensions_are_the_ones_aosp_writes() {
         let tbs = built().tbs_certificate;
 
         let basic: BasicConstraints = tbs.get().unwrap().map(|(_, e)| e).unwrap();
@@ -949,9 +951,9 @@ mod cert {
 
     #[test]
     fn a_clock_no_certificate_can_carry_is_blamed_on_the_clock() {
-        // A validity spans 1970 to 9999. Outside it the certificate
-        // library says only that encoding failed, which points at the
-        // wrong thing: nothing is wrong with the key or the encoder.
+        // `x509-cert` encodes times from 1970 to 9999 only, and outside
+        // that reports a bare encoding error, which points at the wrong
+        // thing: nothing is wrong with the key or the encoder.
         let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
         let before_1970 = UNIX_EPOCH - Duration::from_secs(1);
         // Early enough in 9999 to start there, too late to last ten years.

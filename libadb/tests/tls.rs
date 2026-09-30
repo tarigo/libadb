@@ -1,4 +1,6 @@
-//! The TLS transport against a real `rustls` server.
+//! The TLS transport, and `connect_tls` on top of it, against a real
+//! `rustls` server, plus one run against a real device when one is
+//! offered.
 //!
 //! The device side here is deliberately written in a different style
 //! from the client under test: blocking, on its own thread, over
@@ -42,8 +44,8 @@ use tls_device::{client_config, device_config, device_config_counting, host_key,
 
 /// What the fake device did, so a test can check the host's side of it.
 struct DeviceReport {
-    /// The public key inside the certificate the host offered, in DER.
-    client_spki: Option<Vec<u8>>,
+    /// The certificate the host offered, in DER.
+    client_cert: Option<Vec<u8>>,
     /// Plaintext the host sent inside TLS.
     received: Vec<u8>,
     /// Whether the handshake completed on the device's side.
@@ -63,9 +65,10 @@ fn refused_the_key(error: &std::io::Error) -> bool {
     )
 }
 
-/// Start a device that demands TLS. It answers whatever the host sends
-/// with the same bytes reversed, so a test can tell a real round trip
-/// from an accident.
+/// Start a device that speaks TLS from the first byte, taking or
+/// refusing the host's key as `policy` says. It answers the first thing
+/// the host sends with the same bytes reversed, so a test can tell a
+/// real round trip from an accident.
 fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -78,7 +81,7 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
         let mut tls = StreamOwned::new(conn, socket);
 
         let mut report = DeviceReport {
-            client_spki: None,
+            client_cert: None,
             received: Vec::new(),
             handshake_ok: false,
             refused_key: false,
@@ -90,7 +93,7 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
             Ok(n) => {
                 report.handshake_ok = true;
                 report.received.extend_from_slice(&buf[..n]);
-                report.client_spki = tls
+                report.client_cert = tls
                     .conn
                     .peer_certificates()
                     .and_then(|c| c.first())
@@ -110,6 +113,8 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
     (addr, handle)
 }
 
+/// A TLS session to `addr` under the host's profile, handshake done,
+/// with no ADB on top.
 async fn connected(addr: SocketAddr) -> MaybeTls<rt::AdbTransport> {
     let stream = rt::connect(addr).await;
     let mut transport = MaybeTls::plain(rt::wrap(stream));
@@ -153,7 +158,7 @@ async fn the_device_is_shown_the_host_key_inside_the_certificate() {
     rt::within("the flush", transport.flush()).await.unwrap();
 
     let report = device.join().unwrap();
-    let offered = report.client_spki.expect("a client certificate was required");
+    let offered = report.client_cert.expect("a client certificate was required");
     let expected = cert::build(&host_key(), &mut OsRng).unwrap();
 
     // The two certificates differ in their validity dates, so compare
@@ -241,8 +246,14 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
         panic!("a device that refused the key must not hand out a working session");
     };
 
+    // The alert adbd sends, which the fake device sends too.
     assert!(
-        matches!(err, TlsError::Tls(rustls::Error::AlertReceived(_))) && err.is_key_rejected(),
+        matches!(
+            err,
+            TlsError::Tls(rustls::Error::AlertReceived(
+                rustls::AlertDescription::CertificateUnknown
+            ))
+        ) && err.is_key_rejected(),
         "the refusal must arrive as an alert and be recognised as one, got {err:?}"
     );
     assert!(
@@ -253,7 +264,7 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
 }
 
 rt_test! {
-async fn a_split_session_reads_and_writes_at_once() {
+async fn a_split_session_carries_plaintext_both_ways() {
     let (addr, device) = spawn_device(KeyPolicy::Accept);
 
     let transport = connected(addr).await;
@@ -297,8 +308,9 @@ fn spawn_device_that_waits_for_the_end() -> (SocketAddr, JoinHandle<bool>) {
 
 rt_test! {
 async fn a_split_session_can_still_say_it_is_done() {
-    // `split` consumes the session, and `shutdown` with it, so a split
-    // connection could only hang up: to the peer, just like one cut short.
+    // `split` consumes the session and its `shutdown`, so the write half
+    // carries one of its own. Without it a split connection could only
+    // hang up, which to the peer looks just like one cut short.
     let (addr, device) = spawn_device_that_waits_for_the_end();
     let (reader, mut writer) = connected(addr).await.split().unwrap();
 
@@ -430,8 +442,8 @@ fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
 
 rt_test! {
 async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
-    // A device that reads nothing leaves the writer blocked inside its
-    // drain with the write lock held. A read that queued for that lock
+    // A device that reads nothing leaves the writer waiting on the
+    // socket. A read that waited for it, for the engine they share say,
     // would stop reading the socket, and a peer that will not read until
     // it has been read from would then leave both sides stuck.
     //
@@ -508,7 +520,8 @@ async fn a_write_dropped_on_a_full_socket_leaves_the_queue_for_the_next_flush() 
 }
 
 /// A device that finishes the handshake and reads nothing until told
-/// how much to expect; then it reads that much and hands it back.
+/// how much to expect; then it reads that much and returns what it
+/// heard.
 fn spawn_device_that_listens_late() -> (SocketAddr, mpsc::Sender<usize>, JoinHandle<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -575,8 +588,8 @@ where
 rt_test! {
 async fn a_write_dropped_on_a_full_socket_is_not_sent_twice() {
     // A caller whose write was dropped sends the same bytes again, as it
-    // would over a plain socket. A write that had sealed them before it
-    // waited on the socket sent them twice.
+    // would over a plain socket. A write that sealed them before waiting
+    // on the socket, and was dropped there, would have them go out twice.
     let (addr, expect, device) = spawn_device_that_listens_late();
     let mut transport = connected(addr).await;
 
@@ -617,7 +630,8 @@ rt_test! {
 async fn a_broken_record_fails_the_read_rather_than_ending_it() {
     // A record that will not decrypt has to reach the caller as the TLS
     // failure it is. Read as a clean end of stream, it would pass for a
-    // device that hung up, and a connect takes that for a refused key.
+    // device that hung up, and a connect would report
+    // `TlsClosedBeforeConnect` for what is a corrupt session.
     let (addr, steps, device) = spawn_quiet_device();
     let mut transport = connected(addr).await;
 
@@ -663,7 +677,8 @@ fn spawn_device_that_floods_the_handshake() -> (SocketAddr, JoinHandle<()>) {
         // A host that gives up closes the socket, which ends this early.
         let _ = socket.write_all(&records);
 
-        // A host that went on reading would wait here for good.
+        // A host that went on reading would keep the device here until
+        // the socket's read timeout.
         let mut sink = [0u8; 4096];
         while matches!(socket.read(&mut sink), Ok(n) if n > 0) {}
     });
@@ -673,10 +688,10 @@ fn spawn_device_that_floods_the_handshake() -> (SocketAddr, JoinHandle<()>) {
 
 rt_test! {
 async fn a_handshake_message_too_big_to_buffer_fails_the_handshake() {
-    // rustls refuses records once it holds 64 KiB of one handshake
-    // message, and says so with an error. Taken for backpressure, that
-    // left the handshake reading for as long as the peer kept the
-    // socket open, and keeping everything it sent.
+    // rustls refuses more records once 64 KiB of them are buffered
+    // towards one handshake message, and says so with an error. Taken
+    // for backpressure, it would leave the handshake reading for as long
+    // as the peer kept the socket open, keeping everything it sent.
     let (addr, device) = spawn_device_that_floods_the_handshake();
     let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
 
@@ -930,7 +945,7 @@ async fn breakable_session(addr: SocketAddr) -> (MaybeTls<BreakableWrites>, Arc<
 rt_test! {
 async fn a_split_read_still_names_a_broken_record_when_its_alert_cannot_go_out() {
     // The alert for the record is owed and the socket will no longer
-    // take it. That is for the writer to report; what the reader has
+    // take it. Carrying it is the writer's business; what the reader has
     // to say is that the record would not decrypt.
     let (addr, steps, device) = spawn_quiet_device();
     let (transport, faults) = breakable_session(addr).await;
@@ -953,7 +968,7 @@ async fn a_split_read_still_names_a_broken_record_when_its_alert_cannot_go_out()
 }
 
 rt_test! {
-async fn a_split_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
+async fn a_split_read_still_delivers_what_arrived_when_the_writer_has_failed() {
     // A flush that failed leaves its records queued. That is the
     // writer's to report, and must not cost the reader what the device
     // has already sent.
@@ -977,7 +992,7 @@ async fn a_split_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
 }
 
 rt_test! {
-async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
+async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_has_failed() {
     // The same, before any split: the records of the failed flush wait
     // in the session, and the read carries on without them.
     let (addr, steps, device) = spawn_quiet_device();
@@ -1001,8 +1016,8 @@ async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_is_stuck() 
 rt_test! {
 async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
     // The alert for a broken record is the writer's to carry. A reader
-    // that sent it itself queued behind a writer held up on the socket,
-    // and the failure did not surface until that writer let go.
+    // that sent it itself would queue behind a writer held up on the
+    // socket, and the failure would not surface until that writer let go.
     let (addr, steps, device) = spawn_quiet_device();
     let (transport, faults) = breakable_session(addr).await;
     let (mut reader, mut writer) = transport.split().unwrap();
@@ -1031,10 +1046,11 @@ async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
 rt_test! {
 async fn a_broken_record_is_not_lost_to_a_dropped_read() {
     // `select_channel` drops a read when something else comes first, so
-    // a failure has to outlive the read that met it. Sending the alert
-    // from the read kept the failure in a local across the wait for the
-    // socket, and a read dropped there took it along: the next one found
-    // nothing to decrypt and took the hangup for a clean end of stream.
+    // a failure has to outlive the read that met it. Writes are held, so
+    // a read that waited on the socket, to send the alert say, would be
+    // dropped by the timeout below with the failure in hand. After the
+    // hangup the next read must still report it, not a clean end of
+    // stream.
     let (addr, steps, device) = spawn_quiet_device();
     let (mut transport, faults) = breakable_session(addr).await;
 
@@ -1062,9 +1078,10 @@ async fn a_broken_record_is_not_lost_to_a_dropped_read() {
 
 rt_test! {
 async fn a_session_that_met_a_broken_record_stays_failed() {
-    // Only the read that met the record reported it. The next found
-    // nothing to decrypt and went back to the socket, and a write went
-    // out after the fatal alert as if nothing had happened.
+    // A record that will not decrypt ends the session for good. Without
+    // that, the next read would find nothing to decrypt and go back to
+    // the socket, and a write would go out after the fatal alert as if
+    // nothing had happened.
     let (addr, steps, device) = spawn_quiet_device();
     let mut transport = connected(addr).await;
 
@@ -1247,7 +1264,9 @@ use libadb::{Connection, Error};
 
 const DEVICE_BANNER: &[u8] = b"device::features=shell_v2,cmd";
 
-fn header(command: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
+/// One whole packet as a device sends it: the 24-byte header, with its
+/// checksum and magic, then `payload`.
+fn packet(command: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
     let mut h = Vec::with_capacity(24 + payload.len());
     h.extend_from_slice(&command.to_le_bytes());
     h.extend_from_slice(&arg0.to_le_bytes());
@@ -1261,8 +1280,8 @@ fn header(command: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Read one packet the host sent, holding its magic and its checksum to
-/// what adbd checks: a host whose STLS carried the wrong magic went
-/// through every test here.
+/// what adbd checks, so a host that gets either wrong fails here and not
+/// only on a device.
 fn read_packet(r: &mut impl std::io::Read) -> (u32, u32, u32, Vec<u8>) {
     let mut h = [0u8; 24];
     r.read_exact(&mut h).unwrap();
@@ -1284,7 +1303,7 @@ fn read_packet(r: &mut impl std::io::Read) -> (u32, u32, u32, Vec<u8>) {
 struct HandshakeReport {
     /// arg0 and arg1 of the host's own STLS.
     host_stls: (u32, u32),
-    /// Whether the host's STLS carried a payload. AOSP's carries none.
+    /// How many payload bytes the host's STLS carried. AOSP's carries none.
     host_stls_payload: usize,
     /// Whether the host repeated its CNXN inside the session. It must
     /// not: the device speaks first there.
@@ -1307,7 +1326,7 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
-            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .write_all(&packet(CMD_STLS, STLS_VERSION, 0, &[]))
             .unwrap();
 
         let (command, arg0, arg1, payload) = read_packet(&mut socket);
@@ -1323,7 +1342,7 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
         let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         // The device speaks first inside the session.
-        if let Err(e) = tls.write_all(&header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER)) {
+        if let Err(e) = tls.write_all(&packet(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER)) {
             report.refused_key = refused_the_key(&e);
             return report;
         }
@@ -1379,8 +1398,8 @@ async fn a_key_the_device_will_not_have_is_named_as_such() {
         matches!(err, Error::Auth(libadb::error::AuthError::TlsKeyNotTrusted)),
         "expected TlsKeyNotTrusted, got {err:?}"
     );
-    // And it was the device's verdict on the key, not some other way of
-    // coming to an end, which the connect path would read the same way.
+    // And the alert came from the device's verifier turning the key
+    // down, not from some other failure on its side.
     assert!(
         device.join().unwrap().refused_key,
         "the device turned the key down itself"
@@ -1441,7 +1460,7 @@ fn spawn_device_that_stops_at_the_hello(reply: &'static [u8]) -> (SocketAddr, Jo
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
-            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .write_all(&packet(CMD_STLS, STLS_VERSION, 0, &[]))
             .unwrap();
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
@@ -1532,8 +1551,8 @@ fn spawn_device_with_a_packet_behind_its_stls() -> (SocketAddr, JoinHandle<bool>
         let mut socket = tls_device::accept(&listener);
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
-        let mut segment = header(CMD_STLS, STLS_VERSION, 0, &[]);
-        segment.extend_from_slice(&header(CMD_OKAY, 1, 2, &[]));
+        let mut segment = packet(CMD_STLS, STLS_VERSION, 0, &[]);
+        segment.extend_from_slice(&packet(CMD_OKAY, 1, 2, &[]));
         socket.write_all(&segment).unwrap();
 
         let mut rest = Vec::new();
@@ -1548,8 +1567,8 @@ rt_test! {
 async fn a_packet_behind_the_stls_is_named_rather_than_fed_to_tls() {
     // A TLS 1.3 server speaks only after the ClientHello, so what came
     // in the same segment as STLS is plaintext. Handed to rustls as the
-    // start of the session, it failed as a corrupt record, which said
-    // nothing about what had happened.
+    // start of the session, it would fail as a corrupt record, which
+    // says nothing about what happened.
     let (addr, device) = spawn_device_with_a_packet_behind_its_stls();
 
     let err = failed_connect(addr, &client_config()).await;
@@ -1577,7 +1596,7 @@ enum Departure {
 }
 
 /// A device that demands TLS, takes the host's key, and leaves as
-/// `departure` says instead of sending its CNXN.
+/// `departure` says before its CNXN is whole.
 fn spawn_device_that_leaves_after_the_handshake(
     departure: Departure,
 ) -> (SocketAddr, JoinHandle<()>) {
@@ -1589,7 +1608,7 @@ fn spawn_device_that_leaves_after_the_handshake(
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
-            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .write_all(&packet(CMD_STLS, STLS_VERSION, 0, &[]))
             .unwrap();
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
@@ -1606,7 +1625,7 @@ fn spawn_device_that_leaves_after_the_handshake(
                 tls.flush().unwrap();
             }
             Departure::HalfCnxn => {
-                let cnxn = header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER);
+                let cnxn = packet(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER);
                 tls.write_all(&cnxn[..24]).unwrap();
                 tls.flush().unwrap();
             }
@@ -1620,8 +1639,8 @@ rt_test! {
 async fn a_device_that_leaves_after_the_handshake_is_not_said_to_refuse_the_key() {
     // A device that took the key and then went away, as it does when
     // adbd restarts or wireless debugging goes off, looks just like one
-    // that refused the key by closing. Calling it a refusal sent the
-    // user off to pair again, spending one of the device's attempts.
+    // that refused the key by closing. Calling it a refusal would send
+    // the user off to pair again, spending one of the device's attempts.
     for departure in [Departure::Fin, Departure::CloseNotify] {
         let (addr, device) = spawn_device_that_leaves_after_the_handshake(departure);
 
@@ -1752,14 +1771,14 @@ fn spawn_device_that_authenticates_inside_tls(
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
-            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .write_all(&packet(CMD_STLS, STLS_VERSION, 0, &[]))
             .unwrap();
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
 
         let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
-        tls.write_all(&header(CMD_AUTH, AUTH_TOKEN, 0, &[0x42; 20]))
+        tls.write_all(&packet(CMD_AUTH, AUTH_TOKEN, 0, &[0x42; 20]))
             .unwrap();
         tls.flush().unwrap();
         let (command, arg0, _, _) = read_packet(&mut tls);
@@ -1771,7 +1790,7 @@ fn spawn_device_that_authenticates_inside_tls(
         match after {
             AfterSignature::Close => {}
             AfterSignature::Stls => {
-                tls.write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+                tls.write_all(&packet(CMD_STLS, STLS_VERSION, 0, &[]))
                     .unwrap();
                 tls.flush().unwrap();
             }
@@ -1800,7 +1819,8 @@ async fn a_close_after_the_signature_inside_tls_is_judged_as_one_before_it() {
 rt_test! {
 async fn an_stls_in_answer_to_the_signature_inside_tls_is_out_of_turn() {
     // A second STLS is a protocol error wherever it comes inside the
-    // session. After the signature it read as a rejected key.
+    // session, in answer to the signature too, where the AUTH exchange
+    // would otherwise count it as a rejection.
     let (addr, device) = spawn_device_that_authenticates_inside_tls(AfterSignature::Stls);
 
     let err = failed_connect(addr, &client_config()).await;
@@ -1816,6 +1836,8 @@ async fn an_stls_in_answer_to_the_signature_inside_tls_is_out_of_turn() {
 }
 }
 
+/// What the host signs AUTH tokens with: the key its certificate
+/// carries, as with `adb`.
 fn test_auth() -> AdbKey {
     host_key()
 }
@@ -1855,10 +1877,9 @@ rt_test! {
 #[cfg(feature = "host-keys")]
 #[ignore = "needs a device: set LIBADB_TLS_DEVICE and pass --ignored"]
 async fn a_real_device_serves_a_split_connection_over_tls() {
+    // The split halves are a code path of their own, so a live device is
+    // worth the trouble here: the local `connect_tls` tests stay unsplit.
     let addr = device_address();
-    // The split halves are a code path of their own, with their own
-    // locking, so a live device is worth the trouble here even though
-    // the local server already covers the unsplit one.
     let key = real_device_key().await;
     let identity = libadb::tls::TlsIdentity::from_key(&key, &mut OsRng).unwrap();
     let tls = TlsClientConfig::adb(&identity).unwrap();

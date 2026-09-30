@@ -43,9 +43,11 @@ pub fn client_config() -> TlsClientConfig {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum KeyPolicy {
     /// Take any client certificate, the way a device that already
-    /// trusts the key does.
+    /// trusts the key does, or a pairing server, which checks the code
+    /// instead.
     Accept,
-    /// Refuse it. In TLS 1.3 the client's handshake still completes and
+    /// Refuse it with `certificate_unknown`, as adbd does a key it does
+    /// not trust. In TLS 1.3 the client's handshake still completes and
     /// the alert only reaches it on the first read.
     Reject,
 }
@@ -62,6 +64,9 @@ pub fn device_identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
     )
 }
 
+/// The device's check on the host's certificate. It demands one, as
+/// adbd does, and takes every key or none, where adbd looks the key up
+/// among those it trusts.
 #[derive(Debug)]
 struct ClientPolicy {
     accept: bool,
@@ -85,8 +90,12 @@ impl ClientCertVerifier for ClientPolicy {
         if self.accept {
             Ok(ClientCertVerified::assertion())
         } else {
+            // rustls answers `Other` with `certificate_unknown`, the alert
+            // adbd's BoringSSL sends when its callback refuses the key.
             Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ApplicationVerificationFailure,
+                rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+                    std::io::Error::other("the key is not one this device trusts"),
+                ))),
             ))
         }
     }

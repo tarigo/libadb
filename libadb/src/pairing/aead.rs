@@ -176,9 +176,9 @@ mod tests {
     fn the_first_message_is_byte_for_byte_what_another_library_produces() {
         // Pins the three things a peer has to agree with us about: the
         // HKDF info string, the zero salt, and a nonce that is a
-        // little-endian counter in a twelve-byte field. The expectation
-        // came from an unrelated implementation of HKDF-SHA256 and
-        // AES-128-GCM given the same inputs.
+        // little-endian counter in a twelve-byte field. Node's `crypto`
+        // (`hkdfSync` and `aes-128-gcm`, on OpenSSL 3.6) gives the same
+        // bytes from the same inputs.
         let mut cipher = Cipher::new(&[0x5Au8; 64]);
 
         let sealed = cipher.seal(b"adb pairing probe");
