@@ -22,6 +22,16 @@ pub async fn accept_one(l: &TcpListener) -> TcpStream {
     l.accept().await.unwrap().0
 }
 
+/// Give `f` five seconds. A regression that leaves both sides waiting
+/// then fails its test, rather than holding the run open until CI gives
+/// up on it.
+pub async fn within<F: core::future::Future>(what: &str, f: F) -> F::Output {
+    match timeout_ms(5000, f).await {
+        Some(v) => v,
+        None => panic!("{what} hung"),
+    }
+}
+
 #[cfg(feature = "tokio")]
 mod tokio_rt {
     use std::time::Duration;

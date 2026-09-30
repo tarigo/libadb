@@ -73,7 +73,7 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
     let handle = std::thread::spawn(move || {
         let config = device_config(policy);
 
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(config).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
 
@@ -113,7 +113,9 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
 async fn connected(addr: SocketAddr) -> MaybeTls<rt::AdbTransport> {
     let stream = rt::connect(addr).await;
     let mut transport = MaybeTls::plain(rt::wrap(stream));
-    transport.start_tls(&client_config()).await.unwrap();
+    rt::within("the handshake", transport.start_tls(&client_config()))
+        .await
+        .unwrap();
     transport
 }
 
@@ -126,10 +128,12 @@ async fn a_tls_session_carries_plaintext_both_ways() {
     assert!(!transport.is_plain());
 
     transport.write(b"ping over tls").await.unwrap();
-    transport.flush().await.unwrap();
+    rt::within("the flush", transport.flush()).await.unwrap();
 
     let mut buf = [0u8; 64];
-    let n = transport.read(&mut buf).await.unwrap();
+    let n = rt::within("the read", transport.read(&mut buf))
+        .await
+        .unwrap();
     assert_eq!(&buf[..n], b"slt revo gnip", "the device echoed it reversed");
 
     let report = device.join().unwrap();
@@ -146,7 +150,7 @@ async fn the_device_is_shown_the_host_key_inside_the_certificate() {
 
     let mut transport = connected(addr).await;
     transport.write(b"x").await.unwrap();
-    transport.flush().await.unwrap();
+    rt::within("the flush", transport.flush()).await.unwrap();
 
     let report = device.join().unwrap();
     let offered = report.client_spki.expect("a client certificate was required");
@@ -171,7 +175,7 @@ fn spawn_device_that_would_resume() -> (SocketAddr, JoinHandle<(Vec<rustls::Hand
         let config = device_config_counting(KeyPolicy::Accept, Arc::clone(&shown));
         let mut kinds = Vec::new();
         for _ in 0..2 {
-            let (socket, _) = listener.accept().unwrap();
+            let socket = tls_device::accept(&listener);
             let conn = ServerConnection::new(Arc::clone(&config)).unwrap();
             let mut tls = StreamOwned::new(conn, socket);
             // Echoing a message makes the host read past the tickets.
@@ -198,11 +202,15 @@ async fn a_second_connection_does_not_resume_the_first() {
     let config = client_config();
     for _ in 0..2 {
         let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-        transport.start_tls(&config).await.unwrap();
+        rt::within("the handshake", transport.start_tls(&config))
+            .await
+            .unwrap();
         transport.write(b"ping").await.unwrap();
-        transport.flush().await.unwrap();
+        rt::within("the flush", transport.flush()).await.unwrap();
         let mut buf = [0u8; 16];
-        let n = transport.read(&mut buf).await.unwrap();
+        let n = rt::within("the read", transport.read(&mut buf))
+            .await
+            .unwrap();
         assert_eq!(&buf[..n], b"ping");
     }
 
@@ -225,12 +233,11 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
 
     // The certificate leaves in the host's last flight, so the device
     // cannot have judged it yet.
-    transport
-        .start_tls(&client_config())
+    rt::within("the handshake", transport.start_tls(&client_config()))
         .await
         .expect("the handshake completes on the host's side");
     let mut buf = [0u8; 64];
-    let Err(err) = transport.read(&mut buf).await else {
+    let Err(err) = rt::within("the read", transport.read(&mut buf)).await else {
         panic!("a device that refused the key must not hand out a working session");
     };
 
@@ -253,10 +260,10 @@ async fn a_split_session_reads_and_writes_at_once() {
     let (mut reader, mut writer) = transport.split().unwrap();
 
     writer.write(b"split over tls").await.unwrap();
-    writer.flush().await.unwrap();
+    rt::within("the flush", writer.flush()).await.unwrap();
 
     let mut buf = [0u8; 64];
-    let n = reader.read(&mut buf).await.unwrap();
+    let n = rt::within("the read", reader.read(&mut buf)).await.unwrap();
     assert_eq!(&buf[..n], b"slt revo tilps");
 
     let report = device.join().unwrap();
@@ -271,7 +278,7 @@ fn spawn_device_that_waits_for_the_end() -> (SocketAddr, JoinHandle<bool>) {
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         let mut buf = [0u8; 256];
@@ -295,7 +302,9 @@ async fn a_split_session_can_still_say_it_is_done() {
     let (addr, device) = spawn_device_that_waits_for_the_end();
     let (reader, mut writer) = connected(addr).await.split().unwrap();
 
-    writer.shutdown().await.unwrap();
+    rt::within("the shutdown", writer.shutdown())
+        .await
+        .unwrap();
     drop((reader, writer));
 
     assert!(
@@ -340,7 +349,7 @@ fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
     let (steps, orders) = mpsc::channel();
 
     let handle = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         while tls.conn.is_handshaking() {
@@ -472,7 +481,7 @@ fn spawn_device_that_listens_late() -> (SocketAddr, mpsc::Sender<usize>, JoinHan
     let (expect, told) = mpsc::channel::<usize>();
 
     let handle = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         while tls.conn.is_handshaking() {
@@ -481,10 +490,6 @@ fn spawn_device_that_listens_late() -> (SocketAddr, mpsc::Sender<usize>, JoinHan
         tls.flush().unwrap();
 
         let total = told.recv().unwrap();
-        // A host that sent too little would leave this waiting for good.
-        tls.sock
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
         let mut heard = Vec::with_capacity(total);
         let mut buf = vec![0u8; 64 * 1024];
         while heard.len() < total {
@@ -529,7 +534,7 @@ where
     for chunk in &chunks[next..] {
         w.write_all(chunk).await.unwrap();
     }
-    w.flush().await.unwrap();
+    rt::within("the flush", w.flush()).await.unwrap();
     chunks.concat()
 }
 
@@ -606,7 +611,7 @@ fn spawn_device_that_floods_the_handshake() -> (SocketAddr, JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
         let mut head = [0u8; 5];
         socket.read_exact(&mut head).unwrap();
         let mut hello = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
@@ -690,7 +695,7 @@ fn spawn_device_with_an_outsized_ticket() -> (SocketAddr, JoinHandle<()>) {
         config.send_tls13_tickets = 1;
         config.max_fragment_size = Some(32);
 
-        let (socket, _) = listener.accept().unwrap();
+        let socket = tls_device::accept(&listener);
         let conn = ServerConnection::new(Arc::new(config)).unwrap();
         let mut tls = StreamOwned::new(conn, socket);
         while tls.conn.is_handshaking() {
@@ -882,7 +887,9 @@ async fn breakable_session(addr: SocketAddr) -> (MaybeTls<BreakableWrites>, Arc<
         faults: Arc::clone(&faults),
     };
     let mut transport = MaybeTls::plain(socket);
-    transport.start_tls(&client_config()).await.unwrap();
+    rt::within("the handshake", transport.start_tls(&client_config()))
+        .await
+        .unwrap();
     (transport, faults)
 }
 
@@ -1174,7 +1181,7 @@ async fn a_plain_transport_still_splits_and_passes_bytes_through() {
 
     writer.write(b"ping!").await.unwrap();
     let mut buf = [0u8; 5];
-    reader.read(&mut buf).await.unwrap();
+    rt::within("the read", reader.read(&mut buf)).await.unwrap();
 
     assert_eq!(&buf, b"pong!");
     assert_eq!(&rt::join(device).await, b"ping!");
@@ -1260,7 +1267,7 @@ fn spawn_adb_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<HandshakeRepor
     let handle = std::thread::spawn(move || {
         let config = device_config(policy);
 
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
 
         // In the clear: the host's CNXN, then our demand for TLS.
         let (command, _, _, _) = read_packet(&mut socket);
@@ -1307,14 +1314,11 @@ async fn a_device_that_demands_tls_ends_up_connected() {
     let (addr, device) = spawn_adb_device(KeyPolicy::Accept);
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let conn = Connection::<_>::connect_tls(
-        transport,
-        test_auth(),
-        &[],
-        &client_config(),
-    )
-    .await
-    .expect("a device that offers TLS and trusts the key connects");
+    let tls = client_config();
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], &tls);
+    let conn = rt::within("the connect", connect)
+        .await
+        .expect("a device that offers TLS and trusts the key connects");
 
     assert!(conn.transport().is_tls(), "the session is running");
     assert_eq!(conn.device_banner(), Some(DEVICE_BANNER));
@@ -1331,14 +1335,9 @@ async fn a_key_the_device_will_not_have_is_named_as_such() {
     let (addr, device) = spawn_adb_device(KeyPolicy::Reject);
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let Err(err) = Connection::<_>::connect_tls(
-        transport,
-        test_auth(),
-        &[],
-        &client_config(),
-    )
-    .await
-    else {
+    let tls = client_config();
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], &tls);
+    let Err(err) = rt::within("the connect", connect).await else {
         panic!("a device that refuses the key must not hand back a connection");
     };
 
@@ -1363,14 +1362,11 @@ async fn a_device_that_never_asks_for_tls_is_served_in_the_clear() {
     let device = rt::spawn(async move { handle.accept().await });
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let conn = Connection::<_>::connect_tls(
-        transport,
-        test_auth(),
-        &[],
-        &client_config(),
-    )
-    .await
-    .expect("a plain device still connects");
+    let tls = client_config();
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], &tls);
+    let conn = rt::within("the connect", connect)
+        .await
+        .expect("a plain device still connects");
 
     assert!(conn.transport().is_plain(), "nothing was upgraded");
     drop(device);
@@ -1388,7 +1384,9 @@ async fn a_usb_transport_connects_through_connect_tls_all_the_same() {
 
     let usb = rt::wrap(rt::connect(addr).await);
     let transport = Transport::<MaybeTls<rt::AdbTransport>, _>::Usb(usb);
-    let conn = Connection::<_>::connect_tls(transport, test_auth(), &[], &client_config())
+    let tls = client_config();
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], &tls);
+    let conn = rt::within("the connect", connect)
         .await
         .expect("USB connects through connect_tls as it does through connect");
 
@@ -1405,7 +1403,7 @@ fn spawn_device_that_stops_at_the_hello(reply: &'static [u8]) -> (SocketAddr, Jo
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
@@ -1434,9 +1432,9 @@ async fn a_device_that_hangs_up_mid_handshake_is_not_said_to_refuse_the_key() {
     let (addr, device) = spawn_device_that_stops_at_the_hello(&[]);
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let Err(err) =
-        Connection::<_>::connect_tls(transport, test_auth(), &[], &client_config()).await
-    else {
+    let tls = client_config();
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], &tls);
+    let Err(err) = rt::within("the connect", connect).await else {
         panic!("a device that hung up must not hand out a connection");
     };
 
@@ -1497,7 +1495,7 @@ fn spawn_device_with_a_packet_behind_its_stls() -> (SocketAddr, JoinHandle<bool>
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         let mut segment = header(CMD_STLS, STLS_VERSION, 0, &[]);
@@ -1553,7 +1551,7 @@ fn spawn_device_that_leaves_after_the_handshake(
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
@@ -1716,7 +1714,7 @@ fn spawn_device_that_authenticates_inside_tls(
     let addr = listener.local_addr().unwrap();
 
     let handle = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = tls_device::accept(&listener);
         let (command, _, _, _) = read_packet(&mut socket);
         assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
         socket
@@ -1832,7 +1830,7 @@ async fn a_real_device_serves_a_split_connection_over_tls() {
     let tls = TlsClientConfig::adb(&identity).unwrap();
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let conn = Connection::<_>::connect_tls(transport, key, &[], &tls)
+    let conn = rt::within("the connect", Connection::<_>::connect_tls(transport, key, &[], &tls))
         .await
         .expect("the device accepts a key it was shown over USB");
     assert!(conn.transport().is_tls());
@@ -1840,15 +1838,14 @@ async fn a_real_device_serves_a_split_connection_over_tls() {
     let (mut reader, _writer) = conn.split().expect("a TLS connection splits");
 
     // Enough output to cross many TLS records and many ADB packets.
-    let ch = reader
-        .open_channel(b"shell:seq 1 20000\0")
+    let ch = rt::within("the OPEN", reader.open_channel(b"shell:seq 1 20000\0"))
         .await
         .expect("the device opens a shell");
 
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
-        match reader.read_channel(ch, &mut buf).await {
+        match rt::within("the read", reader.read_channel(ch, &mut buf)).await {
             Ok(0) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(libadb::Error::ChannelClosed) => break,
