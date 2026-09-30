@@ -100,6 +100,19 @@ pub(crate) fn dispatch_packet<E>(
     rx_cap: usize,
     watermark: usize,
 ) -> Result<DispatchOutcome, Error<E>> {
+    // The handshake is over, so a device that opens it again, or asks
+    // for TLS now, is out of turn. It is dropped like any packet nobody
+    // claims, but said in the log, since nothing else will mention it.
+    if matches!(
+        pkt.command,
+        Command::Connect | Command::Auth | Command::StartTls
+    ) {
+        log::warn!(
+            "dropping {:?} from the device after the handshake",
+            pkt.command
+        );
+        return Ok(DispatchOutcome::Unmatched);
+    }
     if pkt.command == Command::Open {
         return Ok(DispatchOutcome::IncomingOpen {
             remote_id: pkt.arg0,

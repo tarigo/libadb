@@ -525,3 +525,30 @@ fn a_large_packet_is_zeroed_once_while_select_reads_it() {
         big.len()
     );
 }
+
+#[test]
+fn a_handshake_packet_after_the_handshake_is_dropped_and_the_session_goes_on() {
+    // Out of turn, so dropped like any packet nobody claims, with a line
+    // in the log; the channel read behind it is none the worse.
+    let (mut conn, ch) = connected_with_channel(None);
+    conn.transport_mut()
+        .feed(&Packet::new(
+            Command::StartTls,
+            crate::base::protocol::constant::STLS_VERSION,
+            0,
+            vec![],
+        ))
+        .feed(&Packet::new(
+            Command::Connect,
+            crate::base::protocol::command::ADB_VERSION,
+            4096,
+            b"device::".to_vec(),
+        ))
+        .feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]))
+        .feed(&wrte(1, b"after"));
+
+    let mut buf = [0u8; 16];
+    let n = now(conn.read_channel(ch, &mut buf)).unwrap();
+
+    assert_eq!(&buf[..n], b"after");
+}
