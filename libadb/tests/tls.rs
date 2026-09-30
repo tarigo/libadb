@@ -731,24 +731,58 @@ fn only_an_alert_about_the_certificate_counts_as_a_refused_key() {
     }
 }
 
+/// What a test can do to the writes of a [`BreakableWrites`] socket.
+#[derive(Default)]
+struct WriteFaults {
+    /// Fail every write and flush, as once the device has reset the
+    /// connection.
+    broken: AtomicBool,
+    /// Hold every write in place, as a socket the device reads nothing
+    /// from does, until this goes down again. Flushes pass: a write is
+    /// what has bytes to be stuck on.
+    held: AtomicBool,
+    /// Whether a write has been held.
+    holding: AtomicBool,
+}
+
+impl WriteFaults {
+    /// What a write meets on its way to the socket.
+    async fn write(&self) -> Result<(), std::io::Error> {
+        while self.held.load(Ordering::Relaxed) {
+            self.holding.store(true, Ordering::Relaxed);
+            rt::sleep_ms(10).await;
+        }
+        self.flush()
+    }
+
+    /// What a flush meets on its way to the socket.
+    fn flush(&self) -> Result<(), std::io::Error> {
+        if self.broken.load(Ordering::Relaxed) {
+            return Err(std::io::ErrorKind::BrokenPipe.into());
+        }
+        Ok(())
+    }
+
+    /// Wait until a write is being held.
+    async fn until_holding(&self) {
+        while !self.holding.load(Ordering::Relaxed) {
+            rt::sleep_ms(10).await;
+        }
+    }
+}
+
 /// A socket whose writes can be made to fail, as they do once the
-/// device has reset the connection, while its reads carry on.
+/// device has reset the connection, or to hang, as they do when the
+/// device reads nothing, while its reads carry on.
 struct BreakableWrites {
     inner: rt::AdbTransport,
-    broken: Arc<AtomicBool>,
+    faults: Arc<WriteFaults>,
 }
 
 /// The write half of a [`BreakableWrites`].
 struct BreakableHalf {
     inner: <rt::AdbTransport as Splittable>::WriteHalf,
-    broken: Arc<AtomicBool>,
-}
-
-fn broken_pipe(broken: &AtomicBool) -> Result<(), std::io::Error> {
-    if broken.load(Ordering::Relaxed) {
-        return Err(std::io::ErrorKind::BrokenPipe.into());
-    }
-    Ok(())
+    faults: Arc<WriteFaults>,
 }
 
 impl embedded_io_async::ErrorType for BreakableWrites {
@@ -767,24 +801,24 @@ impl Read for BreakableWrites {
 
 impl Write for BreakableWrites {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        broken_pipe(&self.broken)?;
+        self.faults.write().await?;
         self.inner.write(buf).await
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        broken_pipe(&self.broken)?;
+        self.faults.flush()?;
         self.inner.flush().await
     }
 }
 
 impl Write for BreakableHalf {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        broken_pipe(&self.broken)?;
+        self.faults.write().await?;
         self.inner.write(buf).await
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
-        broken_pipe(&self.broken)?;
+        self.faults.flush()?;
         self.inner.flush().await
     }
 }
@@ -797,23 +831,23 @@ impl Splittable for BreakableWrites {
         let (read, write) = self.inner.split()?;
         let write = BreakableHalf {
             inner: write,
-            broken: self.broken,
+            faults: self.faults,
         };
         Ok((read, write))
     }
 }
 
-/// A TLS session to a quiet device over a socket whose writes break
-/// when the returned flag is raised.
-async fn breakable_session(addr: SocketAddr) -> (MaybeTls<BreakableWrites>, Arc<AtomicBool>) {
-    let broken = Arc::new(AtomicBool::new(false));
+/// A TLS session to a quiet device over a socket whose writes fail or
+/// hang as the returned faults say.
+async fn breakable_session(addr: SocketAddr) -> (MaybeTls<BreakableWrites>, Arc<WriteFaults>) {
+    let faults = Arc::new(WriteFaults::default());
     let socket = BreakableWrites {
         inner: rt::wrap(rt::connect(addr).await),
-        broken: Arc::clone(&broken),
+        faults: Arc::clone(&faults),
     };
     let mut transport = MaybeTls::plain(socket);
     transport.start_tls(&client_config(), &[]).await.unwrap();
-    (transport, broken)
+    (transport, faults)
 }
 
 rt_test! {
@@ -822,10 +856,10 @@ async fn a_split_read_still_names_a_broken_record_when_its_alert_cannot_go_out()
     // take it. That is for the writer to report; what the reader has
     // to say is that the record would not decrypt.
     let (addr, steps, device) = spawn_quiet_device();
-    let (transport, broken) = breakable_session(addr).await;
+    let (transport, faults) = breakable_session(addr).await;
     let (mut reader, _writer) = transport.split().unwrap();
 
-    broken.store(true, Ordering::Relaxed);
+    faults.broken.store(true, Ordering::Relaxed);
     steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
     let mut buf = [0u8; 16];
     let outcome = rt::timeout_ms(5000, reader.read(&mut buf))
@@ -847,10 +881,10 @@ async fn a_split_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
     // tries to push them out first. Failing at that must not cost the
     // reader what the device has already sent.
     let (addr, steps, device) = spawn_quiet_device();
-    let (transport, broken) = breakable_session(addr).await;
+    let (transport, faults) = breakable_session(addr).await;
     let (mut reader, mut writer) = transport.split().unwrap();
 
-    broken.store(true, Ordering::Relaxed);
+    faults.broken.store(true, Ordering::Relaxed);
     assert!(writer.write(b"never sent").await.is_err());
     steps.send(Step::Say(b"the tail")).unwrap();
     let mut buf = [0u8; 16];
@@ -869,9 +903,9 @@ async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_is_stuck() 
     // The same, before any split: the records of the failed write wait
     // in the session, and the read tries them first.
     let (addr, steps, device) = spawn_quiet_device();
-    let (mut transport, broken) = breakable_session(addr).await;
+    let (mut transport, faults) = breakable_session(addr).await;
 
-    broken.store(true, Ordering::Relaxed);
+    faults.broken.store(true, Ordering::Relaxed);
     assert!(transport.write(b"never sent").await.is_err());
     steps.send(Step::Say(b"the tail")).unwrap();
     let mut buf = [0u8; 16];
@@ -880,6 +914,118 @@ async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_is_stuck() 
         .expect("the read hung");
 
     assert_eq!(outcome.map(|n| &buf[..n]).ok(), Some(&b"the tail"[..]));
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
+    // The alert for a broken record is the writer's to carry. A reader
+    // that sent it itself queued behind a writer held up on the socket,
+    // and the failure did not surface until that writer let go.
+    let (addr, steps, device) = spawn_quiet_device();
+    let (transport, faults) = breakable_session(addr).await;
+    let (mut reader, mut writer) = transport.split().unwrap();
+
+    faults.held.store(true, Ordering::Relaxed);
+    let held = rt::spawn(async move {
+        let _ = writer.write(b"held").await;
+    });
+    faults.until_holding().await;
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let outcome = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read waited for the writer");
+    assert!(matches!(outcome, Err(TlsError::Tls(_))), "got {outcome:?}");
+
+    faults.held.store(false, Ordering::Relaxed);
+    rt::join(held).await;
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_broken_record_is_not_lost_to_a_dropped_read() {
+    // `select_channel` drops a read when something else comes first, so
+    // a failure has to outlive the read that met it. Sending the alert
+    // from the read kept the failure in a local across the wait for the
+    // socket, and a read dropped there took it along: the next one found
+    // nothing to decrypt and took the hangup for a clean end of stream.
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut transport, faults) = breakable_session(addr).await;
+
+    faults.held.store(true, Ordering::Relaxed);
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    if let Some(outcome) = rt::timeout_ms(1000, transport.read(&mut buf)).await {
+        assert!(matches!(outcome, Err(TlsError::Tls(_))), "got {outcome:?}");
+    }
+
+    // The device hangs up, as it would after the alert.
+    faults.held.store(false, Ordering::Relaxed);
+    drop(steps);
+    device.join().unwrap();
+
+    let outcome = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(
+        matches!(outcome, Err(TlsError::Tls(_))),
+        "the failure was lost: {outcome:?}"
+    );
+}
+}
+
+rt_test! {
+async fn a_session_that_met_a_broken_record_stays_failed() {
+    // Only the read that met the record reported it. The next found
+    // nothing to decrypt and went back to the socket, and a write went
+    // out after the fatal alert as if nothing had happened.
+    let (addr, steps, device) = spawn_quiet_device();
+    let mut transport = connected(addr).await;
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let first = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(first, Err(TlsError::Tls(_))), "got {first:?}");
+
+    let again = rt::timeout_ms(1000, transport.read(&mut buf))
+        .await
+        .expect("a read after the failure went back to the socket");
+    assert!(matches!(again, Err(TlsError::Tls(_))), "got {again:?}");
+    let wrote = transport.write(b"after").await;
+    assert!(matches!(wrote, Err(TlsError::Tls(_))), "got {wrote:?}");
+
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_split_session_that_met_a_broken_record_stays_failed() {
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut reader, mut writer) = connected(addr).await.split().unwrap();
+
+    steps.send(Step::Raw(&BROKEN_RECORD)).unwrap();
+    let mut buf = [0u8; 16];
+    let first = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(first, Err(TlsError::Tls(_))), "got {first:?}");
+
+    let again = rt::timeout_ms(1000, reader.read(&mut buf))
+        .await
+        .expect("a read after the failure went back to the socket");
+    assert!(matches!(again, Err(TlsError::Tls(_))), "got {again:?}");
+    let wrote = writer.write(b"after").await;
+    assert!(matches!(wrote, Err(TlsError::Tls(_))), "got {wrote:?}");
+
     drop(steps);
     device.join().unwrap();
 }
