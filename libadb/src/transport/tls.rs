@@ -201,16 +201,24 @@ mod inner {
 
     /// Hand rustls the ciphertext in `rx`; returns how much it took.
     ///
-    /// Zero means the records in hand are incomplete. The callers drain
-    /// the plaintext first, so backpressure is never the reason.
+    /// rustls buffers incomplete records itself, so it takes all of `rx`
+    /// unless the plaintext fills up first, and the callers drain that
+    /// before they come here. Zero with bytes left over means it will
+    /// take none: the peer's `close_notify` has arrived, and whatever
+    /// follows it is not part of the session.
     fn feed(conn: &mut ClientConnection, rx: &mut BytesMut) -> Result<usize, rustls::Error> {
         let start = rx.len();
         while !rx.is_empty() {
             let taken = match conn.read_tls(&mut &rx[..]) {
                 Ok(0) => break,
                 Ok(n) => n,
-                // Backpressure: the caller drains the plaintext and comes back.
-                Err(_) => break,
+                // Backpressure: the plaintext is full, and the caller
+                // drains it and comes back.
+                Err(e) if e.kind() == std::io::ErrorKind::Other => break,
+                // Anything else is for good. A handshake message too big
+                // to buffer is refused this way, and would be refused on
+                // every call after.
+                Err(e) => return Err(rustls::Error::General(alloc::format!("{e}"))),
             };
             rx.advance(taken);
             conn.process_new_packets()?;
@@ -330,9 +338,14 @@ mod inner {
                 if !self.conn.is_handshaking() {
                     break;
                 }
-                // What is already in hand comes before the socket.
-                if !self.rx.is_empty() && self.advance().await? > 0 {
-                    continue;
+                // What is already in hand comes before the socket, and the
+                // socket only once rustls has taken all of it. Reading on
+                // while it takes none would pile up whatever the peer sends.
+                if !self.rx.is_empty() {
+                    if self.advance().await? > 0 {
+                        continue;
+                    }
+                    return Err(TlsError::HandshakeClosed);
                 }
                 if self.eof {
                     return Err(TlsError::HandshakeClosed);
@@ -388,8 +401,12 @@ mod inner {
 
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
-                if !self.rx.is_empty() && self.advance().await? > 0 {
-                    continue;
+                // What rustls will not take follows a `close_notify`.
+                if !self.rx.is_empty() {
+                    if self.advance().await? > 0 {
+                        continue;
+                    }
+                    return Ok(0);
                 }
                 if self.eof {
                     return Ok(0);
@@ -765,6 +782,8 @@ mod inner {
                     if fed.map_err(TlsError::Tls)? > 0 {
                         continue;
                     }
+                    // What rustls will not take follows a `close_notify`.
+                    return Ok(0);
                 }
 
                 if self.eof {
