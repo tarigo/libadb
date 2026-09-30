@@ -1332,16 +1332,24 @@ fn header(command: u32, arg0: u32, arg1: u32, payload: &[u8]) -> Vec<u8> {
     h
 }
 
+/// Read one packet the host sent, holding its magic and its checksum to
+/// what adbd checks: a host whose STLS carried the wrong magic went
+/// through every test here.
 fn read_packet(r: &mut impl std::io::Read) -> (u32, u32, u32, Vec<u8>) {
     let mut h = [0u8; 24];
     r.read_exact(&mut h).unwrap();
-    let word = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
-    let len = word(3) as usize;
-    let mut payload = vec![0u8; len];
-    if len > 0 {
-        r.read_exact(&mut payload).unwrap();
-    }
-    (word(0), word(1), word(2), payload)
+    let header = fake_device::decode_header(&h);
+    let mut payload = vec![0u8; header.data_length as usize];
+    r.read_exact(&mut payload).unwrap();
+    // The host sums every packet of the handshake: it has not heard the
+    // device's version yet, and an older one checks.
+    assert_eq!(
+        header.data_check,
+        fake_device::checksum(&payload),
+        "checksum on {:#010x}",
+        header.command
+    );
+    (header.command, header.arg0, header.arg1, payload)
 }
 
 /// What the device saw the host do.
