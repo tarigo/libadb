@@ -123,13 +123,23 @@ pub enum AuthError {
     /// The authenticator would not sign the token. Carries what it
     /// said, since that is the only account of the failure there is.
     SignFailed(alloc::string::String),
-    /// The device took the TLS handshake and closed it straight away:
-    /// it does not have the key in the certificate we offered.
+    /// The device refused the certificate we offered: it does not have
+    /// the key inside it.
     ///
     /// TLS 1.3 tells a client nothing when the server rejects its
     /// certificate — the server speaks first, so the refusal only shows
-    /// once we listen. Authorise the key over USB, or run `adb pair`.
+    /// once we listen, as an alert. adbd sends `certificate_unknown`.
+    /// Authorise the key over USB, or run `adb pair`.
     TlsKeyNotTrusted,
+    /// The device finished the TLS handshake and closed the session
+    /// before any of its CNXN arrived.
+    ///
+    /// A device that refuses the key by closing looks like this, but so
+    /// does one that took the key and then went away: adbd restarting,
+    /// wireless debugging switched off, a reboot. If it keeps happening
+    /// and the key was never paired or authorised, run `adb pair` or
+    /// authorise it over USB.
+    TlsClosedBeforeConnect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +196,10 @@ impl fmt::Display for AuthError {
             Self::SignFailed(why) => f.write_fmt(format_args!("authenticator sign failed: {why}")),
             Self::TlsKeyNotTrusted => f.write_str(
                 "device does not trust this key over TLS; authorise it over USB or run `adb pair`",
+            ),
+            Self::TlsClosedBeforeConnect => f.write_str(
+                "device closed the TLS session right after the handshake, before its CNXN; \
+                 if this key was never paired or authorised, run `adb pair` or authorise it over USB",
             ),
         }
     }
@@ -400,6 +414,15 @@ mod tests {
         assert_eq!(
             show(&AuthError::TlsKeyNotTrusted),
             "device does not trust this key over TLS; authorise it over USB or run `adb pair`"
+        );
+    }
+
+    #[test]
+    fn auth_display_tls_closed_before_connect_points_at_pairing_only_if_it_applies() {
+        assert_eq!(
+            show(&AuthError::TlsClosedBeforeConnect),
+            "device closed the TLS session right after the handshake, before its CNXN; \
+             if this key was never paired or authorised, run `adb pair` or authorise it over USB"
         );
     }
 

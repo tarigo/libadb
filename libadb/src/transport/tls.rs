@@ -138,13 +138,13 @@ mod inner {
     /// certificate alerts a TLS stack might pick instead. Generic ones
     /// such as `handshake_failure` or `decrypt_error` stay out: they
     /// mean the handshake broke for some other reason, and calling that
-    /// a refusal would send the user off to pair for nothing.
+    /// a refusal would send the user off to pair for nothing. So does
+    /// `certificate_required`, which says no certificate arrived at all.
     fn alert_means_rejection(alert: rustls::AlertDescription) -> bool {
         use rustls::AlertDescription as A;
         matches!(
             alert,
-            A::CertificateRequired
-                | A::BadCertificate
+            A::BadCertificate
                 | A::UnsupportedCertificate
                 | A::CertificateRevoked
                 | A::CertificateExpired
@@ -160,9 +160,9 @@ mod inner {
         pub fn is_key_rejected(&self) -> bool {
             match self {
                 Self::Tls(rustls::Error::AlertReceived(a)) => alert_means_rejection(*a),
-                // Not `HandshakeClosed`: the key had not gone out yet. An
-                // adbd that refuses by just closing does so after the
-                // handshake, where the first read meets the end of stream.
+                // Not `HandshakeClosed`: the key had not gone out yet. A
+                // device that refuses by just closing does so after the
+                // handshake, and the connect path names that on its own.
                 _ => false,
             }
         }

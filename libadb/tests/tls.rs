@@ -16,7 +16,9 @@ use std::thread::JoinHandle;
 use embedded_io_async::{Read, Write};
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::{cert, AdbKey};
-use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use libadb::tls::rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
+};
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
 use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
@@ -713,12 +715,7 @@ fn only_an_alert_about_the_certificate_counts_as_a_refused_key() {
             .is_key_rejected()
     };
 
-    for alert in [
-        A::CertificateUnknown,
-        A::BadCertificate,
-        A::CertificateRequired,
-        A::AccessDenied,
-    ] {
+    for alert in [A::CertificateUnknown, A::BadCertificate, A::AccessDenied] {
         assert!(refused(alert), "{alert:?} is a refusal");
     }
     for alert in [
@@ -726,6 +723,8 @@ fn only_an_alert_about_the_certificate_counts_as_a_refused_key() {
         A::DecryptError,
         A::ProtocolVersion,
         A::InternalError,
+        // No certificate arrived at all, which pairing cannot cure.
+        A::CertificateRequired,
     ] {
         assert!(!refused(alert), "{alert:?} says nothing about the key");
     }
@@ -1107,6 +1106,7 @@ fn spki_of(der: &[u8]) -> Vec<u8> {
 // The whole handshake: STLS, then ADB inside the session
 // ---------------------------------------------------------------------
 
+use libadb::error::AuthError;
 use libadb::protocol::command::{CMD_CNXN, CMD_STLS};
 use libadb::protocol::constant::{ADB_VERSION, STLS_VERSION};
 use libadb::{Connection, Error};
@@ -1296,9 +1296,10 @@ async fn a_usb_transport_connects_through_connect_tls_all_the_same() {
 }
 }
 
-/// A device that asks for TLS, reads the ClientHello and hangs up,
-/// long before the host's certificate could have reached it.
-fn spawn_device_that_hangs_up_mid_handshake() -> (SocketAddr, JoinHandle<()>) {
+/// A device that asks for TLS, reads the ClientHello, answers it with
+/// `reply` and hangs up, long before the host's certificate could have
+/// reached it.
+fn spawn_device_that_stops_at_the_hello(reply: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -1318,6 +1319,7 @@ fn spawn_device_that_hangs_up_mid_handshake() -> (SocketAddr, JoinHandle<()>) {
         socket.read_exact(&mut head).unwrap();
         let mut hello = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
         socket.read_exact(&mut hello).unwrap();
+        socket.write_all(reply).unwrap();
     });
 
     (addr, handle)
@@ -1328,7 +1330,7 @@ async fn a_device_that_hangs_up_mid_handshake_is_not_said_to_refuse_the_key() {
     // Under TLS 1.3 the host's certificate travels in its last flight,
     // after the handshake is over on its side. A device gone before
     // then never saw the key, and pairing again would cure nothing.
-    let (addr, device) = spawn_device_that_hangs_up_mid_handshake();
+    let (addr, device) = spawn_device_that_stops_at_the_hello(&[]);
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
     let Err(err) =
@@ -1342,6 +1344,207 @@ async fn a_device_that_hangs_up_mid_handshake_is_not_said_to_refuse_the_key() {
         "expected the handshake cut short, got {err:?}"
     );
     device.join().unwrap();
+}
+}
+
+/// Connect over TLS to a device that must not let the host in, and say
+/// why it did not.
+async fn failed_connect(
+    addr: SocketAddr,
+    tls: &TlsClientConfig,
+) -> Error<TlsError<std::io::Error>> {
+    let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+    match Connection::<_>::connect_tls(transport, test_auth(), &[], tls).await {
+        Ok(_) => panic!("the device must not have handed out a connection"),
+        Err(err) => err,
+    }
+}
+
+/// A fatal `access_denied` alert, in the clear.
+const ACCESS_DENIED: [u8; 7] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31];
+
+rt_test! {
+async fn an_alert_before_the_host_shows_its_key_is_not_said_to_refuse_it() {
+    // An alert in answer to the ClientHello comes before the host's
+    // certificate has gone out, whatever the alert says.
+    let (addr, device) = spawn_device_that_stops_at_the_hello(&ACCESS_DENIED);
+
+    let err = failed_connect(addr, &client_config()).await;
+
+    assert!(
+        matches!(
+            err,
+            Error::Io(TlsError::Tls(rustls::Error::AlertReceived(
+                rustls::AlertDescription::AccessDenied
+            )))
+        ),
+        "expected the alert itself, got {err:?}"
+    );
+    device.join().unwrap();
+}
+}
+
+/// How a device that took the key leaves before its CNXN is whole.
+#[derive(Clone, Copy, Debug)]
+enum Departure {
+    /// A bare FIN, as when adbd restarts or wireless debugging goes off.
+    Fin,
+    /// A `close_notify`, then the FIN.
+    CloseNotify,
+    /// The CNXN header alone, then the FIN.
+    HalfCnxn,
+}
+
+/// A device that demands TLS, takes the host's key, and leaves as
+/// `departure` says instead of sending its CNXN.
+fn spawn_device_that_leaves_after_the_handshake(
+    departure: Departure,
+) -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
+        socket
+            .write_all(&header(CMD_STLS, STLS_VERSION, 0, &[]))
+            .unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_STLS, "the host answers STLS with STLS");
+
+        let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).unwrap();
+        }
+        match departure {
+            Departure::Fin => {}
+            Departure::CloseNotify => {
+                tls.conn.send_close_notify();
+                tls.flush().unwrap();
+            }
+            Departure::HalfCnxn => {
+                let cnxn = header(CMD_CNXN, ADB_VERSION, 256 * 1024, DEVICE_BANNER);
+                tls.write_all(&cnxn[..24]).unwrap();
+                tls.flush().unwrap();
+            }
+        }
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_device_that_leaves_after_the_handshake_is_not_said_to_refuse_the_key() {
+    // A device that took the key and then went away, as it does when
+    // adbd restarts or wireless debugging goes off, looks just like one
+    // that refused the key by closing. Calling it a refusal sent the
+    // user off to pair again, spending one of the device's attempts.
+    for departure in [Departure::Fin, Departure::CloseNotify] {
+        let (addr, device) = spawn_device_that_leaves_after_the_handshake(departure);
+
+        let err = failed_connect(addr, &client_config()).await;
+
+        assert!(
+            matches!(err, Error::Auth(AuthError::TlsClosedBeforeConnect)),
+            "{departure:?}: got {err:?}"
+        );
+        device.join().unwrap();
+    }
+}
+}
+
+rt_test! {
+async fn a_device_that_leaves_part_way_through_its_cnxn_took_the_key() {
+    // Part of a CNXN means the device let the host in and then went
+    // away, which is nothing a key can be blamed for.
+    let (addr, device) = spawn_device_that_leaves_after_the_handshake(Departure::HalfCnxn);
+
+    let err = failed_connect(addr, &client_config()).await;
+
+    assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+    device.join().unwrap();
+}
+}
+
+/// Takes any device certificate, as the host's own profile does.
+#[derive(Debug)]
+struct TrustAnyDevice {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for TrustAnyDevice {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::PeerIncompatible(
+            rustls::PeerIncompatible::Tls12NotOffered,
+        ))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+rt_test! {
+async fn a_profile_without_a_client_certificate_is_not_said_to_have_a_refused_key() {
+    // The device asked for a certificate, got none, and said so with
+    // `certificate_required`. That is the host's configuration, which
+    // pairing cannot cure.
+    let (addr, device) = spawn_adb_device(KeyPolicy::Accept);
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(TrustAnyDevice { provider }))
+        .with_no_client_auth();
+    let tls = TlsClientConfig::from_rustls(Arc::new(config), ServerName::try_from("adb").unwrap());
+
+    let err = failed_connect(addr, &tls).await;
+
+    assert!(
+        matches!(
+            err,
+            Error::Io(TlsError::Tls(rustls::Error::AlertReceived(
+                rustls::AlertDescription::CertificateRequired
+            )))
+        ),
+        "expected the alert itself, got {err:?}"
+    );
+    assert!(!device.join().unwrap().refused_key);
 }
 }
 
