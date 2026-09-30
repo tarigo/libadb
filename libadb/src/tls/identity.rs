@@ -47,6 +47,8 @@ impl core::error::Error for TlsIdentityError {
 ///
 /// Pairing over `adb pair` needs the same material, which is why this
 /// is not hidden inside the transport.
+///
+/// The private key is wiped when the identity is dropped.
 pub struct TlsIdentity {
     certificate: CertificateDer<'static>,
     private_key: PrivatePkcs8KeyDer<'static>,
@@ -99,5 +101,25 @@ impl core::fmt::Debug for TlsIdentity {
         f.debug_struct("TlsIdentity")
             .field("certificate_len", &self.certificate.as_ref().len())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TlsIdentity {
+    /// The key is copied out of the zeroizing document it was encoded
+    /// into, and is the host's own: every device that trusts the host
+    /// trusts this key. Nothing else would wipe the copy.
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.private_key);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for TlsIdentity {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_private_key_is_wiped_on_drop() {
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wiped_on_drop::<super::TlsIdentity>();
     }
 }
