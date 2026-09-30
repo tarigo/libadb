@@ -19,6 +19,8 @@
 //! * [`any`] — [`any::AnyTransport`] and [`any::connect`] for URI-based
 //!   dispatch between `tcp://` and `usb://` (features `tokio` or `smol`).
 //! * [`split`] — the [`Splittable`] trait itself.
+//! * `tls` — `MaybeTls`, a TCP transport that can start TLS when the
+//!   device sends `STLS`, and its split halves (feature `tls`).
 
 pub mod split;
 pub mod tcp;
@@ -35,7 +37,6 @@ pub mod rusb;
 #[cfg(feature = "split")]
 pub mod common;
 
-/// ADB over TLS: the transport that answers the device's `STLS`.
 #[cfg(feature = "tls")]
 pub mod tls;
 

@@ -37,14 +37,35 @@ where
     /// [`connect`](Self::connect) would serve it, so one call covers
     /// both.
     ///
-    /// The certificate in `tls` must carry the same key that
-    /// authenticates over USB, or the device will not have it. When it
-    /// does not, the failure is
-    /// [`crate::error::AuthError::TlsKeyNotTrusted`]
-    /// and the cure is one `adb pair`. A device that closes the session
-    /// before its CNXN gives
-    /// [`crate::error::AuthError::TlsClosedBeforeConnect`] instead: it
-    /// may have refused the key that way, or simply gone away.
+    /// `transport` starts in the clear: a socket wrapped in
+    /// [`MaybeTls::plain`](crate::transport::tls::MaybeTls::plain), or a
+    /// [`Transport`](crate::transport::common::Transport) after
+    /// [`tls_ready`](crate::transport::common::Transport::tls_ready).
+    /// `auth` answers an AUTH challenge, as it does for `connect`, and
+    /// `tls` is used only if the device sends `STLS`. Build both from
+    /// the same key: the certificate in `tls` must carry the key that
+    /// authenticates over USB, or the device will not have it.
+    ///
+    /// The device itself is not authenticated unless `tls` brings a
+    /// verifier of your own; see
+    /// [`TlsClientConfig::adb`](crate::tls::TlsClientConfig::adb).
+    ///
+    /// # Errors
+    ///
+    /// Those of `connect`, except that `STLS` is taken up rather than
+    /// refused, and these:
+    ///
+    /// - [`AuthError::TlsKeyNotTrusted`] when the device refuses the
+    ///   key. The cure is one `adb pair`.
+    /// - [`AuthError::TlsClosedBeforeConnect`] when the device closes
+    ///   the session before its CNXN: it may have refused the key that
+    ///   way, or simply gone away.
+    /// - [`ProtocolError::DataAfterStls`] when more plaintext came in
+    ///   behind the device's `STLS`.
+    /// - [`Error::Io`] with the transport's TLS error
+    ///   when the handshake itself fails, such as
+    ///   [`TlsError::HandshakeClosed`](crate::transport::tls::TlsError::HandshakeClosed)
+    ///   when the device hangs up in the middle of it.
     pub async fn connect_tls<A: Authenticator>(
         transport: T,
         auth: A,

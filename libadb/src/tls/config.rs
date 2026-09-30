@@ -38,8 +38,14 @@ impl core::error::Error for TlsConfigError {
     }
 }
 
-/// A ready-to-use `rustls` client profile plus the name to offer it
-/// under.
+/// The `rustls` client profile a TLS connection runs on, and the server
+/// name its handshake runs under.
+///
+/// Make one with [`adb`](Self::adb), which does what `adb` does, or with
+/// [`from_rustls`](Self::from_rustls), and hand it to
+/// [`Connection::connect_tls`](crate::Connection::connect_tls) or
+/// `pairing::pair`. Clones share one configuration, so one profile
+/// serves every connection.
 #[derive(Clone, Debug)]
 pub struct TlsClientConfig {
     inner: Arc<ClientConfig>,
@@ -49,7 +55,14 @@ pub struct TlsClientConfig {
 impl TlsClientConfig {
     /// The profile `adb` uses: TLS 1.3 only, the `ring` provider, the
     /// client certificate from `identity`, and a device certificate
-    /// taken on trust.
+    /// taken on trust. It sends no SNI and never resumes a session, as
+    /// `adb` does not.
+    ///
+    /// It always presents `identity`. `adb` picks among its keys by the
+    /// fingerprints the device lists in its certificate request; a host
+    /// with several keys builds one profile per key, or brings a
+    /// certificate resolver of its own through
+    /// [`from_rustls`](Self::from_rustls).
     ///
     /// # Security
     ///
@@ -60,6 +73,13 @@ impl TlsClientConfig {
     /// key in the certificate it offered but says nothing about who
     /// that peer is. On a network you do not trust, an attacker in the
     /// middle can take the device's place, exactly as with `adb`.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsConfigError::Rustls`] if `rustls` will not take the
+    /// identity's key. One built by
+    /// [`TlsIdentity::from_key`](crate::tls::TlsIdentity::from_key) does
+    /// not cause it.
     pub fn adb(identity: &TlsIdentity) -> Result<Self, TlsConfigError> {
         // Spelled out, not defaulted: a feature-unified build may switch on
         // `tls12` or another provider, and a default would follow it.
@@ -91,6 +111,19 @@ impl TlsClientConfig {
     /// Build a profile from a `rustls` configuration of your own, for
     /// callers who want to pin the device certificate or otherwise
     /// tighten what [`adb`](Self::adb) leaves open.
+    ///
+    /// The device goes on only if `config` offers TLS 1.3 and presents
+    /// the host's certificate: hand
+    /// [`TlsIdentity::certificate_der`](crate::tls::TlsIdentity::certificate_der)
+    /// and the key's
+    /// [`to_pkcs8_der`](crate::keys::AdbKey::to_pkcs8_der) to
+    /// `with_client_auth_cert`. Leave session resumption off, as `adb`
+    /// does: a resumed session carries no certificate, so the device
+    /// cannot tell whose key it is. `server_name` is what the handshake
+    /// runs under: your verifier sees it, and it goes out as SNI only if
+    /// `config` enables that. Name the types through
+    /// [`tls::rustls`](crate::tls::rustls), the version this crate is
+    /// built against.
     pub fn from_rustls(config: Arc<ClientConfig>, server_name: ServerName<'static>) -> Self {
         Self {
             inner: config,

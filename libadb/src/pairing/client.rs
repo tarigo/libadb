@@ -42,7 +42,8 @@ pub enum PairingError<E> {
     /// wrong: the two sides agreed on different keys and neither can
     /// tell until now.
     WrongCode,
-    /// The device's `PeerInfo` was not what it should be.
+    /// A `PeerInfo` was not what it should be: the device's, or our
+    /// own, too long to fit.
     PeerInfo(PeerInfoError),
 }
 
@@ -53,9 +54,7 @@ impl<E: core::fmt::Display> core::fmt::Display for PairingError<E> {
             Self::Closed => f.write_str("device closed the pairing connection"),
             Self::Frame(e) => write!(f, "pairing frame: {e}"),
             Self::Spake2(e) => write!(f, "pairing key agreement: {e}"),
-            Self::WrongCode => f.write_str(
-                "pairing failed: the code did not match, or the device dropped the attempt",
-            ),
+            Self::WrongCode => f.write_str("pairing failed: the code did not match"),
             Self::PeerInfo(e) => write!(f, "pairing peer info: {e}"),
         }
     }
@@ -97,15 +96,23 @@ pub struct Paired {
 /// Pair with a device: put `key` into its trusted store.
 ///
 /// `transport` must be a fresh connection to the *pairing* port, which
-/// the device shows on its "Wireless debugging" pane next to the code.
-/// It is not the port a session later uses, and it stops listening as
-/// soon as one pairing succeeds.
+/// the device shows with the code once "Pair device with pairing code"
+/// is tapped on its "Wireless debugging" screen. It is not the port a
+/// session later uses, and it stops listening as soon as one pairing
+/// succeeds. Whatever the outcome, and if the future is dropped,
+/// `transport` is spent: open a new connection to try again.
 ///
 /// `code` is the six digits shown beside it, or, when the device
 /// scanned a QR code instead, the password that code carried. Nothing
 /// here insists on six digits for that reason, so check a typed code
 /// before calling: a wrong one costs the device an attempt. Everything
 /// else this needs it works out for itself.
+///
+/// `tls` carries the session the exchange runs in. Build it from `key`
+/// ([`TlsClientConfig::adb`] over
+/// [`TlsIdentity::from_key`](crate::tls::TlsIdentity::from_key)) as
+/// `adb` does, though the pairing server checks no certificate. `rng`
+/// draws the SPAKE2 secret.
 ///
 /// On success the device has `key` and will accept it over TLS from
 /// then on, exactly as it accepts a key approved at a USB prompt.

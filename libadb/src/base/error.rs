@@ -71,6 +71,8 @@ pub enum Error<E> {
     Desynchronized,
 }
 
+/// The device sent what the protocol does not allow at that point, or
+/// began a handshake this connection cannot follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolError {
@@ -108,10 +110,11 @@ pub enum ProtocolError {
     /// The device answered the handshake with `STLS`: it speaks nothing
     /// but TLS from here on.
     ///
-    /// This is how Android 11+ wireless debugging works — the port
-    /// `adb pair` hands out, and the one the "Wireless debugging" pane
-    /// shows. The legacy port `adb tcpip` opens is plain text, and so
-    /// is USB; neither is affected.
+    /// This is how Android 11+ wireless debugging answers on the address
+    /// and port its "Wireless debugging" screen shows. The pairing port
+    /// is another thing: it speaks TLS from the first byte, and is for
+    /// `pairing::pair`. The legacy port `adb tcpip` opens is plain text,
+    /// and so is USB; neither is affected.
     ///
     /// With the `tls` feature, `Connection::connect_tls` takes the offer
     /// up.
@@ -121,9 +124,14 @@ pub enum ProtocolError {
     /// A TLS 1.3 server says nothing before the client's hello, so
     /// whatever follows `STLS` before the session starts is another
     /// plaintext packet, not the beginning of TLS.
+    ///
+    /// Returned by `Connection::connect_tls`. Only what arrived along
+    /// with the `STLS` is caught here; plaintext sent later reaches the
+    /// session and fails the handshake as a broken record.
     DataAfterStls,
 }
 
+/// Why the device would not let this host in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthError {
@@ -136,9 +144,12 @@ pub enum AuthError {
     /// the key inside it.
     ///
     /// TLS 1.3 tells a client nothing when the server rejects its
-    /// certificate — the server speaks first, so the refusal only shows
-    /// once we listen, as an alert. adbd sends `certificate_unknown`.
-    /// Authorise the key over USB, or run `adb pair`.
+    /// certificate: the certificate goes out in the client's last
+    /// flight, so the handshake is over on our side before the device
+    /// judges it, and the refusal arrives as an alert on the first
+    /// read. adbd sends `certificate_unknown`; the other alerts a TLS
+    /// stack may send over a certificate count too, `access_denied`
+    /// among them. Authorise the key over USB, or run `adb pair`.
     TlsKeyNotTrusted,
     /// The device finished the TLS handshake and closed the session
     /// before any of its CNXN arrived.
