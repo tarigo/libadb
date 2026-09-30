@@ -827,7 +827,8 @@ where
 
                 // Read into the one stretch until the packet is whole, as
                 // `recv_pkt` does. There is nothing to dispatch before then,
-                // and `interrupt` is asked afresh for each read.
+                // and `interrupt` is asked afresh for each read. However the
+                // loop ends, `staged` trims the untouched tail as it drops.
                 loop {
                     let wakeup = if cancel_safe {
                         let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
@@ -862,8 +863,6 @@ where
                         }
                     };
                     match wakeup {
-                        // `staged` trims the untouched tail as it drops, in
-                        // both arms.
                         Wakeup::Read(n) => staged.commit(n),
                         Wakeup::Interrupt(val) => return Ok(SelectResult::Interrupted(val)),
                     }

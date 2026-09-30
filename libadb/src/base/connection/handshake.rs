@@ -26,8 +26,8 @@ pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
 
 // adbd may emit stream-level packets (CLSE/OKAY/WRTE/OPEN) for channels
 // left over from a previous session, typically right after host
-// re-attach on USB. Drain them until the device's verdict on the
-// handshake arrives: CNXN, AUTH or STLS.
+// re-attach on USB. Drain them until a handshake packet arrives: CNXN,
+// AUTH or STLS.
 pub(crate) async fn recv_handshake_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
@@ -142,9 +142,8 @@ where
     /// Everything after the device's CNXN: negotiate, parse the banner
     /// and build the connection.
     ///
-    /// Split out because the TLS path reaches this point holding a
-    /// transport of a different type, and this part of the work does
-    /// not care which.
+    /// Split out so the TLS path, which reads its CNXN from inside the
+    /// session, ends the same way.
     pub(crate) fn assemble(
         transport: T,
         desync: DesyncFlag,
@@ -197,8 +196,9 @@ impl Verdict {
 /// The half of the handshake both entry points share: send our CNXN
 /// and bring back the device's verdict.
 ///
-/// Authentication happens in here when the device asks for it. Any
-/// other answer is a protocol error, and the caller never sees one.
+/// Authentication happens in here when the device asks for it. A
+/// first answer that is none of CNXN, STLS and AUTH fails here, as a
+/// protocol error.
 pub(crate) async fn open<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     auth: &mut A,
@@ -232,10 +232,9 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
 
 /// Answer the device's AUTH challenge.
 ///
-/// Returns the verdict the exchange ended on: CNXN when the key was
-/// accepted, or STLS if the device would rather have TLS. Naming that
-/// here would make a device offering TLS late look like a rejected key,
-/// so the caller classifies it. Anything else is a rejection.
+/// Returns the verdict the exchange ended on: CNXN once the key is
+/// accepted, or STLS if the device switches to TLS midway. Any other
+/// answer is [`AuthError::Rejected`].
 pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     desync: &DesyncFlag,
@@ -265,7 +264,6 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
 
     let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
     let resp = match Verdict::of(resp) {
-        // CNXN, or STLS: the caller decides what either means.
         Ok(verdict) => return Ok(verdict),
         Err(resp) => resp,
     };

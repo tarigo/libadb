@@ -7,16 +7,19 @@
 //!
 //! Two details carry the whole thing and are easy to get wrong.
 //!
-//! The mask points M and N lie *outside* the prime-order subgroup, on
-//! purpose. So the scalars they are multiplied by must be used whole,
-//! not reduced modulo the group order: reducing changes the answer.
+//! The mask points M and N lie *outside* the prime-order subgroup:
+//! BoringSSL took them straight from a hash without clearing the
+//! cofactor, and adbd uses them as they are. So the scalars they are
+//! multiplied by must be used whole, not reduced modulo the group
+//! order: reducing changes the answer.
 //! Neither the password scalar nor the private scalar fits a reduced
 //! scalar type for that reason, and both are handled here as plain
 //! 256-bit numbers.
 //!
-//! The password is fed in already stretched, and the names carry their
-//! trailing NUL. AOSP passes `sizeof("adb pair client")`, which is
-//! sixteen bytes, not fifteen.
+//! The password is not the pairing code alone: pairing appends the TLS
+//! exporter's output to it. And the names carry their trailing NUL.
+//! AOSP passes `sizeof("adb pair client")`, which is sixteen bytes, not
+//! fifteen.
 
 use alloc::vec::Vec;
 
@@ -189,6 +192,8 @@ impl Spake2 {
             Role::Alice => Self::point(&M_BYTES),
             Role::Bob => Self::point(&N_BYTES),
         };
+        // Reducing is harmless here, unlike against the masks: the base
+        // point has prime order, so the product comes out the same.
         let base = EdwardsPoint::mul_base(&Scalar::from_bytes_mod_order(*private_key));
         let my_msg = (base + mul_raw(&mask, &password_scalar))
             .compress()
@@ -257,9 +262,10 @@ impl Spake2 {
     /// The password scalar, with BoringSSL's cofactor fix.
     ///
     /// The mask points have torsion, so a scalar that is not a multiple
-    /// of eight leaks three bits of the password. BoringSSL adds `l`,
-    /// `2l`, `4l` in turn, each test on the running value, never
-    /// reducing, until the low three bits are zero.
+    /// of eight leaks up to three bits of the password. BoringSSL
+    /// reduces the hash, then clears the low three bits in turn, adding
+    /// `l`, `2l` and `4l` whenever the running value has that bit set,
+    /// and does not reduce again.
     fn password_scalar(password_hash: &[u8; 64]) -> [u8; 32] {
         let mut scalar = reduce_wide(password_hash);
         let mut order = ORDER;

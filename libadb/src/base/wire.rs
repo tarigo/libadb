@@ -209,10 +209,9 @@ pub(crate) async fn send_raw<T: Write>(
     if !payload.is_empty() {
         write_all(t, payload).await?;
     }
-    // A transport that buffers, as TLS does, sends the packet here, and
-    // the header and payload leave together; the rest have nothing to
-    // flush. Inside the armed stretch, since until this returns the
-    // packet may be only partly on the wire.
+    // A transport that buffers, as TLS does, may still hold part of the
+    // packet, and only the flush puts all of it on the wire; the rest
+    // have nothing to flush. So it stays inside the armed stretch.
     t.flush().await.map_err(Error::Io)?;
     armed.disarm();
     Ok(())

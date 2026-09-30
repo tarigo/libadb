@@ -37,9 +37,9 @@ mod inner {
     /// over 16 KiB, so one of these swallows a whole record.
     const CHUNK: usize = 16 * 1024 + 512;
 
-    /// How much sealed output a write leaves queued before the next one
-    /// sends it first. Below this, writes only queue, so a packet's
-    /// header and payload leave together on the flush that ends it.
+    /// Once this many bytes of sealed records wait in the queue, the next
+    /// write sends them before it seals its own. Below that, writes only
+    /// queue, and the flush that ends a packet sends all of it at once.
     const QUEUE_LIMIT: usize = 64 * 1024;
 
     /// Why a TLS transport failed.
@@ -108,7 +108,6 @@ mod inner {
         }
     }
 
-    /// Keeps [`StartTls`] to this crate's transports.
     mod sealed {
         pub trait Sealed {}
     }
@@ -183,7 +182,7 @@ mod inner {
         /// The peer's `close_notify` has arrived, and everything before
         /// it has been read.
         Eof,
-        /// Nothing decrypted yet.
+        /// No plaintext waiting, and no `close_notify` either.
         Blocked,
     }
 
@@ -214,9 +213,13 @@ mod inner {
     ///
     /// rustls buffers incomplete records itself, so it takes all of `rx`
     /// unless the plaintext fills up first, and the callers drain that
-    /// before they come here. Zero with bytes left over means it will
-    /// take none: the peer's `close_notify` has arrived, and whatever
-    /// follows it is not part of the session.
+    /// before they come here. It takes none only once a `close_notify`
+    /// has arrived, which the callers hear of from `take_plaintext`
+    /// first: their arms for zero are a safeguard.
+    ///
+    /// Nothing here writes. A KeyUpdate from the peer may ask for ours,
+    /// but rustls keeps the answer until our next record goes out, which
+    /// is all RFC 8446 section 4.6.3 asks; only a failure queues an alert.
     fn feed(conn: &mut ClientConnection, rx: &mut BytesMut) -> Result<usize, rustls::Error> {
         let start = rx.len();
         while !rx.is_empty() {
@@ -249,11 +252,8 @@ mod inner {
             Ok(0) => Plain::Eof,
             Ok(n) => Plain::Got(n),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Plain::Blocked,
-            // rustls raises `UnexpectedEof` once told the stream ended
-            // without a `close_notify`, which it never is here; were it
-            // told, that would still be the end to the layer above. A
-            // broken record never shows here: it fails in
-            // `process_new_packets`.
+            // `UnexpectedEof`, which only a stream end fed to rustls could
+            // raise. A broken record fails in `process_new_packets`.
             Err(_) => Plain::Eof,
         }
     }
@@ -315,7 +315,6 @@ mod inner {
             .map_err(|_| TlsError::Tls(rustls::Error::General("tls writer closed".into())))
     }
 
-    /// Build the engine.
     fn engine(config: &TlsClientConfig) -> Result<Box<ClientConnection>, rustls::Error> {
         let conn =
             ClientConnection::new(Arc::clone(config.rustls()), config.server_name().clone())?;
@@ -389,9 +388,9 @@ mod inner {
             while self.conn.is_handshaking() {
                 harvest(&mut self.conn, &mut self.tx);
                 self.flush_tx().await?;
-                // What is already in hand comes before the socket, and the
-                // socket only once rustls has taken all of it. Reading on
-                // while it takes none would pile up whatever the peer sends.
+                // Ciphertext in hand goes to rustls before the socket is
+                // read again. Mid-handshake rustls fails rather than refuse
+                // input, so the arm for zero is a safeguard.
                 if !self.inbound.rx.is_empty() {
                     match self.advance() {
                         Ok(0) => return Err(TlsError::HandshakeClosed),
@@ -406,7 +405,7 @@ mod inner {
                 }
                 self.inbound.fill(&mut self.inner).await?;
             }
-            // The last flight is still queued at this point.
+            // Our last flight is still inside rustls at this point.
             harvest(&mut self.conn, &mut self.tx);
             self.flush_tx().await
         }
@@ -458,7 +457,8 @@ mod inner {
                 // Nothing here writes: what is queued is the writer's to send.
                 if !self.inbound.rx.is_empty() {
                     match self.advance() {
-                        // What rustls will not take follows a `close_notify`.
+                        // A safeguard: `take_plaintext` above reports a
+                        // `close_notify` first.
                         Ok(0) => return Ok(0),
                         // A failure is kept, and reported once what decrypted
                         // ahead of it has been read.
@@ -504,7 +504,8 @@ mod inner {
     enum State<T: Read + Write> {
         Plain(T),
         Tls(TlsSession<T>),
-        /// Held while the upgrade runs, and kept for good if it failed.
+        /// Held while the upgrade runs, and kept for good if it failed or
+        /// was dropped part way: the socket goes with the session.
         Broken,
     }
 
@@ -612,7 +613,8 @@ mod inner {
     impl<T: Read + Write> StartTls for MaybeTls<T> {
         async fn start_tls(&mut self, config: &TlsClientConfig) -> Result<(), Self::Error> {
             // `Broken` stands in while the value is out of `&mut self`, and
-            // stays if the handshake fails. Anything else goes back untouched.
+            // stays if the handshake fails or this future is dropped.
+            // Anything else goes back untouched.
             let inner = match core::mem::replace(&mut self.state, State::Broken) {
                 State::Plain(inner) => inner,
                 other => {
@@ -740,7 +742,7 @@ mod inner {
                 return Ok(0);
             }
             loop {
-                // Plaintext first, under the engine lock alone.
+                // Plaintext first.
                 {
                     let mut conn = self.shared.conn.lock().await;
                     match take_plaintext(&mut conn, buf) {
@@ -767,7 +769,8 @@ mod inner {
                         })
                     };
                     match fed {
-                        // What rustls will not take follows a `close_notify`.
+                        // A safeguard: `take_plaintext` above reports a
+                        // `close_notify` first.
                         Ok(0) => return Ok(0),
                         // A failure is kept, and reported once what decrypted
                         // ahead of it has been read.

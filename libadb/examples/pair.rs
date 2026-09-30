@@ -49,7 +49,8 @@ async fn run(target: &str, code: &str) -> Result<(), Box<dyn std::error::Error>>
     }
 
     let key = adb_key_auth::load_or_generate()?;
-    // The same certificate a session later presents.
+    // TLS wants a client certificate, though pairing checks none. This is
+    // the kind a session presents, signed by the same key.
     let identity = TlsIdentity::from_key(&key, &mut OsRng)?;
     let tls = TlsClientConfig::adb(&identity)?;
 

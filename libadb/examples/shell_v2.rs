@@ -171,7 +171,8 @@ async fn open_connection(
         use libadb::keys::rsa::rand_core::OsRng;
         use libadb::tls::{TlsClientConfig, TlsIdentity};
 
-        // Signing the certificate is the slow part; build it once.
+        // Signing the certificate is the slow part: a program that
+        // connects more than once builds this once and shares it.
         let identity = TlsIdentity::from_key(&auth, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
         let tls = TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))?;
 

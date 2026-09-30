@@ -156,9 +156,9 @@ where
 
         match pkt.command {
             Command::Connect => Ok(pkt),
-            // Not seen on any device so far, but cheap to honour. The
-            // exchange only puts the CNXN off, so what goes wrong in it is
-            // judged as it would have been without it.
+            // adbd sends no AUTH inside TLS, and adb would ignore one, but
+            // answering costs nothing. It only puts the CNXN off, so what
+            // fails in it is judged as a failed CNXN read would be.
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
                 let verdict = do_auth(transport, desync, auth, recv_buf, pkt.data, config)
                     .await
