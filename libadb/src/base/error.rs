@@ -112,6 +112,10 @@ pub enum ProtocolError {
     /// `adb pair` hands out, and the one the "Wireless debugging" pane
     /// shows. The legacy port `adb tcpip` opens is plain text, and so
     /// is USB; neither is affected.
+    ///
+    /// With the `tls` feature, `Connection::connect_tls` takes the offer
+    /// up. The message leaves that out: it also reaches C callers of
+    /// libadb-ffi, which has no TLS to offer them.
     TlsRequired,
     /// More arrived in the clear behind the device's `STLS`.
     ///
@@ -168,9 +172,9 @@ impl fmt::Display for ProtocolError {
             Self::InvalidCommand(c) => f.write_fmt(format_args!("invalid command {}", c)),
             Self::PayloadTooLarge => f.write_str("payload exceeds max_payload"),
             Self::TlsRequired => f.write_str(
-                "device requires a TLS handshake (Android 11+ wireless debugging); \
-                 build with the `tls` feature and use `Connection::connect_tls`, \
-                 connect over USB, or switch the device to plain TCP with `adb tcpip 5555`",
+                "device requires a TLS handshake (Android 11+ wireless debugging) \
+                 that this connection does not do; connect over USB, \
+                 or switch the device to plain TCP with `adb tcpip 5555`",
             ),
             Self::DataAfterStls => {
                 f.write_str("device sent more in the clear after STLS, where only TLS may follow")
@@ -412,9 +416,9 @@ mod tests {
     fn protocol_display_tls_required_names_a_way_out() {
         assert_eq!(
             show(&ProtocolError::TlsRequired),
-            "device requires a TLS handshake (Android 11+ wireless debugging); \
-             build with the `tls` feature and use `Connection::connect_tls`, \
-             connect over USB, or switch the device to plain TCP with `adb tcpip 5555`"
+            "device requires a TLS handshake (Android 11+ wireless debugging) \
+             that this connection does not do; connect over USB, \
+             or switch the device to plain TCP with `adb tcpip 5555`"
         );
     }
 
