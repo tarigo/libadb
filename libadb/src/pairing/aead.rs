@@ -22,38 +22,13 @@ const KEY_LEN: usize = 16;
 /// What GCM adds to a message.
 pub(crate) const TAG_LEN: usize = 16;
 
-/// Why a message could not be sealed or opened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum AeadError {
-    /// Stretching the SPAKE2 secret into a key failed. Only a length
-    /// far outside what HKDF allows can do this.
-    Kdf,
-    /// The ciphertext did not authenticate. With pairing this means one
-    /// thing: the codes did not match, so the two sides are holding
-    /// different keys.
-    Decrypt,
-    /// Encryption failed, which for GCM means the message was absurdly
-    /// long.
-    Encrypt,
-}
-
-impl core::fmt::Display for AeadError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Kdf => f.write_str("deriving the pairing key failed"),
-            Self::Decrypt => {
-                f.write_str("pairing message did not authenticate; the codes did not match")
-            }
-            Self::Encrypt => f.write_str("encrypting the pairing message failed"),
-        }
-    }
-}
-
-impl core::error::Error for AeadError {}
-
 /// The cipher for one pairing session. Each direction counts its
 /// own nonces from zero, as the peer does.
+///
+/// Nothing but opening can fail. The key is sixteen bytes, where HKDF
+/// could stretch to thousands, and the one message sealed is a
+/// `PeerInfo` block of a few kilobytes, where GCM refuses only past
+/// 64 GiB.
 pub(crate) struct Cipher {
     key: Aes128Gcm,
     encrypt_counter: u64,
@@ -63,17 +38,17 @@ pub(crate) struct Cipher {
 impl Cipher {
     /// Stretch the 64 bytes SPAKE2 agreed on into a session key. No
     /// salt, as in AOSP.
-    pub(crate) fn new(key_material: &[u8]) -> Result<Self, AeadError> {
+    pub(crate) fn new(key_material: &[u8]) -> Self {
         let hkdf = Hkdf::<Sha256>::new(None, key_material);
         let mut key = Zeroizing::new([0u8; KEY_LEN]);
         hkdf.expand(HKDF_INFO, key.as_mut())
-            .map_err(|_| AeadError::Kdf)?;
-        Ok(Self {
+            .expect("HKDF-SHA256 stretches to 8160 bytes, and the key is 16");
+        Self {
             // By reference: `into()` would leave an unwiped copy behind.
             key: Aes128Gcm::new(Key::<Aes128Gcm>::from_slice(key.as_ref())),
             encrypt_counter: 0,
             decrypt_counter: 0,
-        })
+        }
     }
 
     /// The nonce for message number `counter`: the counter itself,
@@ -85,7 +60,7 @@ impl Cipher {
     }
 
     /// Encrypt one message, spending a nonce.
-    pub(crate) fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, AeadError> {
+    pub(crate) fn seal(&mut self, plaintext: &[u8]) -> Vec<u8> {
         let nonce = Self::nonce(self.encrypt_counter);
         let sealed = self
             .key
@@ -96,13 +71,15 @@ impl Cipher {
                     aad: &[],
                 },
             )
-            .map_err(|_| AeadError::Encrypt)?;
+            .expect("GCM seals anything short of 64 GiB");
         self.encrypt_counter += 1;
-        Ok(sealed)
+        sealed
     }
 
-    /// Decrypt one message, spending a nonce.
-    pub(crate) fn open(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, AeadError> {
+    /// Decrypt one message, spending a nonce; `None` if it does not
+    /// authenticate. With pairing that means one thing: the codes did
+    /// not match, so the two sides hold different keys.
+    pub(crate) fn open(&mut self, ciphertext: &[u8]) -> Option<Vec<u8>> {
         let nonce = Self::nonce(self.decrypt_counter);
         let opened = self
             .key
@@ -113,9 +90,9 @@ impl Cipher {
                     aad: &[],
                 },
             )
-            .map_err(|_| AeadError::Decrypt)?;
+            .ok()?;
         self.decrypt_counter += 1;
-        Ok(opened)
+        Some(opened)
     }
 }
 
@@ -134,17 +111,14 @@ mod tests {
 
     fn pair() -> (Cipher, Cipher) {
         let material = [0x5Au8; 64];
-        (
-            Cipher::new(&material).unwrap(),
-            Cipher::new(&material).unwrap(),
-        )
+        (Cipher::new(&material), Cipher::new(&material))
     }
 
     #[test]
     fn what_one_side_seals_the_other_opens() {
         let (mut host, mut device) = pair();
 
-        let sealed = host.seal(b"peer info").unwrap();
+        let sealed = host.seal(b"peer info");
 
         assert_eq!(device.open(&sealed).unwrap(), b"peer info");
     }
@@ -153,7 +127,7 @@ mod tests {
     fn sealing_adds_exactly_a_tag() {
         let (mut host, _) = pair();
 
-        let sealed = host.seal(&[0u8; 8192]).unwrap();
+        let sealed = host.seal(&[0u8; 8192]);
 
         assert_eq!(sealed.len(), 8192 + TAG_LEN);
     }
@@ -178,9 +152,9 @@ mod tests {
         // peer's, so a sealed message must open at the same number it
         // was sealed at, whatever the other direction has done.
         let (mut host, mut device) = pair();
-        let _ = device.seal(b"device spoke first").unwrap();
+        let _ = device.seal(b"device spoke first");
 
-        let sealed = host.seal(b"host message").unwrap();
+        let sealed = host.seal(b"host message");
 
         assert_eq!(device.open(&sealed).unwrap(), b"host message");
     }
@@ -189,12 +163,12 @@ mod tests {
     fn a_different_password_cannot_open_the_message() {
         // This is the only signal a wrong pairing code produces: the
         // key material differs, so the tag fails.
-        let mut host = Cipher::new(&[0x5Au8; 64]).unwrap();
-        let mut device = Cipher::new(&[0xA5u8; 64]).unwrap();
+        let mut host = Cipher::new(&[0x5Au8; 64]);
+        let mut device = Cipher::new(&[0xA5u8; 64]);
 
-        let sealed = host.seal(b"peer info").unwrap();
+        let sealed = host.seal(b"peer info");
 
-        assert_eq!(device.open(&sealed), Err(AeadError::Decrypt));
+        assert_eq!(device.open(&sealed), None);
     }
 
     #[test]
@@ -204,9 +178,9 @@ mod tests {
         // little-endian counter in a twelve-byte field. The expectation
         // came from an unrelated implementation of HKDF-SHA256 and
         // AES-128-GCM given the same inputs.
-        let mut cipher = Cipher::new(&[0x5Au8; 64]).unwrap();
+        let mut cipher = Cipher::new(&[0x5Au8; 64]);
 
-        let sealed = cipher.seal(b"adb pairing probe").unwrap();
+        let sealed = cipher.seal(b"adb pairing probe");
 
         let expected = [
             0x0e, 0xd1, 0x25, 0xb7, 0x0e, 0x3a, 0xf6, 0x4b, 0x27, 0xa9, 0x74, 0xb9, 0xfa, 0xc0,

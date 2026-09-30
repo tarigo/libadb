@@ -30,7 +30,6 @@ mod frame;
 mod peer_info;
 mod spake2;
 
-pub use aead::AeadError;
 pub use client::{pair, Paired, PairingError};
 pub use frame::{FrameError, PacketType};
 pub use peer_info::{PeerInfoError, PeerInfoType};

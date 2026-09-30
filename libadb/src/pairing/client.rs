@@ -8,7 +8,7 @@ use embedded_io_async::{Read, ReadExactError, Write};
 use rsa::rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
-use super::aead::{AeadError, Cipher, TAG_LEN};
+use super::aead::{Cipher, TAG_LEN};
 use super::frame::{self, FrameError, PacketType, HEADER_LEN};
 use super::peer_info::{self, PeerInfoError, PeerInfoType};
 use super::spake2::{Role, Spake2, Spake2Error};
@@ -42,8 +42,6 @@ pub enum PairingError<E> {
     /// wrong: the two sides agreed on different keys and neither can
     /// tell until now.
     WrongCode,
-    /// Encrypting or deriving a key failed.
-    Aead(AeadError),
     /// The device's `PeerInfo` was not what it should be.
     PeerInfo(PeerInfoError),
 }
@@ -58,7 +56,6 @@ impl<E: core::fmt::Display> core::fmt::Display for PairingError<E> {
             Self::WrongCode => f.write_str(
                 "pairing failed: the code did not match, or the device dropped the attempt",
             ),
-            Self::Aead(e) => write!(f, "pairing cipher: {e}"),
             Self::PeerInfo(e) => write!(f, "pairing peer info: {e}"),
         }
     }
@@ -73,7 +70,6 @@ where
             Self::Transport(e) => Some(e),
             Self::Frame(e) => Some(e),
             Self::Spake2(e) => Some(e),
-            Self::Aead(e) => Some(e),
             Self::PeerInfo(e) => Some(e),
             Self::Closed | Self::WrongCode => None,
         }
@@ -152,11 +148,11 @@ where
     let theirs = recv(transport, PacketType::Spake2Msg).await?;
 
     let key_material = spake2.finish(&theirs).map_err(PairingError::Spake2)?;
-    let mut cipher = Cipher::new(key_material.as_ref()).map_err(PairingError::Aead)?;
+    let mut cipher = Cipher::new(key_material.as_ref());
 
     let mine = peer_info::encode(PeerInfoType::RsaPublicKey, key.public_key_line())
         .map_err(PairingError::PeerInfo)?;
-    let sealed = cipher.seal(&mine).map_err(PairingError::Aead)?;
+    let sealed = cipher.seal(&mine);
     send(transport, PacketType::PeerInfo, &sealed).await?;
 
     let answer = recv(transport, PacketType::PeerInfo).await?;
@@ -167,7 +163,7 @@ where
         )));
     }
     // The first and only place a wrong code shows itself.
-    let opened = cipher.open(&answer).map_err(|_| PairingError::WrongCode)?;
+    let opened = cipher.open(&answer).ok_or(PairingError::WrongCode)?;
     let (kind, guid) = peer_info::decode(&opened).map_err(PairingError::PeerInfo)?;
     if kind != PeerInfoType::DeviceGuid {
         return Err(PairingError::PeerInfo(PeerInfoError::Unexpected(kind)));
@@ -219,11 +215,10 @@ mod tests {
         // Display names the inner failure already; `source` is what lets
         // a report walk down to it, say to the I/O error under a pairing
         // that died on the socket.
-        let wrapped: [PairingError<Infallible>; 5] = [
+        let wrapped: [PairingError<Infallible>; 4] = [
             PairingError::Transport(TlsError::HandshakeClosed),
             PairingError::Frame(FrameError::Version(2)),
             PairingError::Spake2(Spake2Error::NotAPoint),
-            PairingError::Aead(AeadError::Decrypt),
             PairingError::PeerInfo(PeerInfoError::NotUtf8),
         ];
         for error in &wrapped {
