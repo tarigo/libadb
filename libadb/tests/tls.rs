@@ -16,12 +16,9 @@ use std::thread::JoinHandle;
 use embedded_io_async::{Read, Write};
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::{cert, AdbKey};
-use libadb::tls::rustls::pki_types::{
-    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime,
-};
-use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use libadb::tls::rustls::{DistinguishedName, ServerConfig, ServerConnection, StreamOwned};
-use libadb::tls::{rustls, TlsClientConfig, TlsIdentity};
+use libadb::tls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use libadb::tls::rustls::{ServerConnection, StreamOwned};
+use libadb::tls::{rustls, TlsClientConfig};
 use libadb::transport::common::Transport;
 use libadb::transport::tls::{MaybeTls, StartTls, TlsError};
 use libadb::Splittable;
@@ -38,115 +35,10 @@ mod rt;
 #[path = "test_key/test_key.rs"]
 mod test_key;
 
-/// What the fake device does with the certificate the host offers.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum KeyPolicy {
-    /// Take any client certificate, the way a device that already
-    /// trusts the key does.
-    Accept,
-    /// Refuse it. In TLS 1.3 the client's handshake still completes and
-    /// the alert only reaches it on the first read.
-    Reject,
-}
+#[path = "tls_device/tls_device.rs"]
+mod tls_device;
 
-fn host_key() -> AdbKey {
-    AdbKey::from_pkcs8_pem(test_key::PKCS8_PEM, &mut OsRng, test_key::NAME).unwrap()
-}
-
-/// A device certificate, freshly minted. Wireless debugging does the
-/// same: the pairing server generates one per run.
-fn device_identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-    let key = AdbKey::generate(&mut OsRng, "device@fake").unwrap();
-    let der = cert::build(&key, &mut OsRng).unwrap();
-    let pkcs8 = key.to_pkcs8_der().unwrap();
-    (
-        CertificateDer::from(der),
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(pkcs8.as_bytes().to_vec())),
-    )
-}
-
-#[derive(Debug)]
-struct ClientPolicy {
-    accept: bool,
-    provider: Arc<rustls::crypto::CryptoProvider>,
-    /// How many client certificates the device has been shown.
-    shown: Arc<AtomicUsize>,
-}
-
-impl ClientCertVerifier for ClientPolicy {
-    fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _now: UnixTime,
-    ) -> Result<ClientCertVerified, rustls::Error> {
-        self.shown.fetch_add(1, Ordering::Relaxed);
-        if self.accept {
-            Ok(ClientCertVerified::assertion())
-        } else {
-            Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ApplicationVerificationFailure,
-            ))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Err(rustls::Error::PeerIncompatible(
-            rustls::PeerIncompatible::Tls12NotOffered,
-        ))
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-/// The device's side of TLS 1.3, taking or refusing the host's key.
-fn device_config(policy: KeyPolicy) -> Arc<ServerConfig> {
-    device_config_counting(policy, Arc::default())
-}
-
-/// [`device_config`], counting in `shown` the certificates it checks.
-fn device_config_counting(policy: KeyPolicy, shown: Arc<AtomicUsize>) -> Arc<ServerConfig> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (cert, key) = device_identity();
-    let config = ServerConfig::builder_with_provider(Arc::clone(&provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_client_cert_verifier(Arc::new(ClientPolicy {
-            accept: policy == KeyPolicy::Accept,
-            provider,
-            shown,
-        }))
-        .with_single_cert(vec![cert], key)
-        .unwrap();
-    Arc::new(config)
-}
+use tls_device::{client_config, device_config, device_config_counting, host_key, KeyPolicy};
 
 /// What the fake device did, so a test can check the host's side of it.
 struct DeviceReport {
@@ -216,11 +108,6 @@ fn spawn_device(policy: KeyPolicy) -> (SocketAddr, JoinHandle<DeviceReport>) {
     });
 
     (addr, handle)
-}
-
-fn client_config() -> TlsClientConfig {
-    let identity = TlsIdentity::from_key(&host_key(), &mut OsRng).unwrap();
-    TlsClientConfig::adb(&identity).unwrap()
 }
 
 async fn connected(addr: SocketAddr) -> MaybeTls<rt::AdbTransport> {
@@ -1294,16 +1181,16 @@ async fn a_plain_transport_still_splits_and_passes_bytes_through() {
 }
 }
 
-/// The `subjectPublicKeyInfo` of a DER certificate, found by structure
-/// rather than parsed: it is the only 290-byte SEQUENCE in an RSA-2048
-/// certificate, and this test only needs to compare two of them.
+/// The `subjectPublicKeyInfo` of a DER certificate, re-encoded: the part
+/// the device looks the host up by.
 fn spki_of(der: &[u8]) -> Vec<u8> {
-    let needle = [0x30u8, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09];
-    let at = der
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .expect("an RSA-2048 SubjectPublicKeyInfo");
-    der[at..at + 294].to_vec()
+    use x509_cert::der::{Decode, Encode};
+    x509_cert::Certificate::from_der(der)
+        .expect("a DER certificate")
+        .tbs_certificate
+        .subject_public_key_info
+        .to_der()
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------
@@ -1941,7 +1828,7 @@ async fn a_real_device_serves_a_split_connection_over_tls() {
     // locking, so a live device is worth the trouble here even though
     // the local server already covers the unsplit one.
     let key = real_device_key().await;
-    let identity = TlsIdentity::from_key(&key, &mut OsRng).unwrap();
+    let identity = libadb::tls::TlsIdentity::from_key(&key, &mut OsRng).unwrap();
     let tls = TlsClientConfig::adb(&identity).unwrap();
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
