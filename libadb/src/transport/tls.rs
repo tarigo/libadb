@@ -396,14 +396,15 @@ mod inner {
             if buf.is_empty() {
                 return Ok(0);
             }
-            if let Some(e) = &self.failed {
-                return Err(TlsError::Tls(e.clone()));
-            }
             loop {
                 match take_plaintext(&mut self.conn, buf) {
                     Plain::Got(n) => return Ok(n),
                     Plain::Eof => return Ok(0),
                     Plain::Blocked => {}
+                }
+                // What decrypted ahead of a failure is read before it.
+                if let Some(e) = &self.failed {
+                    return Err(TlsError::Tls(e.clone()));
                 }
                 // A write dropped part way leaves its records queued with
                 // nobody to send them. A socket that will not take them is
@@ -412,12 +413,14 @@ mod inner {
 
                 // Decrypt what is in hand before going back to the socket, or
                 // the tail of a closed stream is lost as a clean end of file.
-                // What rustls will not take follows a `close_notify`.
                 if !self.rx.is_empty() {
-                    if self.advance()? > 0 {
-                        continue;
+                    match self.advance() {
+                        // What rustls will not take follows a `close_notify`.
+                        Ok(0) => return Ok(0),
+                        // A failure is kept, and reported once what decrypted
+                        // ahead of it has been read.
+                        Ok(_) | Err(_) => continue,
                     }
-                    return Ok(0);
                 }
                 if self.eof {
                     return Ok(0);
@@ -764,9 +767,6 @@ mod inner {
             if buf.is_empty() {
                 return Ok(0);
             }
-            if let Some(e) = self.shared.failed.get() {
-                return Err(TlsError::Tls(e.clone()));
-            }
             loop {
                 // Plaintext first, under the engine lock alone.
                 {
@@ -776,6 +776,10 @@ mod inner {
                         Plain::Eof => return Ok(0),
                         Plain::Blocked => {}
                     }
+                }
+                // What decrypted ahead of a failure is read before it.
+                if let Some(e) = self.shared.failed.get() {
+                    return Err(TlsError::Tls(e.clone()));
                 }
 
                 // Settle what a dropped write left behind, if the write lock
@@ -800,11 +804,13 @@ mod inner {
                             let _ = self.shared.failed.set(e.clone());
                         })
                     };
-                    if fed.map_err(TlsError::Tls)? > 0 {
-                        continue;
+                    match fed {
+                        // What rustls will not take follows a `close_notify`.
+                        Ok(0) => return Ok(0),
+                        // A failure is kept, and reported once what decrypted
+                        // ahead of it has been read.
+                        Ok(_) | Err(_) => continue,
                     }
-                    // What rustls will not take follows a `close_notify`.
-                    return Ok(0);
                 }
 
                 if self.eof {

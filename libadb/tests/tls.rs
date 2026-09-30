@@ -383,6 +383,9 @@ enum Step {
     Say(&'static [u8]),
     /// Put these bytes on the socket as they are, outside TLS.
     Raw(&'static [u8]),
+    /// Send the first bytes, and the second as they are right behind
+    /// them, in one write, so the host takes both off the socket at once.
+    SayThenRaw(&'static [u8], &'static [u8]),
     /// Read until this much plaintext has arrived, then send these bytes.
     Hear(usize, &'static [u8]),
 }
@@ -409,6 +412,16 @@ fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
                 Step::Say(bytes) => bytes,
                 Step::Raw(bytes) => {
                     tls.sock.write_all(bytes).unwrap();
+                    continue;
+                }
+                Step::SayThenRaw(said, raw) => {
+                    tls.conn.writer().write_all(said).unwrap();
+                    let mut wire = Vec::new();
+                    while tls.conn.wants_write() {
+                        tls.conn.write_tls(&mut wire).unwrap();
+                    }
+                    wire.extend_from_slice(raw);
+                    tls.sock.write_all(&wire).unwrap();
                     continue;
                 }
                 Step::Hear(total, bytes) => {
@@ -1008,6 +1021,57 @@ async fn a_split_session_that_met_a_broken_record_stays_failed() {
     assert!(matches!(again, Err(TlsError::Tls(_))), "got {again:?}");
     let wrote = writer.write(b"after").await;
     assert!(matches!(wrote, Err(TlsError::Tls(_))), "got {wrote:?}");
+
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn what_decrypted_before_a_broken_record_is_read_before_the_failure() {
+    // A record that arrived whole ahead of the broken one is the
+    // device's own, and rustls has already decrypted it. The failure
+    // comes after it, not in its place.
+    let (addr, steps, device) = spawn_quiet_device();
+    let mut transport = connected(addr).await;
+
+    steps
+        .send(Step::SayThenRaw(b"the tail", &BROKEN_RECORD))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let first = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert_eq!(first.map(|n| &buf[..n]).ok(), Some(&b"the tail"[..]));
+
+    let second = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(second, Err(TlsError::Tls(_))), "got {second:?}");
+
+    drop(steps);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn what_decrypted_before_a_broken_record_is_read_before_the_failure_when_split() {
+    let (addr, steps, device) = spawn_quiet_device();
+    let (mut reader, _writer) = connected(addr).await.split().unwrap();
+
+    steps
+        .send(Step::SayThenRaw(b"the tail", &BROKEN_RECORD))
+        .unwrap();
+    let mut buf = [0u8; 16];
+    let first = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert_eq!(first.map(|n| &buf[..n]).ok(), Some(&b"the tail"[..]));
+
+    let second = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the read hung");
+    assert!(matches!(second, Err(TlsError::Tls(_))), "got {second:?}");
 
     drop(steps);
     device.join().unwrap();
