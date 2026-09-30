@@ -431,46 +431,31 @@ fn spawn_quiet_device() -> (SocketAddr, mpsc::Sender<Step>, JoinHandle<()>) {
     (addr, steps, handle)
 }
 
-/// Wait until `written` has stopped moving: the writer is stuck on a
-/// full socket, inside its drain, holding the write lock. Returns where
-/// it stopped.
-async fn stalled(written: &AtomicUsize) -> usize {
-    let mut last = usize::MAX;
-    let mut still = 0;
-    while still < 6 {
-        rt::sleep_ms(50).await;
-        let now = written.load(Ordering::Relaxed);
-        if now == last {
-            still += 1;
-        } else {
-            last = now;
-            still = 0;
-        }
-    }
-    last
-}
-
 rt_test! {
 async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
-    // The device reads nothing, so the writer ends up blocked inside
-    // its drain with the write lock held. A read that queued for that
-    // lock would stop reading the socket, and a peer that will not read
-    // until it has been read from would then leave both sides stuck.
+    // A device that reads nothing leaves the writer blocked inside its
+    // drain with the write lock held. A read that queued for that lock
+    // would stop reading the socket, and a peer that will not read until
+    // it has been read from would then leave both sides stuck.
+    //
+    // The writer is held in place rather than stuck on a real full
+    // socket: one that stalled can still take a few more bytes once the
+    // device's reply reopens the window, so there is no telling from the
+    // outside whether it was stuck through the read.
     let (addr, steps, device) = spawn_quiet_device();
-    let (mut reader, mut writer) = connected(addr).await.split().unwrap();
+    let (transport, faults) = breakable_session(addr).await;
+    let (mut reader, mut writer) = transport.split().unwrap();
 
-    let written = Arc::new(AtomicUsize::new(0));
-    let flood = rt::spawn({
-        let written = Arc::clone(&written);
+    faults.held.store(true, Ordering::Relaxed);
+    let returned = Arc::new(AtomicBool::new(false));
+    let held = rt::spawn({
+        let returned = Arc::clone(&returned);
         async move {
-            let chunk = [0x5a; 4096];
-            while let Ok(n) = writer.write(&chunk).await {
-                written.fetch_add(n, Ordering::Relaxed);
-            }
+            let _ = writer.write(b"held").await;
+            returned.store(true, Ordering::Relaxed);
         }
     });
-    let stuck_at = stalled(&written).await;
-    assert!(stuck_at > 0, "the writer never got going, so nothing is tested");
+    faults.until_holding().await;
 
     steps.send(Step::Say(b"hello")).unwrap();
     let mut buf = [0u8; 16];
@@ -480,15 +465,14 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
         .unwrap();
 
     assert_eq!(&buf[..n], b"hello");
-    assert_eq!(
-        written.load(Ordering::Relaxed),
-        stuck_at,
+    assert!(
+        !returned.load(Ordering::Relaxed),
         "the writer must still be stuck, or the read proved nothing"
     );
-    // Hanging up unblocks the writer with an error, which ends it.
+    faults.held.store(false, Ordering::Relaxed);
+    rt::join(held).await;
     drop(steps);
     device.join().unwrap();
-    rt::join(flood).await;
 }
 }
 
