@@ -56,7 +56,9 @@ pub enum FrameError {
     /// A packet of a known kind, at a point in the exchange where the
     /// other kind was due.
     Unexpected {
+        /// The kind that arrived.
         got: PacketType,
+        /// The kind the exchange was waiting for.
         expected: PacketType,
     },
 }

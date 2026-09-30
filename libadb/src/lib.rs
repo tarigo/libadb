@@ -25,7 +25,7 @@
 //! | `runtime` | Set by `tokio` and `smol`, not by hand: it lets the examples require one of the two |
 //! | `keys`  | Built-in RSA host key (`keys::AdbKey`): generation, PKCS#8/PKCS#1 load, PKCS#8 save, ADB public-key encoding. `no_std + alloc` |
 //! | `host-keys` | `keys::store` on top of `keys`: read `~/.android/adbkey`, or generate and persist one; pulls in `std` |
-//! | `tls`   | ADB over TLS — wireless debugging on Android 11+ (`STLS`): `tls::TlsClientConfig`, `transport::tls::MaybeTls`, `Connection::connect_tls`. Implies `keys` and `split`; pulls in `std` |
+//! | `tls`   | ADB over TLS — wireless debugging on Android 11+ (`STLS`): `tls::TlsIdentity`, `tls::TlsClientConfig`, `transport::tls::MaybeTls`, `Connection::connect_tls`. Implies `keys` and `split`; pulls in `std` |
 //! | `pairing` | `adb pair`: `pairing::pair` puts a key on a device that has never seen it. Implies `tls` |
 //!
 //! # Quick start
@@ -92,6 +92,10 @@
 //! `embedded_io_async::{Read, Write}` plus [`Splittable`]. For concurrent
 //! read and write tasks on the same connection, see
 //! [`Connection::split`] and the resulting `Reader` / `Writer` pair.
+//!
+//! For Android 11+ wireless debugging (feature `tls`), wrap the TCP
+//! transport in `transport::tls::MaybeTls` and connect with
+//! `Connection::connect_tls`.
 //!
 //! # Status
 //!

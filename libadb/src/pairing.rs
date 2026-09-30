@@ -1,13 +1,14 @@
 //! `adb pair`: putting a key on a device that has never seen it.
 //!
 //! A key the device already trusts — one approved at a USB prompt —
-//! needs none of this: [`Connection::connect_tls`](crate::Connection)
+//! needs none of this: [`Connection::connect_tls`](crate::Connection::connect_tls)
 //! is accepted straight away, because adbd checks both against the same
 //! store. Pairing is for a key it has never seen.
 //!
-//! The exchange runs on a port of its own, which the device shows on
-//! its "Wireless debugging" pane along with a six-digit code, and which
-//! is not the port a session later uses.
+//! The exchange runs on a port of its own, which the device shows with
+//! a six-digit code once "Pair device with pairing code" is tapped on
+//! its "Wireless debugging" screen, and which is not the port a session
+//! later uses.
 //!
 //! # The shape of it
 //!

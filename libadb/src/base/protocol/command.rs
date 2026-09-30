@@ -45,10 +45,11 @@ pub const CMD_WRTE: u32 = u32::from_le_bytes(*b"WRTE");
 
 /// TLS upgrade request (`"STLS"` as little-endian `u32`).
 ///
-/// Introduced in Android 9 (ADB protocol v2). Signals that the
-/// transport should be wrapped in TLS before further traffic.
+/// Android 11+ wireless debugging answers the host's CNXN with it, and
+/// the host answers in kind before it starts TLS.
 pub const CMD_STLS: u32 = u32::from_le_bytes(*b"STLS");
 
+/// The command field of an ADB message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 #[non_exhaustive]

@@ -4,7 +4,25 @@
 //! [`Command::StartTls`](crate::protocol::command::Command::StartTls)
 //! instead of CNXN or AUTH, and speaks nothing but TLS 1.3 afterwards.
 //! [`Connection::connect_tls`](crate::Connection::connect_tls) takes it
-//! up on that; this module holds what the handshake needs.
+//! up on that. This module holds the certificate and the `rustls`
+//! profile the host presents; the transport that runs TLS is
+//! [`MaybeTls`](crate::transport::tls::MaybeTls).
+//!
+//! # Connecting
+//!
+//! ```ignore
+//! use libadb::keys::rsa::rand_core::OsRng;
+//! use libadb::transport::tls::MaybeTls;
+//! use libadb::{Connection, Feature, TlsClientConfig, TlsIdentity, TokioTcp};
+//!
+//! // Once per key: building the identity signs a certificate.
+//! let identity = TlsIdentity::from_key(&key, &mut OsRng)?;
+//! let tls = TlsClientConfig::adb(&identity)?;
+//!
+//! let tcp = tokio::net::TcpStream::connect(addr).await?;
+//! let transport = MaybeTls::plain(TokioTcp::new(tcp));
+//! let conn = Connection::<_>::connect_tls(transport, key, &[Feature::ShellV2], &tls).await?;
+//! ```
 //!
 //! # What authenticates whom
 //!
@@ -28,7 +46,8 @@
 //! * Finding the port. Wireless debugging picks a fresh one every time
 //!   it is switched on and announces it over DNS-SD; this crate does no
 //!   service discovery, so the caller supplies host and port.
-//! * TLS over USB. adbd never offers STLS there.
+//! * TLS over USB: adbd never offers STLS there. `connect_tls` still
+//!   serves a USB transport, through the plain handshake.
 
 mod config;
 mod identity;

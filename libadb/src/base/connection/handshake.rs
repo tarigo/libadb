@@ -63,6 +63,10 @@ where
     /// Delayed ACK (credit-based flow control) is enabled only when
     /// [`Feature::DelayedAck`] is in `features` and the device also advertises it.
     ///
+    /// A device that answers with `STLS`, as Android 11+ wireless
+    /// debugging does, fails this with [`ProtocolError::TlsRequired`];
+    /// with the `tls` feature, `connect_tls` serves both kinds.
+    ///
     /// [`connect_with_raw_banner`]: Self::connect_with_raw_banner
     pub async fn connect<A: Authenticator>(
         transport: T,
@@ -95,7 +99,8 @@ where
     ///
     /// Escape hatch for callers that need properties beyond a plain
     /// feature list; prefer [`connect`](Self::connect) for the common
-    /// case.
+    /// case. A device that wants TLS fails this with
+    /// [`ProtocolError::TlsRequired`], as it fails `connect`.
     pub async fn connect_with_raw_banner<A: Authenticator>(
         transport: T,
         auth: A,

@@ -144,15 +144,19 @@ fn absorb(hash: &mut Sha512, data: &[u8]) {
     hash.update(data);
 }
 
-/// One side of a SPAKE2 exchange.
+/// One side of SPAKE2 as BoringSSL runs it on edwards25519, which is
+/// what adbd speaks: not RFC 9382, and not what the `spake2` crate
+/// implements. [`pair`](crate::pairing::pair) runs one as
+/// [`Role::Alice`].
 ///
 /// The scalars it holds, and the bytes of the point both sides arrive
 /// at, are wiped as they go. Two kinds of copy are not. SHA-512's
 /// working state: `sha2` 0.10 has no way to clear it, so the hashers
 /// that take in the password and the transcript leave their last state
 /// in memory they free, and the transcript's is as good as the key it
-/// finishes into. And whatever the curve arithmetic leaves on the stack
-/// along the way. The key is used once, for one `PeerInfo` each way.
+/// finishes into. And the temporaries the scalar and curve arithmetic
+/// leave on the stack along the way. The key is used once, for one
+/// `PeerInfo` each way.
 pub struct Spake2 {
     role: Role,
     my_name: Vec<u8>,
@@ -169,8 +173,13 @@ pub struct Spake2 {
 impl Spake2 {
     /// Start an exchange and produce this side's message.
     ///
-    /// `password` goes in whole: for pairing it is the six-digit code
+    /// `password` goes in whole: for pairing it is the pairing code
     /// with the TLS exporter's output appended, not the code alone.
+    ///
+    /// The names go in whole too, NUL and all: adbd's are
+    /// `b"adb pair client\0"` for the host (Alice) and
+    /// `b"adb pair server\0"` for the device (Bob), each side passing
+    /// its own first.
     pub fn new<R: CryptoRngCore>(
         role: Role,
         my_name: &[u8],

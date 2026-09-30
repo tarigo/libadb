@@ -14,7 +14,6 @@
 //! seeds its own blinding generator from what the caller supplies, so
 //! nothing drags in `getrandom` behind your back.
 
-/// The self-signed certificate this key presents over TLS.
 #[cfg(feature = "tls")]
 pub mod cert;
 pub(crate) mod pubkey;

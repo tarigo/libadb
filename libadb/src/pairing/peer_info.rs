@@ -40,7 +40,7 @@ impl PeerInfoType {
     }
 }
 
-/// Why a received block made no sense.
+/// Why a `PeerInfo` block could not be built or read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PeerInfoError {
@@ -53,8 +53,9 @@ pub enum PeerInfoError {
     Unexpected(PeerInfoType),
     /// The payload was not UTF-8.
     NotUtf8,
-    /// The payload did not fit, which for a key means it is far larger
-    /// than RSA-2048.
+    /// Our payload does not fit the block with its terminator. For the
+    /// host's key that means a name, the ` user@host` part, several
+    /// kilobytes long.
     TooLong(usize),
 }
 

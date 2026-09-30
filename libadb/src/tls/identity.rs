@@ -42,26 +42,38 @@ impl core::error::Error for TlsIdentityError {
 /// What the host proves itself with over TLS: a self-signed certificate
 /// carrying an [`AdbKey`]'s public key, and that key to sign with.
 ///
-/// Building one is the expensive part of a TLS connection — it signs a
-/// certificate — so build it once and lend it to every connection.
+/// Building one signs a certificate, so do it once per key: make a
+/// [`TlsClientConfig`](crate::tls::TlsClientConfig) from it with
+/// [`TlsClientConfig::adb`](crate::tls::TlsClientConfig::adb) and share
+/// that between connections, pairing included.
 ///
-/// Pairing over `adb pair` needs the same material, which is why this
-/// is not hidden inside the transport.
-///
-/// The private key is wiped when the identity is dropped.
+/// This identity's copy of the private key is wiped when it is dropped.
+/// A `TlsClientConfig` built from it keeps a parsed copy of its own for
+/// as long as the config lives, and that one is not wiped.
 pub struct TlsIdentity {
     certificate: CertificateDer<'static>,
     private_key: PrivatePkcs8KeyDer<'static>,
 }
 
 impl TlsIdentity {
-    /// Build the identity `key` presents, valid from now.
+    /// Build the identity `key` presents: a certificate dated from the
+    /// system clock, valid for ten years and signed with `key`. `rng`
+    /// blinds the signature.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsIdentityError::Certificate`] with [`CertError::Clock`] if the
+    /// clock reads a time no certificate can carry, or with another
+    /// [`CertError`] if encoding or signing fails;
+    /// [`TlsIdentityError::PrivateKey`] if the key will not encode as
+    /// PKCS#8.
     pub fn from_key<R: CryptoRngCore>(key: &AdbKey, rng: &mut R) -> Result<Self, TlsIdentityError> {
         Self::from_key_at(key, rng, SystemTime::now())
     }
 
-    /// [`from_key`](Self::from_key) with the certificate's start date
-    /// supplied rather than read from the clock.
+    /// [`from_key`](Self::from_key), dated from `not_before` instead of
+    /// the clock: for a host whose clock cannot be trusted, or a
+    /// certificate that must come out the same every time.
     pub fn from_key_at<R: CryptoRngCore>(
         key: &AdbKey,
         rng: &mut R,
@@ -108,10 +120,10 @@ impl core::fmt::Debug for TlsIdentity {
 }
 
 impl Drop for TlsIdentity {
-    /// The key is copied out of the zeroizing document it was encoded
-    /// into, and is the host's own: every device that trusts the host
-    /// trusts this key. Nothing else would wipe the copy.
     fn drop(&mut self) {
+        // The key is copied out of the zeroizing document it was encoded
+        // into, and is the host's own: every device that trusts the host
+        // trusts this key. Nothing else would wipe the copy.
         zeroize::Zeroize::zeroize(&mut self.private_key);
     }
 }

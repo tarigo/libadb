@@ -9,6 +9,9 @@
 //! The shape follows AOSP's `crypto/x509_generator.cpp` field for
 //! field. A device only compares the public key, but matching what
 //! `adb` emits keeps us out of any future tightening.
+//!
+//! Most callers want [`TlsIdentity`](crate::tls::TlsIdentity), which
+//! builds this and keeps it with the key.
 
 use alloc::vec::Vec;
 use std::time::{Duration, SystemTime};
@@ -50,8 +53,9 @@ pub enum CertError {
     Spki(x509_cert::spki::Error),
     /// Signing the certificate body failed.
     Rsa(rsa::Error),
-    /// The clock reads a time no certificate can carry: before the Unix
-    /// epoch, or so late that the validity would run past the year 9999.
+    /// The start time, the clock's or one handed to [`build_at`], is
+    /// one no certificate can carry: before the Unix epoch, or so late
+    /// that the ten-year validity would run past the year 9999.
     Clock,
 }
 
@@ -61,7 +65,7 @@ impl core::fmt::Display for CertError {
             Self::Der(e) => write!(f, "certificate encoding: {e}"),
             Self::Spki(e) => write!(f, "certificate public key: {e}"),
             Self::Rsa(e) => write!(f, "certificate signature: {e}"),
-            Self::Clock => f.write_str("system clock is outside what a certificate can carry"),
+            Self::Clock => f.write_str("start time is outside what a certificate can carry"),
         }
     }
 }
@@ -89,15 +93,23 @@ impl From<x509_cert::spki::Error> for CertError {
     }
 }
 
-/// Build the self-signed certificate for `key`, valid from now.
+/// Build the self-signed certificate for `key`, valid for ten years
+/// from now.
 ///
-/// Returns DER, which is what a TLS stack wants.
+/// Returns DER, which is what a TLS stack wants. `rng` blinds the RSA
+/// signature; the signature itself comes out the same either way.
+///
+/// # Errors
+///
+/// [`CertError::Clock`] if the clock reads a time no certificate can
+/// carry; the other variants if encoding or signing fails.
 pub fn build<R: CryptoRngCore>(key: &AdbKey, rng: &mut R) -> Result<Vec<u8>, CertError> {
     build_at(key, rng, SystemTime::now())
 }
 
-/// [`build`], with `not_before` supplied rather than read from the
-/// clock, so a test can compare bytes against a fixed expectation.
+/// [`build`], dated from `not_before` instead of the clock: for a host
+/// whose clock cannot be trusted, or bytes that must come out the same
+/// every time.
 pub fn build_at<R: CryptoRngCore>(
     key: &AdbKey,
     rng: &mut R,

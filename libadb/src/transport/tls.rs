@@ -1,9 +1,9 @@
 //! A transport that can start TLS on itself, for ADB's `STLS`.
 //!
-//! `MaybeTls` sits in the TCP slot of
+//! [`MaybeTls`] sits in the TCP slot of
 //! [`Transport`](crate::transport::common::Transport), so a connection
 //! keeps the same type whether or not the device asked for TLS. Before
-//! `StartTls::start_tls` it passes bytes straight through; after it,
+//! [`StartTls::start_tls`] it passes bytes straight through; after it,
 //! everything goes through `rustls`.
 //!
 //! The `rustls` engine is driven by hand over
@@ -60,9 +60,11 @@ mod inner {
         /// the connection is taken as gone, not as a device refusing
         /// anything.
         WriteZero,
-        /// TLS was asked of something that cannot do it: a USB
-        /// transport, a session already started, or one left unusable
-        /// by a handshake that failed.
+        /// What was asked cannot be done on this transport: `start_tls`
+        /// on USB or on a transport that is no longer plain, keying
+        /// material while still in the clear, or a read, write, flush or
+        /// split after a handshake that failed or was dropped part way,
+        /// which takes the socket with it.
         NotAvailable,
         /// A write came after `shutdown`. rustls would still seal it and
         /// send it behind the `close_notify`, which the peer takes as the
@@ -114,17 +116,38 @@ mod inner {
 
     /// A transport that can put a TLS session on top of itself.
     ///
+    /// It is what [`Connection::connect_tls`](crate::Connection::connect_tls)
+    /// asks of its transport: a [`MaybeTls`], or a
+    /// [`Transport`](crate::transport::common::Transport) whose TCP side
+    /// is one, as
+    /// [`tls_ready`](crate::transport::common::Transport::tls_ready)
+    /// makes it.
+    ///
     /// Sealed: only this crate's transports implement it, so a method
     /// can be added later without breaking anyone.
     pub trait StartTls: Read + Write + sealed::Sealed {
         /// Start TLS 1.3 as the client and carry the handshake through.
         ///
-        /// The server says nothing before the client's hello, so there is
-        /// no ciphertext a reader above could have taken off the wire
-        /// first: the session starts from the socket as it stands.
+        /// The session starts from the socket as it stands: call this
+        /// straight after the `STLS` exchange, with nothing read past it.
         ///
-        /// A failure leaves the transport unusable: a socket whose
-        /// handshake broke down has nothing to say afterwards.
+        /// # Errors
+        ///
+        /// [`TlsError::NotAvailable`] on USB, or on a transport that is
+        /// no longer plain, which is left as it was. Otherwise
+        /// [`TlsError::HandshakeClosed`] if the device hangs up during
+        /// the handshake, [`TlsError::Tls`] if `rustls` fails it or will
+        /// not start one, and [`TlsError::Io`] or [`TlsError::WriteZero`]
+        /// from the socket. Through a
+        /// [`Transport`](crate::transport::common::Transport) each comes
+        /// wrapped in `TransportError::Tcp`.
+        ///
+        /// # Cancellation
+        ///
+        /// Not cancel-safe. A failure other than `NotAvailable`, or
+        /// dropping the future before it completes, takes the socket
+        /// with it: every read, write, flush and split after that
+        /// returns [`TlsError::NotAvailable`].
         fn start_tls(
             &mut self,
             config: &TlsClientConfig,
@@ -163,8 +186,14 @@ mod inner {
     }
 
     impl<E> TlsError<E> {
-        /// Whether this is a device refusing the key, rather than a
-        /// connection that went wrong on its own.
+        /// Whether this is the device refusing the key, rather than a
+        /// connection that went wrong on its own: an alert over the
+        /// certificate, such as the `certificate_unknown` adbd sends.
+        ///
+        /// A device that refuses by just closing is not caught here.
+        /// [`Connection::connect_tls`](crate::Connection::connect_tls)
+        /// reports that as
+        /// [`AuthError::TlsClosedBeforeConnect`](crate::error::AuthError::TlsClosedBeforeConnect).
         pub fn is_key_rejected(&self) -> bool {
             match self {
                 Self::Tls(rustls::Error::AlertReceived(a)) => alert_means_rejection(*a),
@@ -511,6 +540,17 @@ mod inner {
 
     /// A transport that is plain now and may be TLS later.
     ///
+    /// Wrap the socket with [`plain`](Self::plain) and hand it to
+    /// [`Connection::connect_tls`](crate::Connection::connect_tls), which
+    /// starts TLS only if the device asks for it; `pairing::pair` takes
+    /// one too.
+    /// [`Transport::tls_ready`](crate::transport::common::Transport::tls_ready)
+    /// does the wrapping for the TCP-or-USB enum.
+    ///
+    /// Once `rustls` rejects what the device sent, every later read,
+    /// write, flush and shutdown returns that same [`TlsError::Tls`].
+    /// What decrypted ahead of the failure is still read first.
+    ///
     /// # Cancellation
     ///
     /// Reads lose nothing when dropped, as far as the transport
@@ -521,7 +561,11 @@ mod inner {
     /// committed nothing it did not report. The queue is what waits on
     /// the socket. It goes out on `flush`, or with a later write once it
     /// has grown to 64 KiB, as with any buffered writer; call `flush`
-    /// when a message is done.
+    /// when a message is done. A dropped `flush` leaves the rest queued
+    /// for the next one.
+    ///
+    /// [`start_tls`](StartTls::start_tls) is the exception: it is not
+    /// cancel-safe.
     pub struct MaybeTls<T: Read + Write> {
         state: State<T>,
     }
@@ -540,6 +584,9 @@ mod inner {
         }
 
         /// Whether bytes still go out in the clear.
+        ///
+        /// Both this and [`is_tls`](Self::is_tls) are false once a
+        /// handshake that failed or was dropped has taken the socket.
         pub fn is_plain(&self) -> bool {
             matches!(self.state, State::Plain(_))
         }
@@ -547,9 +594,14 @@ mod inner {
         /// Key material exported from the running session, as RFC 5705
         /// defines it.
         ///
-        /// Pairing needs this: its password is the six-digit code with
-        /// the exporter's output appended, which is what ties the
-        /// exchange to the session it runs in.
+        /// Pairing needs this: its password is the pairing code with the
+        /// exporter's output appended, which is what ties the exchange to
+        /// the session it runs in.
+        ///
+        /// # Errors
+        ///
+        /// [`TlsError::NotAvailable`] unless a session is running;
+        /// [`TlsError::Tls`] if `rustls` refuses the export.
         pub fn export_keying_material(
             &self,
             out: &mut [u8],
@@ -567,7 +619,11 @@ mod inner {
         /// Send `close_notify`, if there is a session to close.
         ///
         /// Not required — a device is content with a plain FIN — and
-        /// not done on drop, because dropping cannot await.
+        /// not done on drop, because dropping cannot await. It leaves
+        /// the transport underneath open; a write to the session after it
+        /// fails with [`TlsError::Closed`]. On a session that has already
+        /// failed it sends the alert for that failure instead, if the
+        /// socket takes it, and returns the failure.
         pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
             match &mut self.state {
                 State::Tls(s) => s.shutdown().await,
@@ -685,7 +741,10 @@ mod inner {
     }
 
     impl<T: Read + Write, U> Transport<T, U> {
-        /// Make the TCP half able to start TLS, without starting any.
+        /// Wrap a TCP transport in [`MaybeTls`] so that it can start TLS
+        /// later, starting none now. A USB transport passes through as it
+        /// is: adbd never offers TLS there, and `start_tls` on it fails
+        /// with [`TlsError::NotAvailable`].
         pub fn tls_ready(self) -> Transport<MaybeTls<T>, U> {
             match self {
                 Self::Tcp(t) => Transport::Tcp(MaybeTls::plain(t)),
@@ -832,6 +891,11 @@ mod inner {
         /// Not required — a device is content with a plain FIN — and
         /// not done on drop, because dropping cannot await. Without it a
         /// peer cannot tell a connection we closed from one cut short.
+        ///
+        /// It leaves the transport underneath open, and a write after it
+        /// fails with [`TlsError::Closed`]. On a session that has already
+        /// failed it sends the alert for that failure instead, if the
+        /// socket takes it, and returns the failure.
         pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
             // Up front: a shutdown dropped part way may already have
             // queued the `close_notify`, and nothing may follow it.
@@ -880,7 +944,9 @@ mod inner {
 
     /// The read half of a [`MaybeTls`], plain or encrypted.
     pub enum MaybeTlsRead<T: Splittable> {
+        /// No TLS was started: the plain transport's read half.
         Plain(T::ReadHalf),
+        /// The read half of the running TLS session.
         Tls(TlsReadHalf<T>),
     }
 
@@ -889,7 +955,9 @@ mod inner {
     /// Encrypted, writes queue and `flush` sends; see [`MaybeTls`] under
     /// *Cancellation*.
     pub enum MaybeTlsWrite<T: Splittable> {
+        /// No TLS was started: the plain transport's write half.
         Plain(T::WriteHalf),
+        /// The write half of the running TLS session.
         Tls(TlsWriteHalf<T>),
     }
 
@@ -913,7 +981,8 @@ mod inner {
     impl<T: Splittable> MaybeTlsWrite<T> {
         /// Send `close_notify`, if there is a session to close.
         ///
-        /// [`MaybeTls::shutdown`] for a transport that has been split.
+        /// [`MaybeTls::shutdown`] for a transport that has been split,
+        /// and [`TlsWriteHalf::shutdown`] underneath.
         pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
             match self {
                 Self::Plain(_) => Ok(()),
