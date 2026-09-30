@@ -41,7 +41,10 @@ where
     /// authenticates over USB, or the device will not have it. When it
     /// does not, the failure is
     /// [`crate::error::AuthError::TlsKeyNotTrusted`]
-    /// and the cure is one `adb pair`.
+    /// and the cure is one `adb pair`. A device that closes the session
+    /// before its CNXN gives
+    /// [`crate::error::AuthError::TlsClosedBeforeConnect`] instead: it
+    /// may have refused the key that way, or simply gone away.
     pub async fn connect_tls<A: Authenticator>(
         transport: T,
         auth: A,
@@ -141,16 +144,28 @@ where
             log::debug!("{} bytes arrived alongside STLS", pending.len());
         }
 
+        // Nothing here is the device refusing our key: the certificate
+        // leaves in our last flight, once the handshake is over on our
+        // side, so the device has not seen it yet.
         transport
             .start_tls(tls, &pending)
             .await
-            .map_err(|e| Self::verdict(e))?;
+            .map_err(Error::Io)?;
 
         // The host does not repeat its CNXN. The device sends one from
         // inside the session, and that is the first thing to arrive.
-        let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload())
-            .await
-            .map_err(Self::verdict_on)?;
+        let pkt = match recv_handshake_pkt(transport, recv_buf, config.max_payload()).await {
+            Ok(pkt) => pkt,
+            // Not a byte of a CNXN. A device that closes over our key looks
+            // like this, and so does one that took the key and went away.
+            Err(Error::UnexpectedEof) if recv_buf.is_empty() => {
+                log::debug!("device closed the TLS session before its CNXN");
+                return Err(AuthError::TlsClosedBeforeConnect.into());
+            }
+            // Part of one means the device let us in, so the end of the
+            // stream stays what it is.
+            Err(e) => return Err(Self::verdict_on(e)),
+        };
 
         match pkt.command {
             Command::Connect => Ok(pkt),
@@ -181,12 +196,6 @@ where
     /// reader.
     fn verdict_on(error: Error<<T as ErrorType>::Error>) -> Error<<T as ErrorType>::Error> {
         match error {
-            // Our reader turns a closed stream into this, and right
-            // after a handshake a closed stream means one thing.
-            Error::UnexpectedEof => {
-                log::debug!("device closed before its CNXN: the key is not trusted");
-                AuthError::TlsKeyNotTrusted.into()
-            }
             Error::Io(e) => Self::verdict(e),
             other => other,
         }
