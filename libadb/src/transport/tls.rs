@@ -174,7 +174,8 @@ mod inner {
     /// What a look at the plaintext side turned up.
     enum Plain {
         Got(usize),
-        /// The peer closed, cleanly or otherwise.
+        /// The peer's `close_notify` has arrived, and everything before
+        /// it has been read.
         Eof,
         /// Nothing decrypted yet.
         Blocked,
@@ -231,16 +232,22 @@ mod inner {
     }
 
     /// Take whatever plaintext is decrypted.
+    ///
+    /// rustls sees the end of the session only as a `close_notify`. The
+    /// end of the stream underneath never reaches it: `feed` hands it
+    /// ciphertext and nothing else, and the callers watch for that end
+    /// themselves.
     fn take_plaintext(conn: &mut ClientConnection, buf: &mut [u8]) -> Plain {
         use std::io::Read as _;
         match conn.reader().read(buf) {
             Ok(0) => Plain::Eof,
             Ok(n) => Plain::Got(n),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Plain::Blocked,
-            // Its only other failure: `read_tls` met the end of the stream
-            // without a `close_notify`, which to the layer above is still
-            // the end of the stream. A broken record never shows here; it
-            // fails in `process_new_packets`.
+            // rustls raises `UnexpectedEof` once told the stream ended
+            // without a `close_notify`, which it never is here; were it
+            // told, that would still be the end to the layer above. A
+            // broken record never shows here: it fails in
+            // `process_new_packets`.
             Err(_) => Plain::Eof,
         }
     }
