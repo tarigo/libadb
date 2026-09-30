@@ -496,6 +496,149 @@ async fn a_broken_record_fails_the_read_rather_than_ending_it() {
 }
 }
 
+/// A device that answers the ClientHello with a ServerHello claiming
+/// 32 KiB, cut into one-byte records, and then stays on the line until
+/// the host hangs up.
+fn spawn_device_that_floods_the_handshake() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut head = [0u8; 5];
+        socket.read_exact(&mut head).unwrap();
+        let mut hello = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+        socket.read_exact(&mut hello).unwrap();
+
+        // Every record costs six bytes for the one it carries, so the
+        // buffer rustls joins the message in fills long before the
+        // message is whole.
+        let mut message = vec![0u8; 4 + 0x8000];
+        message[..4].copy_from_slice(&[0x02, 0x00, 0x80, 0x00]);
+        let records: Vec<u8> = message
+            .iter()
+            .flat_map(|&b| [0x16, 0x03, 0x03, 0x00, 0x01, b])
+            .collect();
+        // A host that gives up closes the socket, which ends this early.
+        let _ = socket.write_all(&records);
+
+        // A host that went on reading would wait here for good.
+        let mut sink = [0u8; 4096];
+        while matches!(socket.read(&mut sink), Ok(n) if n > 0) {}
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_handshake_message_too_big_to_buffer_fails_the_handshake() {
+    // rustls refuses records once it holds 64 KiB of one handshake
+    // message, and says so with an error. Taken for backpressure, that
+    // left the handshake reading for as long as the peer kept the
+    // socket open, and keeping everything it sent.
+    let (addr, device) = spawn_device_that_floods_the_handshake();
+    let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
+
+    let outcome = rt::timeout_ms(5000, transport.start_tls(&client_config(), &[]))
+        .await
+        .expect("the handshake hung on a message rustls would not buffer");
+
+    let Err(err) = outcome else {
+        panic!("a handshake with no ServerHello completed");
+    };
+    assert!(matches!(err, TlsError::Tls(_)), "got {err:?}");
+    assert!(!err.is_key_rejected());
+    device.join().unwrap();
+}
+}
+
+/// Hands out session tickets of 40,000 bytes. Nothing is wrong with one
+/// that size, but sent in the smallest records rustls allows it
+/// overflows the buffer the host joins a handshake message in.
+#[derive(Debug)]
+struct OutsizedTickets;
+
+impl rustls::server::ProducesTickets for OutsizedTickets {
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn lifetime(&self) -> u32 {
+        60
+    }
+
+    fn encrypt(&self, _plain: &[u8]) -> Option<Vec<u8>> {
+        Some(vec![0; 40_000])
+    }
+
+    fn decrypt(&self, _cipher: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// A device that finishes the handshake, sends one outsized ticket in
+/// 32-byte records, and stays on the line until the host hangs up.
+fn spawn_device_with_an_outsized_ticket() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let mut config = (*device_config(KeyPolicy::Accept)).clone();
+        config.ticketer = Arc::new(OutsizedTickets);
+        config.send_tls13_tickets = 1;
+        config.max_fragment_size = Some(32);
+
+        let (socket, _) = listener.accept().unwrap();
+        let conn = ServerConnection::new(Arc::new(config)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).unwrap();
+        }
+        // The ticket goes out once the handshake is over. A host that
+        // gives up closes the socket, which may cut it short.
+        let _ = tls.flush();
+
+        let mut sink = [0u8; 4096];
+        while matches!(tls.sock.read(&mut sink), Ok(n) if n > 0) {}
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_ticket_too_big_to_buffer_fails_the_read() {
+    // The same refusal after the handshake, where the read loop has to
+    // report it rather than go back to the socket.
+    let (addr, device) = spawn_device_with_an_outsized_ticket();
+    let mut transport = connected(addr).await;
+
+    let mut buf = [0u8; 16];
+    let outcome = rt::timeout_ms(5000, transport.read(&mut buf))
+        .await
+        .expect("the read hung on a message rustls would not buffer");
+
+    assert!(matches!(outcome, Err(TlsError::Tls(_))), "got {outcome:?}");
+    drop(transport);
+    device.join().unwrap();
+}
+}
+
+rt_test! {
+async fn a_ticket_too_big_to_buffer_fails_a_split_read_too() {
+    let (addr, device) = spawn_device_with_an_outsized_ticket();
+    let (mut reader, writer) = connected(addr).await.split().unwrap();
+
+    let mut buf = [0u8; 16];
+    let outcome = rt::timeout_ms(5000, reader.read(&mut buf))
+        .await
+        .expect("the split read hung on a message rustls would not buffer");
+
+    assert!(matches!(outcome, Err(TlsError::Tls(_))), "got {outcome:?}");
+    drop((reader, writer));
+    device.join().unwrap();
+}
+}
+
 #[test]
 fn only_an_alert_about_the_certificate_counts_as_a_refused_key() {
     // adbd turns a key away with `certificate_unknown`. A generic alert
