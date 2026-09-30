@@ -830,6 +830,17 @@ mod inner {
         }
     }
 
+    impl<T: Splittable> TlsWriteHalf<T> {
+        /// Send `close_notify` and push it out.
+        ///
+        /// Not required — a device is content with a plain FIN — and
+        /// not done on drop, because dropping cannot await. Without it a
+        /// peer cannot tell a connection we closed from one cut short.
+        pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
+            self.shared.push_with(|conn| conn.send_close_notify()).await
+        }
+    }
+
     impl<T: Splittable> Write for TlsWriteHalf<T> {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             use std::io::Write as _;
@@ -885,6 +896,18 @@ mod inner {
             match self {
                 Self::Plain(t) => t.read(buf).await.map_err(TlsError::Io),
                 Self::Tls(t) => t.read(buf).await,
+            }
+        }
+    }
+
+    impl<T: Splittable> MaybeTlsWrite<T> {
+        /// Send `close_notify`, if there is a session to close.
+        ///
+        /// [`MaybeTls::shutdown`] for a transport that has been split.
+        pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
+            match self {
+                Self::Plain(_) => Ok(()),
+                Self::Tls(t) => t.shutdown().await,
             }
         }
     }
