@@ -518,7 +518,9 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
     let held = rt::spawn({
         let returned = Arc::clone(&returned);
         async move {
+            // The write only queues; the flush is what meets the socket.
             let _ = writer.write(b"held").await;
+            let _ = writer.flush().await;
             returned.store(true, Ordering::Relaxed);
         }
     });
@@ -544,37 +546,134 @@ async fn an_idle_read_does_not_wait_behind_a_writer_stuck_on_the_socket() {
 }
 
 rt_test! {
-async fn a_write_dropped_on_a_full_socket_still_goes_out_with_the_next_read() {
-    // The records a dropped write sealed sit in the queue with nobody
-    // left to send them. The next read has to push them out, or the
-    // device waits for the end of a message that never comes.
+async fn a_write_dropped_on_a_full_socket_leaves_the_queue_for_the_next_flush() {
+    // A write dropped while the queue ahead of it went out has committed
+    // nothing of its own, and the queue is still there: the next flush
+    // finishes sending it, and the device gets every byte the writes
+    // reported.
     let (addr, steps, device) = spawn_quiet_device();
     let (mut reader, mut writer) = connected(addr).await.split().unwrap();
 
     let chunk = [0xa5; 4096];
-    let mut sealed = 0;
-    loop {
-        match rt::timeout_ms(300, writer.write(&chunk)).await {
-            Some(n) => sealed += n.unwrap(),
-            None => {
-                // Dropped inside its drain. Its plaintext went into
-                // rustls whole before the socket blocked, so it counts.
-                sealed += chunk.len();
-                break;
-            }
-        }
+    let mut reported = 0;
+    while let Some(n) = rt::timeout_ms(300, writer.write(&chunk)).await {
+        reported += n.unwrap();
     }
 
-    steps.send(Step::Hear(sealed, b"all of it")).unwrap();
+    steps.send(Step::Hear(reported, b"all of it")).unwrap();
+    rt::timeout_ms(5000, writer.flush())
+        .await
+        .expect("the flush never finished sending the queue")
+        .unwrap();
     let mut buf = [0u8; 16];
     let n = rt::timeout_ms(5000, reader.read(&mut buf))
         .await
-        .expect("the dropped write never finished reaching the device")
+        .expect("the device never heard all of it")
         .unwrap();
 
     assert_eq!(&buf[..n], b"all of it");
     drop(steps);
     device.join().unwrap();
+}
+}
+
+/// A device that finishes the handshake and reads nothing until told
+/// how much to expect; then it reads that much and hands it back.
+fn spawn_device_that_listens_late() -> (SocketAddr, mpsc::Sender<usize>, JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (expect, told) = mpsc::channel::<usize>();
+
+    let handle = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let conn = ServerConnection::new(device_config(KeyPolicy::Accept)).unwrap();
+        let mut tls = StreamOwned::new(conn, socket);
+        while tls.conn.is_handshaking() {
+            tls.conn.complete_io(&mut tls.sock).unwrap();
+        }
+        tls.flush().unwrap();
+
+        let total = told.recv().unwrap();
+        // A host that sent too little would leave this waiting for good.
+        tls.sock
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut heard = Vec::with_capacity(total);
+        let mut buf = vec![0u8; 64 * 1024];
+        while heard.len() < total {
+            match tls.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => heard.extend_from_slice(&buf[..n]),
+            }
+        }
+        heard
+    });
+
+    (addr, expect, handle)
+}
+
+/// Write 4 MiB of numbered chunks towards a device that is not reading
+/// until one write is held up and dropped, then tell the device to read
+/// and send the rest, starting again from the dropped chunk as a caller
+/// would. Returns what the device should have heard.
+async fn write_through_a_dropped_write<W: Write>(w: &mut W, expect: &mpsc::Sender<usize>) -> Vec<u8>
+where
+    W::Error: core::fmt::Debug,
+{
+    let chunks: Vec<Vec<u8>> = (0..1024u32)
+        .map(|i| {
+            let mut chunk = vec![0u8; 4096];
+            chunk[..4].copy_from_slice(&i.to_le_bytes());
+            chunk
+        })
+        .collect();
+
+    let mut next = 0;
+    while let Some(n) = rt::timeout_ms(200, w.write(&chunks[next])).await {
+        assert_eq!(n.unwrap(), chunks[next].len());
+        next += 1;
+        assert!(
+            next < chunks.len(),
+            "no write was held up, so nothing is tested"
+        );
+    }
+
+    expect.send(chunks.len() * 4096).unwrap();
+    for chunk in &chunks[next..] {
+        w.write_all(chunk).await.unwrap();
+    }
+    w.flush().await.unwrap();
+    chunks.concat()
+}
+
+rt_test! {
+async fn a_write_dropped_on_a_full_socket_is_not_sent_twice() {
+    // A caller whose write was dropped sends the same bytes again, as it
+    // would over a plain socket. A write that had sealed them before it
+    // waited on the socket sent them twice.
+    let (addr, expect, device) = spawn_device_that_listens_late();
+    let mut transport = connected(addr).await;
+
+    let sent = write_through_a_dropped_write(&mut transport, &expect).await;
+
+    assert!(
+        device.join().unwrap() == sent,
+        "the device heard some of it twice, or not at all"
+    );
+}
+}
+
+rt_test! {
+async fn a_split_write_dropped_on_a_full_socket_is_not_sent_twice() {
+    let (addr, expect, device) = spawn_device_that_listens_late();
+    let (_reader, mut writer) = connected(addr).await.split().unwrap();
+
+    let sent = write_through_a_dropped_write(&mut writer, &expect).await;
+
+    assert!(
+        device.join().unwrap() == sent,
+        "the device heard some of it twice, or not at all"
+    );
 }
 }
 
@@ -927,15 +1026,16 @@ async fn a_split_read_still_names_a_broken_record_when_its_alert_cannot_go_out()
 
 rt_test! {
 async fn a_split_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
-    // A write that failed leaves its records queued, and every read
-    // tries to push them out first. Failing at that must not cost the
-    // reader what the device has already sent.
+    // A flush that failed leaves its records queued. That is the
+    // writer's to report, and must not cost the reader what the device
+    // has already sent.
     let (addr, steps, device) = spawn_quiet_device();
     let (transport, faults) = breakable_session(addr).await;
     let (mut reader, mut writer) = transport.split().unwrap();
 
     faults.broken.store(true, Ordering::Relaxed);
-    assert!(writer.write(b"never sent").await.is_err());
+    writer.write(b"never sent").await.unwrap();
+    assert!(writer.flush().await.is_err());
     steps.send(Step::Say(b"the tail")).unwrap();
     let mut buf = [0u8; 16];
     let outcome = rt::timeout_ms(5000, reader.read(&mut buf))
@@ -950,13 +1050,14 @@ async fn a_split_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
 
 rt_test! {
 async fn an_unsplit_read_still_delivers_what_arrived_when_the_writer_is_stuck() {
-    // The same, before any split: the records of the failed write wait
-    // in the session, and the read tries them first.
+    // The same, before any split: the records of the failed flush wait
+    // in the session, and the read carries on without them.
     let (addr, steps, device) = spawn_quiet_device();
     let (mut transport, faults) = breakable_session(addr).await;
 
     faults.broken.store(true, Ordering::Relaxed);
-    assert!(transport.write(b"never sent").await.is_err());
+    transport.write(b"never sent").await.unwrap();
+    assert!(transport.flush().await.is_err());
     steps.send(Step::Say(b"the tail")).unwrap();
     let mut buf = [0u8; 16];
     let outcome = rt::timeout_ms(5000, transport.read(&mut buf))
@@ -981,6 +1082,7 @@ async fn a_split_read_names_a_broken_record_while_the_writer_is_held_up() {
     faults.held.store(true, Ordering::Relaxed);
     let held = rt::spawn(async move {
         let _ = writer.write(b"held").await;
+        let _ = writer.flush().await;
     });
     faults.until_holding().await;
 
