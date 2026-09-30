@@ -226,7 +226,7 @@ fn client_config() -> TlsClientConfig {
 async fn connected(addr: SocketAddr) -> MaybeTls<rt::AdbTransport> {
     let stream = rt::connect(addr).await;
     let mut transport = MaybeTls::plain(rt::wrap(stream));
-    transport.start_tls(&client_config(), &[]).await.unwrap();
+    transport.start_tls(&client_config()).await.unwrap();
     transport
 }
 
@@ -311,7 +311,7 @@ async fn a_second_connection_does_not_resume_the_first() {
     let config = client_config();
     for _ in 0..2 {
         let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-        transport.start_tls(&config, &[]).await.unwrap();
+        transport.start_tls(&config).await.unwrap();
         transport.write(b"ping").await.unwrap();
         transport.flush().await.unwrap();
         let mut buf = [0u8; 16];
@@ -339,7 +339,7 @@ async fn a_rejected_key_surfaces_on_the_first_read_not_the_handshake() {
     // The certificate leaves in the host's last flight, so the device
     // cannot have judged it yet.
     transport
-        .start_tls(&client_config(), &[])
+        .start_tls(&client_config())
         .await
         .expect("the handshake completes on the host's side");
     let mut buf = [0u8; 64];
@@ -588,7 +588,7 @@ async fn a_handshake_message_too_big_to_buffer_fails_the_handshake() {
     let (addr, device) = spawn_device_that_floods_the_handshake();
     let mut transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
 
-    let outcome = rt::timeout_ms(5000, transport.start_tls(&client_config(), &[]))
+    let outcome = rt::timeout_ms(5000, transport.start_tls(&client_config()))
         .await
         .expect("the handshake hung on a message rustls would not buffer");
 
@@ -829,7 +829,7 @@ async fn breakable_session(addr: SocketAddr) -> (MaybeTls<BreakableWrites>, Arc<
         faults: Arc::clone(&faults),
     };
     let mut transport = MaybeTls::plain(socket);
-    transport.start_tls(&client_config(), &[]).await.unwrap();
+    transport.start_tls(&client_config()).await.unwrap();
     (transport, faults)
 }
 
@@ -1040,7 +1040,7 @@ async fn a_write_that_goes_nowhere_is_not_taken_for_a_refused_key() {
     // the problem.
     let mut transport = MaybeTls::plain(TakesNothing);
 
-    let err = transport.start_tls(&client_config(), &[]).await.unwrap_err();
+    let err = transport.start_tls(&client_config()).await.unwrap_err();
 
     assert!(matches!(err, TlsError::WriteZero), "got {err:?}");
     assert!(!err.is_key_rejected());
@@ -1090,8 +1090,8 @@ fn spki_of(der: &[u8]) -> Vec<u8> {
 // The whole handshake: STLS, then ADB inside the session
 // ---------------------------------------------------------------------
 
-use libadb::error::AuthError;
-use libadb::protocol::command::{CMD_CNXN, CMD_STLS};
+use libadb::error::{AuthError, ProtocolError};
+use libadb::protocol::command::{CMD_CNXN, CMD_OKAY, CMD_STLS};
 use libadb::protocol::constant::{ADB_VERSION, STLS_VERSION};
 use libadb::{Connection, Error};
 
@@ -1338,7 +1338,11 @@ async fn failed_connect(
     tls: &TlsClientConfig,
 ) -> Error<TlsError<std::io::Error>> {
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    match Connection::<_>::connect_tls(transport, test_auth(), &[], tls).await {
+    let connect = Connection::<_>::connect_tls(transport, test_auth(), &[], tls);
+    let outcome = rt::timeout_ms(5000, connect)
+        .await
+        .expect("the connect hung");
+    match outcome {
         Ok(_) => panic!("the device must not have handed out a connection"),
         Err(err) => err,
     }
@@ -1365,6 +1369,50 @@ async fn an_alert_before_the_host_shows_its_key_is_not_said_to_refuse_it() {
         "expected the alert itself, got {err:?}"
     );
     device.join().unwrap();
+}
+}
+
+/// A device that asks for TLS with a stray OKAY in the same segment, as
+/// a stale packet would sit behind it. Reports whether the host went on
+/// to answer the STLS all the same.
+fn spawn_device_with_a_packet_behind_its_stls() -> (SocketAddr, JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let (command, _, _, _) = read_packet(&mut socket);
+        assert_eq!(command, CMD_CNXN, "the host opens with CNXN");
+        let mut segment = header(CMD_STLS, STLS_VERSION, 0, &[]);
+        segment.extend_from_slice(&header(CMD_OKAY, 1, 2, &[]));
+        socket.write_all(&segment).unwrap();
+
+        let mut rest = Vec::new();
+        let _ = socket.read_to_end(&mut rest);
+        !rest.is_empty()
+    });
+
+    (addr, handle)
+}
+
+rt_test! {
+async fn a_packet_behind_the_stls_is_named_rather_than_fed_to_tls() {
+    // A TLS 1.3 server speaks only after the ClientHello, so what came
+    // in the same segment as STLS is plaintext. Handed to rustls as the
+    // start of the session, it failed as a corrupt record, which said
+    // nothing about what had happened.
+    let (addr, device) = spawn_device_with_a_packet_behind_its_stls();
+
+    let err = failed_connect(addr, &client_config()).await;
+
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::DataAfterStls)),
+        "got {err:?}"
+    );
+    assert!(
+        !device.join().unwrap(),
+        "the host answered STLS it could not carry through"
+    );
 }
 }
 

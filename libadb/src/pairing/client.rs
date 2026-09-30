@@ -131,7 +131,7 @@ where
     R: CryptoRngCore,
 {
     transport
-        .start_tls(tls, &[])
+        .start_tls(tls)
         .await
         .map_err(PairingError::Transport)?;
 

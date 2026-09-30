@@ -110,16 +110,15 @@ mod inner {
     pub trait StartTls: Read + Write + sealed::Sealed {
         /// Start TLS 1.3 as the client and carry the handshake through.
         ///
-        /// `pending` is ciphertext already taken off the wire by a
-        /// reader above — the first records, if the device sent them on
-        /// the heels of its `STLS`.
+        /// The server says nothing before the client's hello, so there is
+        /// no ciphertext a reader above could have taken off the wire
+        /// first: the session starts from the socket as it stands.
         ///
         /// A failure leaves the transport unusable: a socket whose
         /// handshake broke down has nothing to say afterwards.
         fn start_tls(
             &mut self,
             config: &TlsClientConfig,
-            pending: &[u8],
         ) -> impl Future<Output = Result<(), Self::Error>>;
 
         /// Whether `error` is the device refusing the key we offered.
@@ -242,16 +241,11 @@ mod inner {
         }
     }
 
-    /// Build the engine and seed it with ciphertext already in hand.
-    fn engine(
-        config: &TlsClientConfig,
-        pending: &[u8],
-    ) -> Result<(Box<ClientConnection>, BytesMut), rustls::Error> {
+    /// Build the engine.
+    fn engine(config: &TlsClientConfig) -> Result<Box<ClientConnection>, rustls::Error> {
         let conn =
             ClientConnection::new(Arc::clone(config.rustls()), config.server_name().clone())?;
-        let mut rx = BytesMut::with_capacity(CHUNK);
-        rx.extend_from_slice(pending);
-        Ok((Box::new(conn), rx))
+        Ok(Box::new(conn))
     }
 
     /// A TLS session over one transport, before anyone splits it.
@@ -275,16 +269,12 @@ mod inner {
     }
 
     impl<T: Read + Write> TlsSession<T> {
-        fn new(
-            inner: T,
-            config: &TlsClientConfig,
-            pending: &[u8],
-        ) -> Result<Self, TlsError<T::Error>> {
-            let (conn, rx) = engine(config, pending).map_err(TlsError::Tls)?;
+        fn new(inner: T, config: &TlsClientConfig) -> Result<Self, TlsError<T::Error>> {
+            let conn = engine(config).map_err(TlsError::Tls)?;
             Ok(Self {
                 inner,
                 conn,
-                rx,
+                rx: BytesMut::with_capacity(CHUNK),
                 tx: BytesMut::new(),
                 scratch: vec![0u8; CHUNK],
                 eof: false,
@@ -557,11 +547,7 @@ mod inner {
     impl<T: Read + Write> sealed::Sealed for MaybeTls<T> {}
 
     impl<T: Read + Write> StartTls for MaybeTls<T> {
-        async fn start_tls(
-            &mut self,
-            config: &TlsClientConfig,
-            pending: &[u8],
-        ) -> Result<(), Self::Error> {
+        async fn start_tls(&mut self, config: &TlsClientConfig) -> Result<(), Self::Error> {
             // `Broken` stands in while the value is out of `&mut self`, and
             // stays if the handshake fails. Anything else goes back untouched.
             let inner = match core::mem::replace(&mut self.state, State::Broken) {
@@ -572,7 +558,7 @@ mod inner {
                 }
             };
 
-            let mut session = TlsSession::new(inner, config, pending)?;
+            let mut session = TlsSession::new(inner, config)?;
             session.handshake().await?;
             self.state = State::Tls(session);
             Ok(())
@@ -612,14 +598,10 @@ mod inner {
         T: Read + Write,
         U: Read + Write,
     {
-        async fn start_tls(
-            &mut self,
-            config: &TlsClientConfig,
-            pending: &[u8],
-        ) -> Result<(), Self::Error> {
+        async fn start_tls(&mut self, config: &TlsClientConfig) -> Result<(), Self::Error> {
             match self {
                 Self::Tcp(t) => t
-                    .start_tls(config, pending)
+                    .start_tls(config)
                     .await
                     .map_err(crate::transport::common::TransportError::Tcp),
                 // adbd never offers STLS over USB.
