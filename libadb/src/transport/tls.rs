@@ -569,7 +569,9 @@ mod inner {
     /// the socket. It goes out on `flush`, or with a later write once it
     /// has grown to 64 KiB, as with any buffered writer; call `flush`
     /// when a message is done. A dropped `flush` leaves the rest queued
-    /// for the next one.
+    /// for the next one. After a split nothing else sends it: the read
+    /// half never writes, so a reader waiting on the reply waits until
+    /// the write half writes or flushes again.
     ///
     /// [`start_tls`](StartTls::start_tls) is the exception: it is not
     /// cancel-safe.
@@ -785,7 +787,8 @@ mod inner {
     /// The write half of a TLS session.
     ///
     /// Writes queue and `flush` sends, as for [`MaybeTls`]; see there
-    /// under *Cancellation*.
+    /// under *Cancellation*. Only this half sends: what a dropped `flush`
+    /// leaves waits for its next write or flush.
     pub struct TlsWriteHalf<T: Splittable> {
         half: T::WriteHalf,
         /// Records sealed and not yet written, advanced past whatever the

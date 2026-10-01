@@ -53,6 +53,9 @@ pub enum PeerInfoError {
     Unexpected(PeerInfoType),
     /// The payload was not UTF-8.
     NotUtf8,
+    /// The payload runs to the end of the block with no NUL to end it,
+    /// which a well-formed block never does.
+    Unterminated,
     /// Our payload does not fit the block with its terminator. For the
     /// host's key that means a name, the ` user@host` part, several
     /// kilobytes long.
@@ -66,6 +69,7 @@ impl core::fmt::Display for PeerInfoError {
             Self::Kind(k) => write!(f, "peer info type {k} is not one we know"),
             Self::Unexpected(t) => write!(f, "device answered with {t:?}, expected its GUID"),
             Self::NotUtf8 => f.write_str("peer info payload is not UTF-8"),
+            Self::Unterminated => f.write_str("peer info payload has no terminating NUL"),
             Self::TooLong(n) => write!(f, "peer info payload of {n} bytes does not fit"),
         }
     }
@@ -87,14 +91,18 @@ pub(crate) fn encode(kind: PeerInfoType, payload: &[u8]) -> Result<Vec<u8>, Peer
     Ok(block)
 }
 
-/// Read a block, as the device reads ours: up to the first NUL.
+/// Read a block, as the device reads ours: up to the first NUL, which
+/// has to be there.
 pub(crate) fn decode(block: &[u8]) -> Result<(PeerInfoType, String), PeerInfoError> {
     if block.len() != SIZE {
         return Err(PeerInfoError::Size(block.len()));
     }
     let kind = PeerInfoType::from_code(block[0]).ok_or(PeerInfoError::Kind(block[0]))?;
     let data = &block[1..];
-    let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    let end = data
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or(PeerInfoError::Unterminated)?;
     let text = core::str::from_utf8(&data[..end])
         .map_err(|_| PeerInfoError::NotUtf8)?
         .into();
@@ -146,6 +154,16 @@ mod tests {
         block[0] = 9;
 
         assert_eq!(decode(&block), Err(PeerInfoError::Kind(9)));
+    }
+
+    #[test]
+    fn a_block_without_its_terminator_is_refused() {
+        // Read to the end instead, all 8191 bytes would come back as the
+        // device's GUID, from a pairing that went through.
+        let mut block = vec![b'a'; SIZE];
+        block[0] = PeerInfoType::DeviceGuid.code();
+
+        assert_eq!(decode(&block), Err(PeerInfoError::Unterminated));
     }
 
     #[test]
