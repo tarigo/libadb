@@ -148,14 +148,35 @@ fn a_key_from_the_store_pairs_under_its_own_name() {
 #[test]
 fn a_trailing_newline_on_the_public_key_is_tolerated() {
     // What a file read gives, and what `adb_connect` accepts silently.
+    for ending in ["\n", "\r\n"] {
+        let (addr, device) = spawn_pairing_device(CODE);
+
+        let public = format!("{}{ending}", HOST.public);
+        let (status, _, _) = pair(&format!("tcp://{addr}"), &public, CODE, 64);
+        assert_eq!(status, adb::AdbStatus::Ok, "{ending:?}: {}", last_error());
+
+        let outcome = device.join().unwrap();
+        assert_eq!(
+            outcome.learned_key.as_deref(),
+            Some(HOST.public.as_str()),
+            "{ending:?}"
+        );
+    }
+}
+
+#[test]
+fn a_name_ending_in_a_space_is_stored_as_given() {
+    // A key name may end in anything but CR or LF, and
+    // `adb_key_load_or_generate` takes one so; the device stores it
+    // the same.
     let (addr, device) = spawn_pairing_device(CODE);
 
-    let public = format!("{}\n", HOST.public);
+    let public = format!("{} \t", HOST.public);
     let (status, _, _) = pair(&format!("tcp://{addr}"), &public, CODE, 64);
     assert_eq!(status, adb::AdbStatus::Ok, "{}", last_error());
 
     let outcome = device.join().unwrap();
-    assert_eq!(outcome.learned_key.as_deref(), Some(HOST.public.as_str()));
+    assert_eq!(outcome.learned_key.as_deref(), Some(public.as_str()));
 }
 
 #[test]
