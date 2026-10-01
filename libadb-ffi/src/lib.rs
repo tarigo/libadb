@@ -151,6 +151,17 @@ const _: fn() = || {
 /// the system clock outside what a certificate can carry, for one — is
 /// [`AdbStatus::Internal`].
 ///
+/// # Security
+///
+/// As with `adb`, the device is not authenticated. Its certificate is
+/// self-signed and taken on trust, and TLS starts only when the device
+/// asks for it with `STLS`: a peer that answers CNXN or AUTH instead is
+/// served in the clear. On a network you do not trust, an attacker in
+/// the middle can therefore take the device's place, inside TLS or, by
+/// answering without `STLS`, outside it. TLS keeps a passive
+/// eavesdropper out, but this API has no way to pin the device's
+/// certificate or to insist on TLS.
+///
 /// # Safety
 /// All pointers must be valid null-terminated C strings. `out` must
 /// point to a writable `adb_connection_t*`.
