@@ -69,6 +69,15 @@ typedef enum {
  * stay in the clear either way. A certificate that cannot be built for
  * the key — the system clock outside what a certificate can carry, for
  * one — is ADB_ERR_INTERNAL.
+ *
+ * Security, as with `adb`: the device is not authenticated. Its
+ * certificate is self-signed and taken on trust, and TLS starts only
+ * when the device asks for it with STLS: a peer that answers CNXN or
+ * AUTH instead is served in the clear. On a network you do not trust,
+ * an attacker in the middle can therefore take the device's place,
+ * inside TLS or, by answering without STLS, outside it. TLS keeps a
+ * passive eavesdropper out, but this API has no way to pin the
+ * device's certificate or to insist on TLS.
  */
 adb_status_t adb_connect(
     const char        *uri,
