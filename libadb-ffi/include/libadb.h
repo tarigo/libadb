@@ -208,8 +208,10 @@ void adb_key_free(adb_key_t *key);
  *   priv_key_pem   PKCS#8 PEM RSA private key, as adb_connect() takes it
  *   pub_key        the matching ADB-format public key line. The text
  *                  after the base64 blob ("user@host") is the name the
- *                  device lists this host under. A blob that does not
- *                  belong to the private key is ADB_ERR_INVALID_ARG.
+ *                  device lists this host under, as it stands; a line
+ *                  ending after it, as a file read leaves, is dropped.
+ *                  A blob that does not belong to the private key is
+ *                  ADB_ERR_INVALID_ARG.
  *   code           the code on the dialog: six digits when typed, or
  *                  the password a QR code carried. Only emptiness is
  *                  checked here — validate a typed code yourself, since

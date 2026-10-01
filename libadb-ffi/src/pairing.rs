@@ -27,8 +27,9 @@ use crate::transport::{self, FfiConnectError};
 ///   [`adb_connect`](crate::adb_connect) takes it.
 /// * `pub_key` — the matching ADB-format public key line. The text
 ///   after the base64 blob (`user@host`) is the name the device lists
-///   this host under. A blob that does not belong to the private key
-///   is [`AdbStatus::InvalidArg`].
+///   this host under, as it stands; a line ending after it, as a file
+///   read leaves, is dropped. A blob that does not belong to the
+///   private key is [`AdbStatus::InvalidArg`].
 /// * `code` — what the dialog shows: six digits when typed, or the
 ///   password a QR code carried. Only emptiness is checked here;
 ///   validate a typed code yourself, since a wrong one costs the device
@@ -100,8 +101,9 @@ pub unsafe extern "C" fn adb_pair(
 
     // The line the device stores is derived from the private key, so
     // the caller's name goes into it and the caller's blob is checked
-    // against it. The trailing newline is what a file read gives.
-    let pub_key = pub_key.trim_end();
+    // against it. A file read leaves a line ending behind; only that
+    // goes, since a name may end in anything but CR or LF.
+    let pub_key = pub_key.trim_end_matches(['\r', '\n']);
     let (blob, name) = pub_key.split_once(' ').unwrap_or((pub_key, ""));
     let key = match AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, name) {
         Ok(k) => k,
