@@ -7,10 +7,10 @@ use core::task::Poll;
 use super::*;
 use crate::base::error::{AuthError, ProtocolError};
 use crate::base::mock::{
-    abandon, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
-    two_channels_delayed_ack, wrte, Mock, NoAuth, Signs,
+    abandon, cnxn, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
+    two_channels_delayed_ack, wrte, Mock, NoAuth, Signs, Withholds,
 };
-use crate::base::protocol::command::{Command, AUTH_SIGNATURE, AUTH_TOKEN};
+use crate::base::protocol::command::{Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
 use crate::base::protocol::Packet;
 
 #[test]
@@ -488,6 +488,64 @@ fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
     assert!(
         matches!(err, Error::Auth(AuthError::Rejected)),
         "expected Rejected, got {err:?}"
+    );
+}
+
+#[test]
+fn a_withheld_key_ends_the_handshake_untrusted_before_it_reaches_the_device() {
+    // The second token asks for the key. Sending it is what raises the
+    // dialog on the device, so an authenticator that withholds it must
+    // leave the signature as the last thing on the wire.
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x6b; 20]));
+
+    let Err(err) = now(Connection::<_>::connect(&mut mock, Withholds, &[])) else {
+        panic!("an untrusted key must not become a connection");
+    };
+
+    assert!(
+        matches!(err, Error::Auth(AuthError::KeyNotTrusted)),
+        "expected KeyNotTrusted, got {err:?}"
+    );
+    let sent = mock.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|(c, arg0, ..)| *c == Command::Auth && *arg0 == AUTH_RSAPUBLICKEY),
+        "the key must not be offered, sent {sent:?}"
+    );
+    assert_eq!(
+        sent.last().map(|(c, arg0, ..)| (*c, *arg0)),
+        Some((Command::Auth, AUTH_SIGNATURE)),
+        "the handshake must end on our signature"
+    );
+}
+
+#[test]
+fn a_trusted_key_connects_without_being_offered() {
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
+    mock.feed(&cnxn());
+
+    now(Connection::<_>::connect(mock, Withholds, &[]))
+        .expect("a device that accepts the signature never asks for the key");
+}
+
+#[test]
+fn a_borrowed_authenticator_withholds_its_key_as_the_owned_one_does() {
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
+    mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x6b; 20]));
+    let mut auth = Withholds;
+
+    let Err(err) = now(Connection::<_>::connect(mock, &mut auth, &[])) else {
+        panic!("an untrusted key must not become a connection");
+    };
+
+    assert!(
+        matches!(err, Error::Auth(AuthError::KeyNotTrusted)),
+        "expected KeyNotTrusted, got {err:?}"
     );
 }
 

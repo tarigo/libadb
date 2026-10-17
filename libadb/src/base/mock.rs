@@ -340,6 +340,29 @@ impl crate::auth::Authenticator for Signs {
     }
 }
 
+/// Signs as [`Signs`] does, but keeps its key to itself: it only asks
+/// whether the device trusts it already.
+pub(crate) struct Withholds;
+
+impl crate::auth::Authenticator for Withholds {
+    type Error = NoKey;
+
+    fn sign(
+        &mut self,
+        _token: &[u8],
+    ) -> impl core::future::Future<Output = Result<Vec<u8>, Self::Error>> {
+        core::future::ready(Ok(alloc::vec![0xA5; 256]))
+    }
+
+    fn public_key(&self) -> &[u8] {
+        b"QUJD withholds@mock\0"
+    }
+
+    fn offer_public_key(&self) -> bool {
+        false
+    }
+}
+
 pub(crate) fn cnxn() -> Packet {
     Packet::new(
         Command::Connect,
