@@ -239,9 +239,10 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
 ///
 /// Returns the verdict the exchange ended on: CNXN once the key is
 /// accepted, or STLS if the device switches to TLS midway. Any AUTH but
-/// the one token that asks for the key is [`AuthError::Rejected`]; a
-/// command with no place in the handshake, such as SYNC, fails as
-/// [`ProtocolError::UnexpectedCommand`].
+/// the one token that asks for the key is [`AuthError::Rejected`]; that
+/// token is [`AuthError::KeyNotTrusted`] when the authenticator will not
+/// offer the key; a command with no place in the handshake, such as
+/// SYNC, fails as [`ProtocolError::UnexpectedCommand`].
 pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     desync: &DesyncFlag,
@@ -278,6 +279,12 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
         // A second token: the signature was not enough, offer the key.
         Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
         _ => return Err(AuthError::Rejected.into()),
+    }
+
+    // The key is what brings up the dialog on the device; an
+    // authenticator that only asks whether it is trusted stops here.
+    if !auth.offer_public_key() {
+        return Err(AuthError::KeyNotTrusted.into());
     }
 
     {

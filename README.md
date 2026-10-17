@@ -115,6 +115,12 @@ gives the `adbkey.pub` line. The `rsa` and `zeroize` crates this API
 speaks are re-exported as `libadb::keys::{rsa, zeroize}`, so there is
 one version to match rather than two manifests to guess at.
 
+To learn whether a device already trusts a key without putting the
+"Allow USB debugging?" dialog on its screen, return `false` from
+`Authenticator::offer_public_key`: a device that does not know the key
+then ends the handshake with `AuthError::KeyNotTrusted`, and the key
+never leaves the host.
+
 ## Memory budget
 
 `ConnectionConfig` bounds everything the library allocates per

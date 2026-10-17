@@ -133,7 +133,8 @@ pub enum ProtocolError {
 }
 
 /// Why the host did not get past authentication: the device refused it
-/// or closed on it, or the authenticator would not sign.
+/// or closed on it, or the authenticator would not sign or would not
+/// offer its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuthError {
@@ -142,6 +143,13 @@ pub enum AuthError {
     /// The authenticator would not sign the token. Carries what it
     /// said, since that is the only account of the failure there is.
     SignFailed(alloc::string::String),
+    /// The device did not accept the signature, and the authenticator
+    /// chose not to offer the public key in its place.
+    ///
+    /// The device does not trust this key yet, and nothing has asked
+    /// the user to: see
+    /// [`Authenticator::offer_public_key`](crate::auth::Authenticator::offer_public_key).
+    KeyNotTrusted,
     /// The device refused the certificate we offered: it does not have
     /// the key inside it.
     ///
@@ -221,6 +229,9 @@ impl fmt::Display for AuthError {
         match self {
             Self::Rejected => f.write_str("authentication rejected"),
             Self::SignFailed(why) => f.write_fmt(format_args!("authenticator sign failed: {why}")),
+            Self::KeyNotTrusted => f.write_str(
+                "device does not trust this key, and the key was not offered for approval",
+            ),
             Self::TlsKeyNotTrusted => f.write_str(
                 "device does not trust this key over TLS; authorise it over USB or run `adb pair`",
             ),

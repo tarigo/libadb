@@ -25,6 +25,21 @@ pub trait Authenticator {
     ///
     /// Format: base64-encoded RSA public key followed by ` user@host\0`.
     fn public_key(&self) -> &[u8];
+
+    /// Whether to send the public key when the device does not accept
+    /// the signature.
+    ///
+    /// Sending it is what puts the "Allow USB debugging?" dialog on the
+    /// device's screen. Return `false` to learn whether the device
+    /// already trusts this key without asking anyone: the handshake
+    /// then stops at the device's second token and fails with
+    /// [`AuthError::KeyNotTrusted`](crate::error::AuthError::KeyNotTrusted).
+    ///
+    /// TLS is unaffected: there the device judges the key by the
+    /// certificate and never shows a dialog.
+    fn offer_public_key(&self) -> bool {
+        true
+    }
 }
 
 /// A mutable borrow authenticates as whatever it points at, so one key
@@ -40,6 +55,10 @@ impl<A: Authenticator + ?Sized> Authenticator for &mut A {
 
     fn public_key(&self) -> &[u8] {
         (**self).public_key()
+    }
+
+    fn offer_public_key(&self) -> bool {
+        (**self).offer_public_key()
     }
 }
 
