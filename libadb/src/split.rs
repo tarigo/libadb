@@ -49,7 +49,11 @@
 use alloc::sync::Arc;
 use async_lock::Mutex as AsyncMutex;
 use bytes::BytesMut;
+use core::convert::Infallible;
+use core::future::{poll_fn, Future};
+use core::pin::{pin, Pin};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::task::Poll;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 use event_listener::{Event, EventListener};
@@ -60,7 +64,7 @@ use alloc::vec::Vec;
 
 use crate::base::channel::{
     channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot,
-    ChannelState, DispatchOutcome, PendingOpen,
+    ChannelState, DispatchOutcome, PendingOpen, SelectResult,
 };
 use crate::base::connection::{
     ConnectionConfig, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
@@ -495,6 +499,11 @@ where
     ///
     /// Channels the device opens toward the host (`adb reverse`) are
     /// refused: nobody is left to accept them.
+    ///
+    /// Without delayed ACK, data is acknowledged from here as it
+    /// arrives, so the acknowledgement may reach the device after
+    /// packets a task sends in response to that data. The protocol
+    /// allows either order.
     ///
     /// Reception is never cancelled from within, so this is also the
     /// way to read a transport whose reads are not cancel-safe (USB)
@@ -1161,14 +1170,38 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<WH as ErrorType>::Error>> {
+        match self
+            .select_channel(ch, buf, core::future::pending::<Infallible>())
+            .await?
+        {
+            SelectResult::Data(n) => Ok(n),
+            SelectResult::Interrupted(never) => match never {},
+        }
+    }
+
+    /// [`read_channel`](Self::read_channel), returning early with
+    /// [`SelectResult::Interrupted`] if `interrupt` resolves while it
+    /// waits for data.
+    ///
+    /// Buffered data wins over a ready interrupt, and the interrupt is
+    /// only raced against the wait, never against the acknowledgement
+    /// a read may send, so an interrupted call has taken nothing from
+    /// the channel.
+    pub async fn select_channel<F: Future>(
+        &self,
+        ch: ChannelId,
+        buf: &mut [u8],
+        interrupt: F,
+    ) -> Result<SelectResult<F::Output>, Error<<WH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         let Some(signal) = self.shared.signals.get(ch.slot) else {
             return Err(Error::ChannelClosed);
         };
         let delayed_ack = self.shared.delayed_ack;
         let watermark = self.shared.config.rx_watermark();
+        let mut interrupt = pin!(interrupt);
         loop {
-            let listener = signal.listen();
+            let mut listener = signal.listen();
             let taken = {
                 let mut chs = self.shared.lock_channels();
                 let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
@@ -1197,10 +1230,19 @@ where
                     )
                     .await?;
                 }
-                return Ok(n);
+                return Ok(SelectResult::Data(n));
             }
             self.shared.check_read()?;
-            listener.await;
+            let interrupted = poll_fn(|cx| {
+                if let Poll::Ready(value) = interrupt.as_mut().poll(cx) {
+                    return Poll::Ready(Some(value));
+                }
+                Pin::new(&mut listener).poll(cx).map(|()| None)
+            })
+            .await;
+            if let Some(value) = interrupted {
+                return Ok(SelectResult::Interrupted(value));
+            }
         }
     }
 

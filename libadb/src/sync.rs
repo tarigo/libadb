@@ -53,55 +53,29 @@
 //! ```
 
 use alloc::vec::Vec;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::base::channel::Channel;
-use crate::base::connection::{
-    Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
 use crate::base::error::{Error, SyncError};
 use crate::base::recv_buf::RecvBuf;
+use crate::base::session::Session;
 
 /// A sync session over an open `sync:\0` channel.
 ///
 /// Provides stat, list, push and pull operations.  Created by [`open`].
 /// Multiple operations can be performed on the same session before
 /// calling [`quit`](Self::quit).
-pub struct SyncSession<
-    'a,
-    'b,
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
-    T: Read + Write,
-{
-    channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+pub struct SyncSession<'a, 'b, S> {
+    channel: Channel<'a, S>,
     rx: RecvBuf<'b>,
 }
 
-impl<
-        'a,
-        'b,
-        T,
-        const MAX_CHANNELS: usize,
-        const MAX_PROPERTIES: usize,
-        const MAX_FEATURES: usize,
-    > SyncSession<'a, 'b, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
+impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Wrap an already-opened `sync:\0` channel.
     ///
     /// # Panics
     ///
     /// Panics if `buf.len() < HEADER_SIZE`.
-    pub fn new(
-        channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
-        buf: &'b mut [u8],
-    ) -> Self {
+    pub fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
         assert!(
             buf.len() >= HEADER_SIZE,
             "SyncSession buffer must be at least {} bytes",
@@ -123,11 +97,7 @@ where
         u32_at(self.rx.buf, self.rx.head + offset)
     }
 
-    async fn write_header(
-        &mut self,
-        id: &[u8; 4],
-        arg: u32,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    async fn write_header(&mut self, id: &[u8; 4], arg: u32) -> Result<(), Error<S::IoError>> {
         let mut hdr = [0u8; HEADER_SIZE];
         hdr[..4].copy_from_slice(id);
         hdr[4..8].copy_from_slice(&arg.to_le_bytes());
@@ -138,7 +108,7 @@ where
         &mut self,
         id: &[u8; 4],
         parts: &[&[u8]],
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    ) -> Result<(), Error<S::IoError>> {
         let arg_len: usize = parts.iter().map(|p| p.len()).sum();
         let total = HEADER_SIZE + arg_len;
 
@@ -166,10 +136,7 @@ where
         }
     }
 
-    async fn read_next_id(
-        &mut self,
-        allowed: &[[u8; 4]],
-    ) -> Result<[u8; 4], Error<<T as ErrorType>::Error>> {
+    async fn read_next_id(&mut self, allowed: &[[u8; 4]]) -> Result<[u8; 4], Error<S::IoError>> {
         self.rx
             .fill_at_least(&mut self.channel, HEADER_SIZE)
             .await?;
@@ -184,7 +151,7 @@ where
         Ok(id)
     }
 
-    async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>> {
+    async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<S::IoError>> {
         let msg_len = self.peek_u32(4) as usize;
         self.rx.head += HEADER_SIZE;
         // The device's message outranks a buffer complaint: keep what
@@ -211,7 +178,7 @@ where
     ///
     /// Returns zeroed fields when the path does not exist (v1 has no
     /// error code).
-    pub async fn stat(&mut self, path: &str) -> Result<StatV1, Error<<T as ErrorType>::Error>> {
+    pub async fn stat(&mut self, path: &str) -> Result<StatV1, Error<S::IoError>> {
         self.rx.compact();
         self.write_request(&ID_STAT, &[path.as_bytes()]).await?;
         self.read_next_id(&[ID_STAT]).await?;
@@ -233,7 +200,7 @@ where
     ///
     /// Returns [`SyncError::RemoteErrno`] when the device reports a
     /// non-zero error code (e.g. `ENOENT`).
-    pub async fn stat_v2(&mut self, path: &str) -> Result<StatV2, Error<<T as ErrorType>::Error>> {
+    pub async fn stat_v2(&mut self, path: &str) -> Result<StatV2, Error<S::IoError>> {
         self.rx.compact();
         self.write_request(&ID_STA2, &[path.as_bytes()]).await?;
         self.read_next_id(&[ID_STA2]).await?;
@@ -252,10 +219,7 @@ where
     }
 
     /// List a directory (v1).
-    pub async fn list(
-        &mut self,
-        path: &str,
-    ) -> Result<Vec<DirEntry>, Error<<T as ErrorType>::Error>> {
+    pub async fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, Error<S::IoError>> {
         self.rx.compact();
         self.write_request(&ID_LIST, &[path.as_bytes()]).await?;
 
@@ -299,10 +263,7 @@ where
     /// Requires the device to advertise `ls_v2`.  Entries whose stat
     /// failed on the device have a non-zero `stat.error` field but are
     /// still included in the result.
-    pub async fn list_v2(
-        &mut self,
-        path: &str,
-    ) -> Result<Vec<DirEntryV2>, Error<<T as ErrorType>::Error>> {
+    pub async fn list_v2(&mut self, path: &str) -> Result<Vec<DirEntryV2>, Error<S::IoError>> {
         self.rx.compact();
         self.write_request(&ID_LIS2, &[path.as_bytes()]).await?;
 
@@ -334,7 +295,7 @@ where
     }
 
     /// Begin a `RECV` (v1) pull.
-    pub async fn recv_start(&mut self, path: &str) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn recv_start(&mut self, path: &str) -> Result<(), Error<S::IoError>> {
         self.rx.compact();
         self.write_request(&ID_RECV, &[path.as_bytes()]).await
     }
@@ -343,11 +304,7 @@ where
     ///
     /// `flags` is a combination of [`flags`] constants.  Pass
     /// [`flags::NONE`] for uncompressed transfer.
-    pub async fn recv_v2_start(
-        &mut self,
-        path: &str,
-        flags: u32,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn recv_v2_start(&mut self, path: &str, flags: u32) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
         self.write_header(&ID_RCV2, path_bytes.len() as u32).await?;
@@ -364,7 +321,7 @@ where
     ///
     /// Must be called after [`recv_start`](Self::recv_start) or
     /// [`recv_v2_start`](Self::recv_v2_start).
-    pub async fn recv_next(&mut self) -> Result<Option<&[u8]>, Error<<T as ErrorType>::Error>> {
+    pub async fn recv_next(&mut self) -> Result<Option<&[u8]>, Error<S::IoError>> {
         self.rx.compact();
         if self.read_next_id(&[ID_DATA, ID_DONE]).await? == ID_DONE {
             self.rx.head += HEADER_SIZE;
@@ -389,7 +346,7 @@ where
     /// Convenience wrapper around [`recv_start`](Self::recv_start) +
     /// [`recv_next`](Self::recv_next).  For large files prefer the
     /// streaming API.
-    pub async fn recv(&mut self, path: &str) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>> {
+    pub async fn recv(&mut self, path: &str) -> Result<Vec<u8>, Error<S::IoError>> {
         self.recv_start(path).await?;
         let mut data = Vec::new();
         while let Some(chunk) = self.recv_next().await? {
@@ -399,11 +356,7 @@ where
     }
 
     /// Pull a file into memory (v2 `RCV2`).
-    pub async fn recv_v2(
-        &mut self,
-        path: &str,
-        flags: u32,
-    ) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>> {
+    pub async fn recv_v2(&mut self, path: &str, flags: u32) -> Result<Vec<u8>, Error<S::IoError>> {
         self.recv_v2_start(path, flags).await?;
         let mut data = Vec::new();
         while let Some(chunk) = self.recv_next().await? {
@@ -415,11 +368,7 @@ where
     /// Begin a `SEND` (v1) push.
     ///
     /// `mode` is the Unix file permission bits (e.g. `0o100644`).
-    pub async fn send_start(
-        &mut self,
-        path: &str,
-        mode: u32,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn send_start(&mut self, path: &str, mode: u32) -> Result<(), Error<S::IoError>> {
         let mut mode_dec = [0u8; 10];
         let mode_str = format_u32(mode, &mut mode_dec);
         self.write_request(&ID_SEND, &[path.as_bytes(), b",", mode_str])
@@ -434,7 +383,7 @@ where
         path: &str,
         mode: u32,
         flags: u32,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    ) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
         self.write_header(&ID_SND2, path_bytes.len() as u32).await?;
@@ -451,7 +400,7 @@ where
     /// `data` is automatically split into [`SYNC_DATA_MAX`]-sized
     /// chunks.  Must be called between a `send*_start` and
     /// [`send_done`](Self::send_done).
-    pub async fn send_data(&mut self, data: &[u8]) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn send_data(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
         for chunk in data.chunks(SYNC_DATA_MAX) {
             self.write_request(&ID_DATA, &[chunk]).await?;
         }
@@ -462,7 +411,7 @@ where
     /// seconds).
     ///
     /// Sends `DONE` and reads the device response (`OKAY` or `FAIL`).
-    pub async fn send_done(&mut self, mtime: u32) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn send_done(&mut self, mtime: u32) -> Result<(), Error<S::IoError>> {
         self.write_header(&ID_DONE, mtime).await?;
         self.rx.compact();
         self.read_next_id(&[ID_OKAY]).await?;
@@ -480,7 +429,7 @@ where
         mode: u32,
         mtime: u32,
         data: &[u8],
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    ) -> Result<(), Error<S::IoError>> {
         self.send_start(path, mode).await?;
         self.send_data(data).await?;
         self.send_done(mtime).await
@@ -494,14 +443,14 @@ where
         mtime: u32,
         flags: u32,
         data: &[u8],
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    ) -> Result<(), Error<S::IoError>> {
         self.send_v2_start(path, mode, flags).await?;
         self.send_data(data).await?;
         self.send_done(mtime).await
     }
 
     /// Send `QUIT` and close the underlying channel.
-    pub async fn quit(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn quit(mut self) -> Result<(), Error<S::IoError>> {
         self.write_header(&ID_QUIT, 0).await?;
         self.channel.close().await
     }
@@ -511,14 +460,11 @@ where
 ///
 /// `buf` is the caller-owned receive buffer — see the
 /// [module docs](self) for sizing guidance.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     buf: &'b mut [u8],
-) -> Result<SyncSession<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let channel = conn.open(b"sync:\0").await?;
+) -> Result<SyncSession<'a, 'b, S>, Error<S::IoError>> {
+    let channel = session.open(b"sync:\0").await?;
     Ok(SyncSession::new(channel, buf))
 }
 

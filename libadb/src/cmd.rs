@@ -32,29 +32,16 @@
 //! ```
 
 use alloc::vec::Vec;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::abb;
-use crate::base::connection::Connection;
 use crate::base::destination::{self, DestinationError};
 use crate::base::error::Error;
 use crate::base::protocol::features::Feature;
+use crate::base::session::Session;
 use crate::shell::v2::Shell;
 
 fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"shell,v2,raw:cmd"], args)
-}
-
-fn has_feature<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &Connection<T, MC, MP, MF>,
-    feature: &Feature,
-) -> bool
-where
-    T: Read + Write,
-{
-    conn.device_banner_parsed()
-        .is_some_and(|b| b.has_feature(feature))
 }
 
 /// Run a one-shot `cmd` command and collect all output.
@@ -71,20 +58,17 @@ where
 /// [`ProtocolError::InvalidDestination`](crate::ProtocolError::InvalidDestination).
 ///
 /// `rx` is a temporary buffer used for reading.
-pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn exec<S: Session>(
+    session: &mut S,
     args: &[&str],
     rx: &mut [u8],
-) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    if has_feature(conn, &Feature::AbbExec) {
-        return abb::exec(conn, args, rx).await;
+) -> Result<Vec<u8>, Error<S::IoError>> {
+    if session.advertises(&Feature::AbbExec) == Some(true) {
+        return abb::exec(session, args, rx).await;
     }
 
     let dest_len = write_shell_destination(rx, args)?;
-    let channel = conn.open(&rx[..dest_len]).await?;
+    let channel = session.open(&rx[..dest_len]).await?;
     let shell = Shell::new(channel, rx);
     let output = shell.collect().await?;
     Ok(output.stdout)
@@ -100,20 +84,17 @@ where
 /// one element per argument — see [`exec`] on how they are passed.
 /// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
 /// sizing advice.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     args: &[&str],
     rx: &'b mut [u8],
-) -> Result<Shell<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    if has_feature(conn, &Feature::Abb) {
-        return abb::open(conn, args, rx).await;
+) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
+    if session.advertises(&Feature::Abb) == Some(true) {
+        return abb::open(session, args, rx).await;
     }
 
     let dest_len = write_shell_destination(rx, args)?;
-    let channel = conn.open(&rx[..dest_len]).await?;
+    let channel = session.open(&rx[..dest_len]).await?;
     Ok(Shell::new(channel, rx))
 }
 

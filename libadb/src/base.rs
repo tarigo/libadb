@@ -15,6 +15,8 @@
 //! * [`channel`] — [`Channel`](channel::Channel) handle,
 //!   [`ChannelId`](channel::ChannelId), [`SelectResult`](channel::SelectResult)
 //!   for multi-channel APIs.
+//! * [`session`] — [`Session`](session::Session), what the service
+//!   modules open their channels on: a `Connection` or a split `Writer`.
 //! * [`auth`] — [`Authenticator`](auth::Authenticator) trait plugged
 //!   into the AUTH exchange (typically an RSA signer over
 //!   `~/.android/adbkey`).
@@ -38,4 +40,5 @@ pub(crate) mod mock;
 pub(crate) mod protobuf;
 pub mod protocol;
 pub(crate) mod recv_buf;
+pub mod session;
 pub(crate) mod wire;

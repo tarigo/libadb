@@ -222,7 +222,9 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
   wrap different underlying types), so switching backends touches any
   code that names those types.
 - Any type implementing `embedded_io_async::{Read, Write}` +
-  `libadb::Splittable` works as a custom transport
+  `libadb::Splittable` works as a custom transport; the service modules
+  also need `transport::ReadCancelSafety`, which tells `select` whether
+  a read may be dropped mid-way
 
 Runtime and backend are chosen per call site, so a build may carry all
 of them at once:
@@ -246,7 +248,30 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 
 `Connection::split()` gives you a full-duplex `Reader` / `Writer` pair
 so that a reader task and a writer task can coexist on the same
-connection without locking each other out.
+connection without locking each other out. Hand the `Reader` to
+`Reader::run` and the connection serves any number of channels at once:
+every service module takes a `libadb::Session` — a `Connection` or a
+`Writer` — so each task runs its own shell, logcat or sync over a clone
+of the `Writer`, and none waits on another's traffic. Over USB, where a
+device admits a single connection, this is how several services share
+it.
+
+```rust,ignore
+let (reader, writer) = conn.split()?;
+tokio::spawn(reader.run());
+
+let mut logs = writer.clone();
+tokio::spawn(async move {
+    let mut rx = vec![0; 64 * 1024];
+    let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
+    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    Ok::<_, libadb::Error<_>>(())
+});
+
+let mut shell = writer.clone();
+let mut rx = vec![0; 64 * 1024];
+let out = shell::v2::exec(&mut shell, "getprop ro.product.model", &mut rx).await?;
+```
 
 ## C ABI (`libadb-ffi`)
 

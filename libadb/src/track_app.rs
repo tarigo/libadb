@@ -47,15 +47,13 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::base::channel::Channel;
-use crate::base::connection::Connection;
 use crate::base::error::Error;
 use crate::base::protobuf::{self as proto, DecodeError};
 use crate::base::protocol::features::Feature;
 use crate::base::recv_buf::RecvBuf;
+use crate::base::session::Session;
 
 /// A single process entry from the device.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -76,19 +74,13 @@ pub struct ProcessEntry {
 /// Wraps an ADB channel and a caller-owned receive buffer.  Call
 /// [`read_snapshot`](Self::read_snapshot) in a loop to receive process
 /// list updates.
-pub struct TrackApp<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>
-where
-    T: Read + Write,
-{
-    channel: Channel<'a, T, MC, MP, MF>,
+pub struct TrackApp<'a, 'b, S: Session> {
+    channel: Channel<'a, S>,
     rx: RecvBuf<'b>,
 }
 
-impl<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize> TrackApp<'a, 'b, T, MC, MP, MF>
-where
-    T: Read + Write,
-{
-    fn new(channel: Channel<'a, T, MC, MP, MF>, buf: &'b mut [u8]) -> Self {
+impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
+    fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
         Self {
             channel,
             rx: RecvBuf::new(buf),
@@ -99,9 +91,7 @@ where
     ///
     /// Blocks until a complete `[4-hex-len][protobuf]` message has been
     /// received, then decodes and returns the list of processes.
-    pub async fn read_snapshot(
-        &mut self,
-    ) -> Result<Vec<ProcessEntry>, Error<<T as ErrorType>::Error>> {
+    pub async fn read_snapshot(&mut self) -> Result<Vec<ProcessEntry>, Error<S::IoError>> {
         const HEX_LEN_PREFIX: usize = 4;
         self.rx
             .fill_at_least(&mut self.channel, HEX_LEN_PREFIX)
@@ -125,7 +115,7 @@ where
     }
 
     /// Close the channel.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
     }
 }
@@ -134,15 +124,12 @@ where
 ///
 /// `buf` is the caller-owned receive buffer.  8 KiB is a reasonable
 /// starting size; increase if the device has many debuggable processes.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     buf: &'b mut [u8],
-) -> Result<TrackApp<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(Feature::TrackApp)?;
-    let channel = conn.open(b"track-app\0").await?;
+) -> Result<TrackApp<'a, 'b, S>, Error<S::IoError>> {
+    session.require_feature(Feature::TrackApp)?;
+    let channel = session.open(b"track-app\0").await?;
     Ok(TrackApp::new(channel, buf))
 }
 

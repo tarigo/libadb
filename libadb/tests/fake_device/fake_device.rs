@@ -552,6 +552,26 @@ impl<'a> FakeChannel<'a> {
             .await;
     }
 
+    /// Receive one packet for each of `commands`, in whatever order the
+    /// client sends them, and return their payloads in the order of
+    /// `commands`. For packets that leave different client tasks — the
+    /// OKAY a split connection's `Reader::run` sends for data, and the
+    /// CLSE or WRTE of the task that read it — which reach the wire in
+    /// either order.
+    pub async fn expect_unordered<const N: usize>(&mut self, commands: [u32; N]) -> [Vec<u8>; N] {
+        let mut got: [Option<Vec<u8>>; N] = core::array::from_fn(|_| None);
+        for _ in 0..N {
+            let (hdr, payload) = self.session.recv().await;
+            assert_eq!(hdr.arg0, self.client_id, "arg0 (client_id) mismatch");
+            assert_eq!(hdr.arg1, self.device_id, "arg1 (device_id) mismatch");
+            let at = (0..N)
+                .find(|&i| commands[i] == hdr.command && got[i].is_none())
+                .unwrap_or_else(|| panic!("unexpected command 0x{:08X}", hdr.command));
+            got[at] = Some(payload);
+        }
+        got.map(Option::unwrap)
+    }
+
     /// Low-level escape hatch: receive the next message on the session,
     /// whichever command it carries. Useful for tests with interleaved
     /// client/device traffic (e.g. bidirectional echo + flow-control
