@@ -37,6 +37,9 @@ pub enum AdbStatus {
     /// match, or the device ended the exchange itself (dialog
     /// dismissed, attempts used up); [`adb_last_error`] says which.
     Pairing = 12,
+    /// The connection's read side is gone, so nothing more will arrive
+    /// from the device; open a new connection.
+    Disconnected = 13,
     Internal = 255,
 }
 
@@ -134,6 +137,7 @@ pub(crate) fn fail_error<E: core::fmt::Display>(e: Error<E>) -> AdbStatus {
         Error::ChannelClosed => AdbStatus::ChannelClosed,
         Error::NoFreeChannels => AdbStatus::NoFreeChannels,
         Error::Desynchronized => AdbStatus::Desynchronized,
+        Error::Disconnected => AdbStatus::Disconnected,
         // The device refused the rule — an answer, not a breakage; a
         // malformed reply is a protocol fault like any other.
         Error::Reverse(ReverseError::Failed(_)) => AdbStatus::Reverse,
@@ -154,4 +158,19 @@ pub extern "C" fn adb_last_error() -> *const c_char {
         Some(c) => c.as_ptr(),
         None => core::ptr::null(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_reaches_c_as_its_own_status() {
+        let status = fail_error(Error::<core::convert::Infallible>::Disconnected);
+        assert_eq!(status, AdbStatus::Disconnected);
+        assert_eq!(
+            status as i32, 13,
+            "must match ADB_ERR_DISCONNECTED in libadb.h"
+        );
+    }
 }
