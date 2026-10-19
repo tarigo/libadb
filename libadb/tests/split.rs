@@ -1,14 +1,14 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
-use libadb::{Connection, Error};
+use libadb::{Connection, ConnectionConfig, Error};
 
 #[path = "rt/rt.rs"]
 mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{session, wrap, FakeDevice, TestAuth};
+use fake_device::{session, session_with_config, wrap, FakeDevice, TestAuth};
 
 macro_rules! rt_test {
     ($(#[$attr:meta])* async fn $name:ident() $body:block) => {
@@ -785,5 +785,63 @@ async fn split_run_refuses_device_initiated_open() {
     rt::timeout_ms(5000, rt::join(device))
         .await
         .expect("device never got its refusal");
+}
+}
+
+// A packet that breaks one channel alone stays there: the device floods
+// `b` past its cap, `run` closes `b`, its reader drains what fit and
+// then gets the overflow, and `a` carries on.
+rt_test! {
+async fn split_run_closes_only_the_channel_a_packet_broke() {
+    const CHUNK: usize = 4096;
+    let config = ConnectionConfig::new()
+        .with_max_payload(CHUNK as u32)
+        .with_max_rx_per_channel(2 * CHUNK);
+    let dev = FakeDevice::new().max_payload(CHUNK as u32);
+    let (conn, device) = session_with_config(dev, b"host::", config, |mut s| async move {
+        let (a_dev, a_cli) = {
+            let ch = s.accept_open(b"a:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        let (b_dev, b_cli) = {
+            let ch = s.accept_open(b"b:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        for _ in 0..3 {
+            s.send(CMD_WRTE, b_dev, b_cli, &[0xEE; CHUNK]).await;
+        }
+        // The first fits under the watermark and is acknowledged; the
+        // third does not fit at all, and `b` is closed for it.
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (b_cli, b_dev));
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (b_cli, b_dev));
+
+        s.send(CMD_WRTE, a_dev, a_cli, b"fine").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (a_cli, a_dev));
+        s
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let a = writer.open_channel(b"a:\0").await.unwrap();
+    let b = writer.open_channel(b"b:\0").await.unwrap();
+
+    let mut buf = vec![0u8; 2 * CHUNK];
+    let n = rt::timeout_ms(5000, writer.read_channel(a, &mut buf))
+        .await
+        .expect("read on a hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"fine");
+
+    let n = writer.read_channel(b, &mut buf).await.unwrap();
+    assert_eq!(n, 2 * CHUNK, "what fit before the overflow is still read");
+    let err = writer.read_channel(b, &mut buf).await.unwrap_err();
+    assert!(matches!(err, Error::ChannelRxOverflow), "got {err:?}");
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device hung");
 }
 }

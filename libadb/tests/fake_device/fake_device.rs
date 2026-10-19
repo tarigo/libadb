@@ -616,15 +616,41 @@ where
     Fut: core::future::Future<Output = R> + Send + 'static,
     R: Send + 'static,
 {
+    session_with_config(
+        device,
+        host_banner,
+        libadb::ConnectionConfig::new(),
+        scenario,
+    )
+    .await
+}
+
+/// Same as [`session`], but drives the handshake through
+/// `connect_with_raw_banner_and_config`.
+pub async fn session_with_config<F, Fut, R>(
+    device: FakeDevice,
+    host_banner: &[u8],
+    config: libadb::ConnectionConfig,
+    scenario: F,
+) -> (libadb::Connection<rt::AdbTransport>, rt::JoinHandle<R>)
+where
+    F: FnOnce(FakeSession) -> Fut + Send + 'static,
+    Fut: core::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
     let (handle, addr) = device.bind().await;
     let task = rt::spawn(async move {
         let s = handle.accept().await;
         scenario(s).await
     });
     let stream = rt::connect(addr).await;
-    let conn =
-        libadb::Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, host_banner)
-            .await
-            .unwrap();
+    let conn = libadb::Connection::<_>::connect_with_raw_banner_and_config(
+        wrap(stream),
+        TestAuth,
+        host_banner,
+        config,
+    )
+    .await
+    .unwrap();
     (conn, task)
 }

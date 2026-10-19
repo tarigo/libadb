@@ -194,7 +194,7 @@ async fn dispatch_to<T: Write>(
     checksum: Checksum,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
-    match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark)? {
+    match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark) {
         DispatchOutcome::AckWrite {
             local_id,
             remote_id,
@@ -232,6 +232,9 @@ async fn dispatch_to<T: Write>(
         DispatchOutcome::CancelPendingOpen { remote_id } => {
             incoming.retain(|p| p.remote_id != remote_id);
         }
+        // The fault surfaces on whichever call is driving the
+        // connection, and the channel itself stays as it was.
+        DispatchOutcome::ChannelFault { fault, .. } => return Err(fault.error()),
         _ => {}
     }
     Ok(())
