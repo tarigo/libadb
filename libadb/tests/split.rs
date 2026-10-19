@@ -493,3 +493,229 @@ async fn split_two_cloned_writers_make_progress_on_different_channels() {
     assert!(payloads.iter().any(|p| p.as_slice() == b"beta"));
 }
 }
+
+// ---------------------------------------------------------------------------
+// Dispatched mode — `Reader::run` receives every packet, and channels are
+// opened and read through the `Writer`.
+// ---------------------------------------------------------------------------
+
+// A channel with nothing to read must not hold up another: the idle
+// read on channel `a` stays parked while a request on `b` gets its
+// answer, and only then does `a` receive its data.
+rt_test! {
+async fn split_run_serves_a_channel_while_another_waits() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open_a, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 100, open_a.arg0, &[]).await;
+        let (open_b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 200, open_b.arg0, &[]).await;
+
+        let (wrte, data) = s.expect(CMD_WRTE).await;
+        assert_eq!((wrte.arg0, data.as_slice()), (open_b.arg0, &b"ping"[..]));
+        s.send(CMD_OKAY, 200, open_b.arg0, &[]).await;
+        s.send(CMD_WRTE, 200, open_b.arg0, b"pong").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(okay.arg0, open_b.arg0);
+
+        s.send(CMD_WRTE, 100, open_a.arg0, b"late").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(okay.arg0, open_a.arg0);
+
+        let mut closes = 0;
+        while closes < 2 {
+            let (hdr, _) = s.recv().await;
+            if hdr.command == CMD_CLSE {
+                closes += 1;
+            }
+        }
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let driver = rt::spawn(reader.run());
+
+    let a = rt::timeout_ms(5000, writer.open_channel(b"a:\0"))
+        .await
+        .expect("open a hung")
+        .unwrap();
+    let b = rt::timeout_ms(5000, writer.open_channel(b"b:\0"))
+        .await
+        .expect("open b hung")
+        .unwrap();
+
+    let idle = {
+        let writer = writer.clone();
+        rt::spawn(async move {
+            let mut buf = [0u8; 16];
+            let n = writer.read_channel(a, &mut buf).await.unwrap();
+            buf[..n].to_vec()
+        })
+    };
+
+    writer.write_channel(b, b"ping").await.unwrap();
+    let mut buf = [0u8; 16];
+    let n = rt::timeout_ms(5000, writer.read_channel(b, &mut buf))
+        .await
+        .expect("read on b waited for the idle channel a")
+        .unwrap();
+    assert_eq!(&buf[..n], b"pong");
+
+    let late = rt::timeout_ms(5000, rt::join(idle))
+        .await
+        .expect("idle read on a never woke");
+    assert_eq!(late, b"late");
+
+    writer.close_channel(a).await.unwrap();
+    writer.close_channel(b).await.unwrap();
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device hung");
+    rt::timeout_ms(5000, rt::join(driver))
+        .await
+        .expect("run kept going after the device left")
+        .unwrap_err();
+}
+}
+
+// A device that refuses the OPEN answers with CLSE; the Writer reports
+// it as `ChannelClosed` and frees the slot it had reserved.
+rt_test! {
+async fn split_writer_open_channel_reports_refusal() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_CLSE, 0, open.arg0, &[]).await;
+        let (again, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, again.arg0, &[]).await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    let err = rt::timeout_ms(5000, writer.open_channel(b"refused:\0"))
+        .await
+        .expect("refused open hung")
+        .unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+
+    rt::timeout_ms(5000, writer.open_channel(b"accepted:\0"))
+        .await
+        .expect("open after a refusal hung")
+        .unwrap();
+    rt::join(device).await;
+}
+}
+
+// Data the device sent before closing is still read; after it the
+// channel reports `ChannelClosed`.
+rt_test! {
+async fn split_writer_read_channel_drains_then_reports_close() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"bye").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 8];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"bye");
+
+    let err = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read after the device closed hung")
+        .unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    rt::join(device).await;
+}
+}
+
+// With delayed ACK the credit for data goes back when it is read, not
+// when it arrives.
+rt_test! {
+async fn split_writer_read_channel_returns_credit_as_it_reads() {
+    let dev = FakeDevice::new()
+        .banner(DA_BANNER)
+        .max_payload(DA_MAX_PAYLOAD)
+        .delayed_ack(64);
+    let (conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"abcdef").await;
+        ch.expect_ack().await
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 4];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"abcd");
+
+    let acked = rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("credit never returned");
+    assert_eq!(acked, 4);
+}
+}
+
+// Once the device is gone, `run` returns, and the Writer stops waiting:
+// a parked read and any later open fail with `Disconnected`.
+rt_test! {
+async fn split_waiters_see_disconnected_when_reception_ends() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let _ch = s.accept_open(b"svc:\0").await;
+        rt::sleep_ms(100).await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 8];
+    let err = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read parked forever on a dead connection")
+        .unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+
+    let err = writer.open_channel(b"svc:\0").await.unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+
+    rt::join(device).await;
+    rt::join(driver).await.unwrap_err();
+}
+}
+
+// Nobody accepts device-initiated channels while `run` owns the reader,
+// so it refuses them instead of leaving the device waiting.
+rt_test! {
+async fn split_run_refuses_device_initiated_open() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    let (reader, _writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its refusal");
+}
+}

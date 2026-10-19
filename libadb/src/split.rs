@@ -8,6 +8,26 @@
 //! [`Reader::read_channel`] does not prevent another thread from calling
 //! [`Writer::write_channel`] or [`Writer::close_channel`].
 //!
+//! # Driving the connection
+//!
+//! There are two ways to use the pair:
+//!
+//! * **Reader-driven.** One task keeps the `Reader` and calls
+//!   [`Reader::open_channel`] and [`Reader::read_channel`] itself;
+//!   writers send from anywhere. Packets for other channels are
+//!   buffered while it waits, but only that task can collect them.
+//! * **Dispatched.** [`Reader::run`] takes the `Reader` and does
+//!   nothing but receive and dispatch packets, waking whoever waits on
+//!   the channel each one is for. Every channel operation then goes
+//!   through the `Writer` — [`Writer::open_channel`],
+//!   [`Writer::read_channel`], [`Writer::write_channel`],
+//!   [`Writer::close_channel`] — so any number of tasks can work on
+//!   their own channels at once and none waits on another's traffic.
+//!
+//! Once the `Reader` is gone — `run` returned or the `Reader` was
+//! dropped — every waiting and later call on the `Writer` fails with
+//! [`Error::Disconnected`] instead of waiting for packets nobody reads.
+//!
 //! Available under the `split` feature (implied by every runtime
 //! feature: `tokio`, `smol`, `nusb`, `rusb`). Pulls `std` into the
 //! build for its sync primitives; a pure `no_std` variant would need a
@@ -96,6 +116,9 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     /// by remote id — the only place a device cancellation can still
     /// reach them once they have left `incoming`.
     pub(crate) staged: Mutex<Vec<(u32, Arc<AtomicBool>)>>,
+    /// Set once the [`Reader`] is gone: nothing will dispatch packets
+    /// any more, so waiting for one would never end.
+    pub(crate) stopped: AtomicBool,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -139,6 +162,21 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     fn checksum(&self) -> Checksum {
         Checksum::for_version(self.protocol_version)
+    }
+
+    /// Mark the connection unread and wake every waiter to see it.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        for signal in &self.signals {
+            signal.wake();
+        }
+    }
+
+    fn check_read<E>(&self) -> Result<(), Error<E>> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Disconnected);
+        }
+        Ok(())
     }
 }
 
@@ -445,6 +483,44 @@ where
         }
     }
 
+    /// Receive and dispatch packets until the connection fails.
+    ///
+    /// Meant to run as a task of its own for as long as the connection
+    /// is used: it wakes whoever waits on the channel each packet is
+    /// for, and every channel operation goes through the [`Writer`]
+    /// meanwhile — see [Driving the connection](crate::split#driving-the-connection).
+    /// It returns only with the error that ended reception; the
+    /// `Reader` is gone then, and waiters on the `Writer` get
+    /// [`Error::Disconnected`].
+    ///
+    /// Channels the device opens toward the host (`adb reverse`) are
+    /// refused: nobody is left to accept them.
+    ///
+    /// Reception is never cancelled from within, so this is also the
+    /// way to read a transport whose reads are not cancel-safe (USB)
+    /// from several tasks. Dropping the future stops reception like
+    /// any dropped read on such a transport, and is otherwise the way
+    /// to shut the connection down.
+    pub async fn run(mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
+        loop {
+            let pkt = recv_pkt(
+                &mut self.read_half,
+                &mut self.recv_buf,
+                self.shared.config.max_payload(),
+            )
+            .await?;
+            self.dispatch(pkt).await?;
+            loop {
+                let pending = self.shared.lock_incoming().pop_front();
+                let Some(pending) = pending else {
+                    break;
+                };
+                self.shared.stage_incoming(pending).reject().await?;
+            }
+        }
+    }
+
     /// Read from channel `ch` into `buf`. Returns the number of bytes read.
     ///
     /// Returns immediately if data is already buffered; otherwise blocks
@@ -614,10 +690,12 @@ where
 
         match outcome {
             DispatchOutcome::AckWrite {
+                idx,
                 local_id,
                 remote_id,
                 len,
             } => {
+                self.shared.signals[idx].wake();
                 let mut wh = self.shared.write_half.lock().await;
                 send_okay_to(
                     &mut *wh,
@@ -716,7 +794,9 @@ where
                     }
                 }
             }
-            DispatchOutcome::DataBuffered => {}
+            DispatchOutcome::DataBuffered { idx } => {
+                self.shared.signals[idx].wake();
+            }
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
@@ -730,6 +810,16 @@ where
         ch: ChannelId,
     ) -> Result<(), Error<<RH as ErrorType>::Error>> {
         close_channel_via(&self.shared, ch).await
+    }
+}
+
+impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> Drop for Reader<RH, WH, MC, MP, MF>
+where
+    RH: Read,
+    WH: Write<Error = <RH as ErrorType>::Error>,
+{
+    fn drop(&mut self) {
+        self.shared.stop();
     }
 }
 
@@ -986,6 +1076,130 @@ where
         self.shared.device_banner.as_ref()
     }
 
+    /// Open a channel to `destination` on a connection whose
+    /// [`Reader::run`] dispatches packets.
+    ///
+    /// Sends OPEN and waits until the device accepts or refuses it;
+    /// a refusal comes back as [`Error::ChannelClosed`].
+    ///
+    /// **Not cancellation-safe.** Dropping the future after OPEN went
+    /// out frees the slot, and the device's channel stays half-open
+    /// until the connection closes, as with [`Reader::open_channel`].
+    pub async fn open_channel(
+        &self,
+        destination: &[u8],
+    ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
+        self.shared.check_read()?;
+        let (slot_idx, local_id) = {
+            let mut chs = self.shared.lock_channels();
+            let idx = chs
+                .iter()
+                .position(|s| s.is_none())
+                .ok_or(Error::NoFreeChannels)?;
+            let id = self.shared.next_local_id();
+            chs[idx] = Some(ChannelSlot::new(id));
+            (idx, id)
+        };
+        let mut guard = SlotGuard::new(Arc::clone(&self.shared), slot_idx);
+        let ch = ChannelId {
+            slot: slot_idx,
+            local_id,
+        };
+
+        let open_arg1 = if self.shared.delayed_ack {
+            self.shared.config.advertised_ack_bytes()
+        } else {
+            0
+        };
+        let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
+        {
+            let mut wh = self.shared.write_half.lock().await;
+            send_pkt(&mut *wh, &self.shared.desync, &pkt, self.shared.checksum()).await?;
+        }
+
+        let signal = &self.shared.signals[slot_idx];
+        loop {
+            let listener = signal.listen();
+            {
+                let chs = self.shared.lock_channels();
+                match chs[slot_idx].as_ref() {
+                    Some(slot) if slot.local_id == local_id => match slot.state {
+                        ChannelState::Open => {
+                            guard.disarm();
+                            return Ok(ch);
+                        }
+                        ChannelState::Closed => return Err(Error::ChannelClosed),
+                        ChannelState::Opening => {}
+                    },
+                    _ => return Err(Error::ChannelClosed),
+                }
+            }
+            self.shared.check_read()?;
+            listener.await;
+        }
+    }
+
+    /// Read from channel `ch` into `buf` on a connection whose
+    /// [`Reader::run`] dispatches packets. Returns the number of bytes
+    /// read.
+    ///
+    /// Returns at once with whatever is buffered, otherwise waits for
+    /// the next WRTE on `ch`. A channel the device closed fails with
+    /// [`Error::ChannelClosed`] once its buffered data is read.
+    ///
+    /// Cancellation-safe while it waits: the data stays buffered for
+    /// the next call. Taking bytes may send an acknowledgement, and
+    /// dropping the future during that write desynchronizes the
+    /// connection, as with any cancelled write.
+    pub async fn read_channel(
+        &self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<usize, Error<<WH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
+        let Some(signal) = self.shared.signals.get(ch.slot) else {
+            return Err(Error::ChannelClosed);
+        };
+        let delayed_ack = self.shared.delayed_ack;
+        let watermark = self.shared.config.rx_watermark();
+        loop {
+            let listener = signal.listen();
+            let taken = {
+                let mut chs = self.shared.lock_channels();
+                let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
+                if !slot.rx_buf.is_empty() {
+                    let n = buf.len().min(slot.rx_buf.len());
+                    buf[..n].copy_from_slice(&slot.rx_buf[..n]);
+                    let _ = slot.rx_buf.split_to(n);
+                    Some((n, slot.consume(n, delayed_ack, watermark)))
+                } else if slot.is_closed() {
+                    return Err(Error::ChannelClosed);
+                } else {
+                    None
+                }
+            };
+            if let Some((n, ack)) = taken {
+                if let Some((local_id, remote_id, len)) = ack {
+                    let mut wh = self.shared.write_half.lock().await;
+                    send_okay_to(
+                        &mut *wh,
+                        &self.shared.desync,
+                        delayed_ack,
+                        local_id,
+                        remote_id,
+                        len,
+                        self.shared.checksum(),
+                    )
+                    .await?;
+                }
+                return Ok(n);
+            }
+            self.shared.check_read()?;
+            listener.await;
+        }
+    }
+
     /// Write `data` to the given channel.
     ///
     /// Splits `data` into chunks bounded by `max_payload` and the
@@ -1114,7 +1328,10 @@ where
                     return Ok(n);
                 }
                 Some(Err(e)) => return Err(e),
-                None => listener.await,
+                None => {
+                    self.shared.check_read()?;
+                    listener.await;
+                }
             }
         }
     }
