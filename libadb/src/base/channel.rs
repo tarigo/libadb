@@ -73,7 +73,38 @@ pub(crate) enum DispatchOutcome {
     CancelPendingOpen {
         remote_id: u32,
     },
+    /// A packet broke this slot's channel alone. The slot is not
+    /// closed: whoever dispatched decides what the fault costs.
+    ChannelFault {
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        idx: usize,
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        local_id: u32,
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        remote_id: u32,
+        fault: ChannelFault,
+    },
     Unmatched,
+}
+
+/// What breaks one channel without breaking the connection: the packet
+/// was read whole, so the stream stays in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelFault {
+    /// A WRTE did not fit the channel's receive buffer.
+    RxOverflow,
+    /// A READY the channel cannot take, such as one without its
+    /// delayed-ACK credit.
+    Protocol(ProtocolError),
+}
+
+impl ChannelFault {
+    pub fn error<E>(self) -> Error<E> {
+        match self {
+            Self::RxOverflow => Error::ChannelRxOverflow,
+            Self::Protocol(e) => Error::Protocol(e),
+        }
+    }
 }
 
 /// A device-initiated OPEN waiting for the application's verdict.
@@ -93,15 +124,15 @@ pub(crate) fn clse_closes(arg0: u32, arg1: u32, local_id: u32, remote_id: u32) -
 }
 
 /// `rx_cap` bounds how much unread data a single channel may accumulate;
-/// a WRTE that would push it past the cap fails with
-/// [`Error::ChannelRxOverflow`] instead of growing the buffer.
-pub(crate) fn dispatch_packet<E>(
+/// a WRTE that would push it past the cap is a
+/// [`ChannelFault::RxOverflow`] instead of growing the buffer.
+pub(crate) fn dispatch_packet(
     channels: &mut [Option<ChannelSlot>],
     pkt: &Packet,
     delayed_ack: bool,
     rx_cap: usize,
     watermark: usize,
-) -> Result<DispatchOutcome, Error<E>> {
+) -> DispatchOutcome {
     // The handshake is over, so a device that opens it again, or asks
     // for TLS now, is out of turn. It is dropped like any packet nobody
     // claims, but said in the log, since nothing else will mention it.
@@ -113,14 +144,14 @@ pub(crate) fn dispatch_packet<E>(
             "dropping {:?} from the device after the handshake",
             pkt.command
         );
-        return Ok(DispatchOutcome::Unmatched);
+        return DispatchOutcome::Unmatched;
     }
     if pkt.command == Command::Open {
-        return Ok(DispatchOutcome::IncomingOpen {
+        return DispatchOutcome::IncomingOpen {
             remote_id: pkt.arg0,
             credit: pkt.arg1,
             destination: pkt.data.clone(),
-        });
+        };
     }
     if pkt.command == Command::Close && pkt.arg1 == 0 {
         // The withdrawal may have crossed our READY in flight: the
@@ -132,50 +163,52 @@ pub(crate) fn dispatch_packet<E>(
                 let Some(slot) = slot_opt else { continue };
                 if slot.remote_id == pkt.arg0 {
                     slot.apply_close();
-                    return Ok(DispatchOutcome::SlotClosed { idx });
+                    return DispatchOutcome::SlotClosed { idx };
                 }
             }
         }
-        return Ok(DispatchOutcome::CancelPendingOpen {
+        return DispatchOutcome::CancelPendingOpen {
             remote_id: pkt.arg0,
-        });
+        };
     }
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {
             Command::Write if pkt.arg1 == slot.local_id => {
-                return Ok(
-                    match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark)? {
-                        AckDecision::Now {
-                            local_id,
-                            remote_id,
-                            len,
-                        } => DispatchOutcome::AckWrite {
-                            idx,
-                            local_id,
-                            remote_id,
-                            len,
-                        },
-                        AckDecision::Hold => DispatchOutcome::DataBuffered { idx },
+                return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
+                    Ok(AckDecision::Now {
+                        local_id,
+                        remote_id,
+                        len,
+                    }) => DispatchOutcome::AckWrite {
+                        idx,
+                        local_id,
+                        remote_id,
+                        len,
                     },
-                );
+                    Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
+                    Err(RxOverflow) => slot.fault(idx, ChannelFault::RxOverflow),
+                };
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
-                if slot.state == ChannelState::Opening {
-                    slot.accept_open_ready(pkt.arg0, &pkt.data, delayed_ack)?;
+                let granted = if slot.state == ChannelState::Opening {
+                    slot.accept_open_ready(pkt.arg0, &pkt.data, delayed_ack)
                 } else {
-                    slot.apply_ready(&pkt.data, delayed_ack)?;
-                }
-                return Ok(DispatchOutcome::CreditGranted { idx });
+                    slot.apply_ready(&pkt.data, delayed_ack)
+                };
+                return match granted {
+                    Ok(()) => DispatchOutcome::CreditGranted { idx },
+                    Err(e) => slot.fault(idx, ChannelFault::Protocol(e)),
+                };
             }
             Command::Close if pkt.arg1 == slot.local_id => {
                 slot.apply_close();
-                return Ok(DispatchOutcome::SlotClosed { idx });
+                return DispatchOutcome::SlotClosed { idx };
             }
             _ => {}
         }
     }
-    Ok(DispatchOutcome::Unmatched)
+    DispatchOutcome::Unmatched
 }
 
 /// Result of [`Channel::select`] / [`Session::select_channel`].
@@ -252,6 +285,9 @@ pub(crate) struct ChannelSlot {
     /// holes adjacent to it — so cancellation churn cannot grow this
     /// past the caller's own peak of concurrent writers.
     pub send_q_gone: BTreeSet<u64>,
+    /// What broke this channel, once [`fail`](Self::fail) closed it for
+    /// that: its calls then fail with this rather than `ChannelClosed`.
+    pub failed: Option<ChannelFault>,
 }
 
 impl ChannelSlot {
@@ -267,6 +303,7 @@ impl ChannelSlot {
             send_q_head: 0,
             send_q_tail: 0,
             send_q_gone: BTreeSet::new(),
+            failed: None,
         }
     }
 
@@ -276,6 +313,30 @@ impl ChannelSlot {
 
     pub fn is_closed(&self) -> bool {
         self.state == ChannelState::Closed
+    }
+
+    /// The error a call on this channel fails with once it is closed.
+    pub fn closed_error<E>(&self) -> Error<E> {
+        self.failed
+            .map_or(Error::ChannelClosed, ChannelFault::error)
+    }
+
+    /// Close this channel for `fault`. Nothing is acknowledged after
+    /// it, so the device gets no OKAY for a channel we are closing.
+    #[allow(dead_code)] // used only by split::Reader::run
+    pub fn fail(&mut self, fault: ChannelFault) {
+        self.failed = Some(fault);
+        self.state = ChannelState::Closed;
+        self.unacked = 0;
+    }
+
+    fn fault(&self, idx: usize, fault: ChannelFault) -> DispatchOutcome {
+        DispatchOutcome::ChannelFault {
+            idx,
+            local_id: self.local_id,
+            remote_id: self.remote_id,
+            fault,
+        }
     }
 
     pub fn accept_open_ready(
@@ -386,7 +447,8 @@ impl ChannelSlot {
 
     /// Copy buffered bytes into `buf`, and say what to acknowledge for
     /// taking them. `None` while an open channel has nothing buffered;
-    /// [`Error::ChannelClosed`] once a closed one is drained.
+    /// once a closed one is drained, [`Error::ChannelClosed`] or the
+    /// fault that closed it.
     #[allow(clippy::type_complexity)]
     pub fn take_buffered<E>(
         &mut self,
@@ -396,7 +458,7 @@ impl ChannelSlot {
     ) -> Result<Option<(usize, Option<(u32, u32, usize)>)>, Error<E>> {
         if self.rx_buf.is_empty() {
             return if self.is_closed() {
-                Err(Error::ChannelClosed)
+                Err(self.closed_error())
             } else {
                 Ok(None)
             };

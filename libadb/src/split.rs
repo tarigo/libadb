@@ -63,8 +63,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::base::channel::{
-    channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelId, ChannelSlot,
-    ChannelState, DispatchOutcome, PendingOpen, SelectResult,
+    channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelFault, ChannelId,
+    ChannelSlot, ChannelState, DispatchOutcome, PendingOpen, SelectResult,
 };
 use crate::base::connection::{
     ConnectionConfig, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
@@ -213,6 +213,38 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
             self.checksum(),
         )
         .await;
+    }
+
+    /// Close a channel a packet broke on its own: its calls fail with
+    /// `fault` from now on, and the device gets its CLSE. A channel
+    /// already closed and freed in the meantime is left alone.
+    async fn fail_channel(
+        &self,
+        idx: usize,
+        local_id: u32,
+        remote_id: u32,
+        fault: ChannelFault,
+    ) -> Result<(), Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let found = {
+            let mut chs = self.lock_channels();
+            let slot = chs[idx].as_mut().filter(|s| s.local_id == local_id);
+            slot.map(|s| s.fail(fault)).is_some()
+        };
+        if !found {
+            return Ok(());
+        }
+        self.signals[idx].wake();
+        let mut wh = self.lock_write().await;
+        send_pkt(
+            &mut *wh,
+            &self.desync,
+            &Packet::close(local_id, remote_id),
+            self.checksum(),
+        )
+        .await
     }
 
     async fn send_okay(
@@ -430,6 +462,18 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
     }
 }
 
+/// What a fault confined to one channel — data past its receive cap, a
+/// READY it cannot take — costs the call that dispatched it.
+#[derive(Clone, Copy)]
+enum OnFault {
+    /// Fail the call, whichever channel it is on, as on a
+    /// [`Connection`](crate::Connection): the reader-driven contract.
+    FailCall,
+    /// Close that channel alone and carry on: what [`Reader::run`]
+    /// does, since its failing would take every channel down.
+    CloseChannel,
+}
+
 /// Read half of a split [`Connection`](crate::Connection).
 ///
 /// Drives packet reception, dispatching OKAY/CLSE/WRTE packets for all
@@ -588,7 +632,7 @@ where
                 Command::Close if pkt.arg1 == ch.local_id => {
                     return Err(Error::ChannelClosed);
                 }
-                _ => self.dispatch(pkt).await?,
+                _ => self.dispatch(pkt, OnFault::FailCall).await?,
             }
         }
     }
@@ -605,6 +649,12 @@ where
     ///
     /// Channels the device opens toward the host (`adb reverse`) are
     /// refused: nobody is left to accept them.
+    ///
+    /// A packet that breaks one channel alone — data past its receive
+    /// cap, a READY it cannot take — closes that channel: the device
+    /// gets its CLSE, and the channel's calls fail with that error
+    /// (once what it buffered before is read) rather than end
+    /// reception for every channel.
     ///
     /// Without delayed ACK, data is acknowledged from here as it
     /// arrives, so the acknowledgement may reach the device after
@@ -625,7 +675,7 @@ where
                 self.shared.config.max_payload(),
             )
             .await?;
-            self.dispatch(pkt).await?;
+            self.dispatch(pkt, OnFault::CloseChannel).await?;
             while let Some(pending) = self.shared.pop_incoming() {
                 self.shared.stage_incoming(pending).reject().await?;
             }
@@ -705,7 +755,7 @@ where
                     }
                     return Err(Error::ChannelClosed);
                 }
-                _ => self.dispatch(pkt).await?,
+                _ => self.dispatch(pkt, OnFault::FailCall).await?,
             }
         }
     }
@@ -746,7 +796,7 @@ where
                 self.shared.config.max_payload(),
             )
             .await?;
-            self.dispatch(pkt).await?;
+            self.dispatch(pkt, OnFault::FailCall).await?;
         }
     }
 
@@ -757,7 +807,11 @@ where
         Some(self.shared.stage_incoming(pending))
     }
 
-    async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<RH as ErrorType>::Error>> {
+    async fn dispatch(
+        &mut self,
+        pkt: Packet,
+        on_fault: OnFault,
+    ) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let outcome = {
             let mut chs = self.shared.lock_channels();
             dispatch_packet(
@@ -766,7 +820,7 @@ where
                 self.shared.delayed_ack,
                 self.shared.config.rx_cap(),
                 self.shared.config.rx_watermark(),
-            )?
+            )
         };
 
         match outcome {
@@ -864,6 +918,19 @@ where
                     }
                 }
             }
+            DispatchOutcome::ChannelFault {
+                idx,
+                local_id,
+                remote_id,
+                fault,
+            } => match on_fault {
+                OnFault::FailCall => return Err(fault.error()),
+                OnFault::CloseChannel => {
+                    self.shared
+                        .fail_channel(idx, local_id, remote_id, fault)
+                        .await?
+                }
+            },
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
@@ -1391,7 +1458,7 @@ where
                 return Err(Error::ChannelClosed);
             };
             if slot.is_closed() {
-                return Err(Error::ChannelClosed);
+                return Err(slot.closed_error());
             }
             slot.send_enqueue()
         };
@@ -1436,7 +1503,7 @@ where
             return Some(Err(Error::ChannelClosed));
         };
         if slot.is_closed() {
-            return Some(Err(Error::ChannelClosed));
+            return Some(Err(slot.closed_error()));
         }
         if slot.send_turn() != place {
             return None;
