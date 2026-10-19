@@ -548,9 +548,9 @@ where
     /// is used: it wakes whoever waits on the channel each packet is
     /// for, and every channel operation goes through the [`Writer`]
     /// meanwhile — see [Driving the connection](crate::split#driving-the-connection).
-    /// It returns only with the error that ended reception; the
-    /// `Reader` is gone then, and waiters on the `Writer` get
-    /// [`Error::Disconnected`].
+    /// It returns only with the error that ended reception, which is
+    /// why its `Ok` side is [`Infallible`]; the `Reader` is gone then,
+    /// and waiters on the `Writer` get [`Error::Disconnected`].
     ///
     /// Channels the device opens toward the host (`adb reverse`) are
     /// refused: nobody is left to accept them.
@@ -565,7 +565,7 @@ where
     /// from several tasks. Dropping the future stops reception like
     /// any dropped read on such a transport, and is otherwise the way
     /// to shut the connection down.
-    pub async fn run(mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
+    pub async fn run(mut self) -> Result<Infallible, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
             let pkt = recv_pkt(
