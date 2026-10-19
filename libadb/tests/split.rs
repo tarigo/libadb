@@ -607,6 +607,31 @@ async fn split_writer_open_channel_reports_refusal() {
 }
 }
 
+// An OPEN given up on before the device answered — here because the
+// Reader is gone — is closed again, so the device does not keep its
+// end half-open.
+rt_test! {
+async fn split_writer_open_channel_closes_an_open_it_gave_up_on() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (open.arg0, 0));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let mut open = core::pin::pin!(writer.open_channel(b"svc:\0"));
+    assert!(poll_once(open.as_mut()).await.is_pending());
+    drop(reader);
+
+    let err = open.await.unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its CLSE");
+}
+}
+
 // A device may accept a channel, answer and close it before the opener
 // looks again. The opener polls once, so OPEN is out; `run` then takes
 // READY, WRTE and CLSE in one go; only then does the opener look. The
