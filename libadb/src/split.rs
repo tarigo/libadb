@@ -196,6 +196,25 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         Ok((ChannelId { slot, local_id }, guard))
     }
 
+    /// Best-effort CLSE for an OPEN given up on before the device
+    /// answered, so its end of the channel is not left half-open.
+    async fn abandon_open(&self, local_id: u32)
+    where
+        WH: Write,
+    {
+        let mut wh = self.write_half.lock().await;
+        let _ = send_raw(
+            &mut *wh,
+            &self.desync,
+            Command::Close,
+            local_id,
+            0,
+            &[],
+            self.checksum(),
+        )
+        .await;
+    }
+
     async fn send_okay(
         &self,
         local_id: u32,
@@ -460,17 +479,7 @@ where
         let result = self.await_open_ack(ch, &mut guard).await;
         if let Err(ref e) = result {
             if !matches!(e, Error::ChannelClosed) {
-                let mut wh = self.shared.write_half.lock().await;
-                let _ = send_raw(
-                    &mut *wh,
-                    &self.shared.desync,
-                    Command::Close,
-                    ch.local_id,
-                    0,
-                    &[],
-                    self.shared.checksum(),
-                )
-                .await;
+                self.shared.abandon_open(ch.local_id).await;
             }
         }
         result
@@ -1092,6 +1101,9 @@ where
     /// **Not cancellation-safe.** Dropping the future after OPEN went
     /// out frees the slot, and the device's channel stays half-open
     /// until the connection closes, as with [`Reader::open_channel`].
+    /// If the call returns any other `Err` than the refusal — the
+    /// [`Reader`] gone before the answer, for one — a best-effort CLSE
+    /// is sent before the error propagates.
     pub async fn open_channel(
         &self,
         destination: &[u8],
@@ -1100,6 +1112,22 @@ where
         self.shared.check_read()?;
         let (ch, mut guard) = self.shared.send_open(destination).await?;
 
+        let result = self.await_open_ack(ch, &mut guard).await;
+        if let Err(ref e) = result {
+            if !matches!(e, Error::ChannelClosed) {
+                self.shared.abandon_open(ch.local_id).await;
+            }
+        }
+        result
+    }
+
+    /// Wait for [`Reader::run`] to dispatch the device's answer to the
+    /// OPEN `ch` was reserved for.
+    async fn await_open_ack(
+        &self,
+        ch: ChannelId,
+        guard: &mut SlotGuard<WH, MC, MP, MF>,
+    ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let signal = &self.shared.signals[ch.slot];
         loop {
             let listener = signal.listen();
