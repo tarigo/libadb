@@ -147,6 +147,77 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         self.staged.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Take the oldest queued device-initiated OPEN, releasing the
+    /// queue lock before the caller awaits anything.
+    fn pop_incoming(&self) -> Option<PendingOpen> {
+        self.lock_incoming().pop_front()
+    }
+
+    /// Reserve a free slot and send OPEN for `destination` — the start
+    /// both openers share. The guard frees the slot unless the opener
+    /// disarms it once the device answers.
+    async fn send_open(
+        self: &Arc<Self>,
+        destination: &[u8],
+    ) -> Result<(ChannelId, SlotGuard<WH, MC, MP, MF>), Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let (slot, local_id) = {
+            let mut chs = self.lock_channels();
+            let idx = chs
+                .iter()
+                .position(|s| s.is_none())
+                .ok_or(Error::NoFreeChannels)?;
+            let id = self.next_local_id();
+            chs[idx] = Some(ChannelSlot::new(id));
+            (idx, id)
+        };
+        let guard = SlotGuard::new(Arc::clone(self), slot);
+
+        let open_arg1 = if self.delayed_ack {
+            self.config.advertised_ack_bytes()
+        } else {
+            0
+        };
+        {
+            let mut wh = self.write_half.lock().await;
+            send_raw(
+                &mut *wh,
+                &self.desync,
+                Command::Open,
+                local_id,
+                open_arg1,
+                destination,
+                self.checksum(),
+            )
+            .await?;
+        }
+        Ok((ChannelId { slot, local_id }, guard))
+    }
+
+    async fn send_okay(
+        &self,
+        local_id: u32,
+        remote_id: u32,
+        wrte_len: usize,
+    ) -> Result<(), Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let mut wh = self.write_half.lock().await;
+        send_okay_to(
+            &mut *wh,
+            &self.desync,
+            self.delayed_ack,
+            local_id,
+            remote_id,
+            wrte_len,
+            self.checksum(),
+        )
+        .await
+    }
+
     /// Wrap a request taken off the queue in its owned holder,
     /// registering it so a device cancellation can still find it.
     fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH, MC, MP, MF>
@@ -384,30 +455,9 @@ where
         destination: &[u8],
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
-        let (slot_idx, local_id) = {
-            let mut chs = self.shared.lock_channels();
-            let idx = chs
-                .iter()
-                .position(|s| s.is_none())
-                .ok_or(Error::NoFreeChannels)?;
-            let id = self.shared.next_local_id();
-            chs[idx] = Some(ChannelSlot::new(id));
-            (idx, id)
-        };
-        let mut guard = SlotGuard::new(Arc::clone(&self.shared), slot_idx);
+        let (ch, mut guard) = self.shared.send_open(destination).await?;
 
-        let open_arg1 = if self.shared.delayed_ack {
-            self.shared.config.advertised_ack_bytes()
-        } else {
-            0
-        };
-        let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
-        {
-            let mut wh = self.shared.write_half.lock().await;
-            send_pkt(&mut *wh, &self.shared.desync, &pkt, self.shared.checksum()).await?;
-        }
-
-        let result = self.await_open_ack(local_id, slot_idx, &mut guard).await;
+        let result = self.await_open_ack(ch, &mut guard).await;
         if let Err(ref e) = result {
             if !matches!(e, Error::ChannelClosed) {
                 let mut wh = self.shared.write_half.lock().await;
@@ -415,7 +465,7 @@ where
                     &mut *wh,
                     &self.shared.desync,
                     Command::Close,
-                    local_id,
+                    ch.local_id,
                     0,
                     &[],
                     self.shared.checksum(),
@@ -453,8 +503,7 @@ where
 
     async fn await_open_ack(
         &mut self,
-        local_id: u32,
-        slot_idx: usize,
+        ch: ChannelId,
         guard: &mut SlotGuard<WH, MC, MP, MF>,
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         self.drain_overflow().await?;
@@ -466,20 +515,17 @@ where
             )
             .await?;
             match pkt.command {
-                Command::Ready if pkt.arg1 == local_id => {
+                Command::Ready if pkt.arg1 == ch.local_id => {
                     {
                         let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = chs[slot_idx].as_mut() {
+                        if let Some(slot) = chs[ch.slot].as_mut() {
                             slot.accept_open_ready(pkt.arg0, &pkt.data, self.shared.delayed_ack)?;
                         }
                     }
                     guard.disarm();
-                    return Ok(ChannelId {
-                        slot: slot_idx,
-                        local_id,
-                    });
+                    return Ok(ch);
                 }
-                Command::Close if pkt.arg1 == local_id => {
+                Command::Close if pkt.arg1 == ch.local_id => {
                     return Err(Error::ChannelClosed);
                 }
                 _ => self.dispatch(pkt).await?,
@@ -520,11 +566,7 @@ where
             )
             .await?;
             self.dispatch(pkt).await?;
-            loop {
-                let pending = self.shared.lock_incoming().pop_front();
-                let Some(pending) = pending else {
-                    break;
-                };
+            while let Some(pending) = self.shared.pop_incoming() {
                 self.shared.stage_incoming(pending).reject().await?;
             }
         }
@@ -550,30 +592,11 @@ where
         let buffered = {
             let mut chs = self.shared.lock_channels();
             let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
-            if !slot.rx_buf.is_empty() {
-                let n = buf.len().min(slot.rx_buf.len());
-                buf[..n].copy_from_slice(&slot.rx_buf[..n]);
-                let _ = slot.rx_buf.split_to(n);
-                Some((n, slot.consume(n, delayed_ack, watermark)))
-            } else if slot.is_closed() {
-                return Err(Error::ChannelClosed);
-            } else {
-                None
-            }
+            slot.take_buffered(buf, delayed_ack, watermark)?
         };
         if let Some((n, ack)) = buffered {
             if let Some((local_id, remote_id, len)) = ack {
-                let mut wh = self.shared.write_half.lock().await;
-                send_okay_to(
-                    &mut *wh,
-                    &self.shared.desync,
-                    delayed_ack,
-                    local_id,
-                    remote_id,
-                    len,
-                    self.shared.checksum(),
-                )
-                .await?;
+                self.shared.send_okay(local_id, remote_id, len).await?;
             }
             return Ok(n);
         }
@@ -606,17 +629,7 @@ where
                         }
                     };
                     if let Some((local_id, remote_id, len)) = ack {
-                        let mut wh = self.shared.write_half.lock().await;
-                        send_okay_to(
-                            &mut *wh,
-                            &self.shared.desync,
-                            delayed_ack,
-                            local_id,
-                            remote_id,
-                            len,
-                            self.shared.checksum(),
-                        )
-                        .await?;
+                        self.shared.send_okay(local_id, remote_id, len).await?;
                     }
                     return Ok(n);
                 }
@@ -664,8 +677,7 @@ where
     ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
-            let pending = self.shared.lock_incoming().pop_front();
-            if let Some(pending) = pending {
+            if let Some(pending) = self.shared.pop_incoming() {
                 return Ok(self.shared.stage_incoming(pending));
             }
             let pkt = recv_pkt(
@@ -681,7 +693,7 @@ where
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
     /// takes a request that already arrived, if any.
     pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH, MC, MP, MF>> {
-        let pending = self.shared.lock_incoming().pop_front()?;
+        let pending = self.shared.pop_incoming()?;
         Some(self.shared.stage_incoming(pending))
     }
 
@@ -705,22 +717,11 @@ where
                 len,
             } => {
                 self.shared.signals[idx].wake();
-                let mut wh = self.shared.write_half.lock().await;
-                send_okay_to(
-                    &mut *wh,
-                    &self.shared.desync,
-                    self.shared.delayed_ack,
-                    local_id,
-                    remote_id,
-                    len,
-                    self.shared.checksum(),
-                )
-                .await?;
+                self.shared.send_okay(local_id, remote_id, len).await?;
             }
-            DispatchOutcome::CreditGranted { idx } => {
-                self.shared.signals[idx].wake();
-            }
-            DispatchOutcome::SlotClosed { idx } => {
+            DispatchOutcome::CreditGranted { idx }
+            | DispatchOutcome::SlotClosed { idx }
+            | DispatchOutcome::DataBuffered { idx } => {
                 self.shared.signals[idx].wake();
             }
             DispatchOutcome::IncomingOpen {
@@ -802,9 +803,6 @@ where
                         signal.wake();
                     }
                 }
-            }
-            DispatchOutcome::DataBuffered { idx } => {
-                self.shared.signals[idx].wake();
             }
             DispatchOutcome::Unmatched => {}
         }
@@ -1100,40 +1098,15 @@ where
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         self.shared.check_read()?;
-        let (slot_idx, local_id) = {
-            let mut chs = self.shared.lock_channels();
-            let idx = chs
-                .iter()
-                .position(|s| s.is_none())
-                .ok_or(Error::NoFreeChannels)?;
-            let id = self.shared.next_local_id();
-            chs[idx] = Some(ChannelSlot::new(id));
-            (idx, id)
-        };
-        let mut guard = SlotGuard::new(Arc::clone(&self.shared), slot_idx);
-        let ch = ChannelId {
-            slot: slot_idx,
-            local_id,
-        };
+        let (ch, mut guard) = self.shared.send_open(destination).await?;
 
-        let open_arg1 = if self.shared.delayed_ack {
-            self.shared.config.advertised_ack_bytes()
-        } else {
-            0
-        };
-        let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
-        {
-            let mut wh = self.shared.write_half.lock().await;
-            send_pkt(&mut *wh, &self.shared.desync, &pkt, self.shared.checksum()).await?;
-        }
-
-        let signal = &self.shared.signals[slot_idx];
+        let signal = &self.shared.signals[ch.slot];
         loop {
             let listener = signal.listen();
             {
                 let chs = self.shared.lock_channels();
-                match chs[slot_idx].as_ref() {
-                    Some(slot) if slot.local_id == local_id => match slot.state {
+                match chs[ch.slot].as_ref() {
+                    Some(slot) if slot.local_id == ch.local_id => match slot.state {
                         ChannelState::Opening => {}
                         // A remote id comes only with READY: the channel was
                         // opened, even if the device has closed it since.
@@ -1200,46 +1173,35 @@ where
         let delayed_ack = self.shared.delayed_ack;
         let watermark = self.shared.config.rx_watermark();
         let mut interrupt = pin!(interrupt);
+        let mut listener: Option<EventListener> = None;
         loop {
-            let mut listener = signal.listen();
             let taken = {
                 let mut chs = self.shared.lock_channels();
                 let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
-                if !slot.rx_buf.is_empty() {
-                    let n = buf.len().min(slot.rx_buf.len());
-                    buf[..n].copy_from_slice(&slot.rx_buf[..n]);
-                    let _ = slot.rx_buf.split_to(n);
-                    Some((n, slot.consume(n, delayed_ack, watermark)))
-                } else if slot.is_closed() {
-                    return Err(Error::ChannelClosed);
-                } else {
-                    None
-                }
+                slot.take_buffered(buf, delayed_ack, watermark)?
             };
             if let Some((n, ack)) = taken {
                 if let Some((local_id, remote_id, len)) = ack {
-                    let mut wh = self.shared.write_half.lock().await;
-                    send_okay_to(
-                        &mut *wh,
-                        &self.shared.desync,
-                        delayed_ack,
-                        local_id,
-                        remote_id,
-                        len,
-                        self.shared.checksum(),
-                    )
-                    .await?;
+                    self.shared.send_okay(local_id, remote_id, len).await?;
                 }
                 return Ok(SelectResult::Data(n));
             }
             self.shared.check_read()?;
+            // Register, then look once more before waiting: data that
+            // lands in between still wakes us, and a read that finds
+            // data at once never registers at all.
+            let Some(waiting) = listener.as_mut() else {
+                listener = Some(signal.listen());
+                continue;
+            };
             let interrupted = poll_fn(|cx| {
                 if let Poll::Ready(value) = interrupt.as_mut().poll(cx) {
                     return Poll::Ready(Some(value));
                 }
-                Pin::new(&mut listener).poll(cx).map(|()| None)
+                Pin::new(&mut *waiting).poll(cx).map(|()| None)
             })
             .await;
+            listener = None;
             if let Some(value) = interrupted {
                 return Ok(SelectResult::Interrupted(value));
             }

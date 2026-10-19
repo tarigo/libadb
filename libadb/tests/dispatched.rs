@@ -24,22 +24,7 @@ use fake_device::{session, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
-use common::{shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT, SH_STDOUT};
-
-fn logger_entry(pid: i32, tag: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut payload = vec![4u8];
-    payload.extend_from_slice(tag);
-    payload.push(0);
-    payload.extend_from_slice(message);
-    payload.push(0);
-    let mut entry = Vec::new();
-    entry.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-    entry.extend_from_slice(&28u16.to_le_bytes());
-    entry.extend_from_slice(&pid.to_le_bytes());
-    entry.extend_from_slice(&[0u8; 20]);
-    entry.extend_from_slice(&payload);
-    entry
-}
+use common::{logger_entry, logger_payload, shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT, SH_STDOUT};
 
 rt_test! {
 async fn shell_v1_exec_runs_over_the_writer() {
@@ -91,7 +76,7 @@ async fn logcat_open_reads_entries_over_the_writer() {
     let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
     let (conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
         let mut ch = s.accept_open(b"shell,v2,raw:logcat -B\0").await;
-        ch.send_write(&shell_v2_encode(SH_STDOUT, &logger_entry(42, b"Tag", b"hello")))
+        ch.send_write(&shell_v2_encode(SH_STDOUT, &logger_entry(42, 0, 0, 0, 0, 0, &logger_payload(4, b"Tag", b"hello"))))
             .await;
         ch.expect_unordered([CMD_OKAY, CMD_CLSE]).await;
     })

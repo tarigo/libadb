@@ -74,7 +74,7 @@ pub struct ProcessEntry {
 /// Wraps an ADB channel and a caller-owned receive buffer.  Call
 /// [`read_snapshot`](Self::read_snapshot) in a loop to receive process
 /// list updates.
-pub struct TrackApp<'a, 'b, S: Session> {
+pub struct TrackApp<'a, 'b, S> {
     channel: Channel<'a, S>,
     rx: RecvBuf<'b>,
 }
