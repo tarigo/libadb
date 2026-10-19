@@ -132,17 +132,17 @@ pub async fn run<S: Session>(
 ) -> Result<usize, Error<S::IoError>> {
     let dest_len = write_destination(buf, command)?;
     let channel = session.open(&buf[..dest_len]).await?;
-    let mut session = Exec { channel };
+    let mut exec = Exec { channel };
 
     let mut tail = 0;
     loop {
         if tail >= buf.len() {
             return Err(Error::ReceiveBufferFull);
         }
-        match session.read(&mut buf[tail..]).await {
+        match exec.read(&mut buf[tail..]).await {
             Ok(n) => tail += n,
             Err(Error::ChannelClosed) => {
-                let _ = session.close().await;
+                let _ = exec.close().await;
                 return Ok(tail);
             }
             Err(e) => return Err(e),

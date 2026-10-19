@@ -1,5 +1,5 @@
 use alloc::collections::BTreeSet;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use core::future::Future;
 
 use super::error::{Error, ProtocolError, RxOverflow};
@@ -382,6 +382,29 @@ impl ChannelSlot {
         }
         let len = core::mem::take(&mut self.unacked);
         Some((self.local_id, self.remote_id, len))
+    }
+
+    /// Copy buffered bytes into `buf`, and say what to acknowledge for
+    /// taking them. `None` while an open channel has nothing buffered;
+    /// [`Error::ChannelClosed`] once a closed one is drained.
+    #[allow(clippy::type_complexity)]
+    pub fn take_buffered<E>(
+        &mut self,
+        buf: &mut [u8],
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Result<Option<(usize, Option<(u32, u32, usize)>)>, Error<E>> {
+        if self.rx_buf.is_empty() {
+            return if self.is_closed() {
+                Err(Error::ChannelClosed)
+            } else {
+                Ok(None)
+            };
+        }
+        let n = buf.len().min(self.rx_buf.len());
+        buf[..n].copy_from_slice(&self.rx_buf[..n]);
+        self.rx_buf.advance(n);
+        Ok(Some((n, self.consume(n, delayed_ack, watermark))))
     }
 
     pub fn push_rx(&mut self, payload: &[u8], cap: usize) -> Result<(), RxOverflow> {

@@ -586,8 +586,7 @@ async fn split_writer_open_channel_reports_refusal() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
         let (open, _) = s.expect(CMD_OPEN).await;
         s.send(CMD_CLSE, 0, open.arg0, &[]).await;
-        let (again, _) = s.expect(CMD_OPEN).await;
-        s.send(CMD_OKAY, 300, again.arg0, &[]).await;
+        s.accept_open(b"accepted:\0").await;
     })
     .await;
 
@@ -615,12 +614,10 @@ async fn split_writer_open_channel_reports_refusal() {
 rt_test! {
 async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
-        let (open, _) = s.expect(CMD_OPEN).await;
-        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
-        s.send(CMD_WRTE, 300, open.arg0, b"bye").await;
-        s.send(CMD_CLSE, 300, open.arg0, &[]).await;
-        let (okay, _) = s.expect(CMD_OKAY).await;
-        assert_eq!(okay.arg0, open.arg0);
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"bye").await;
+        ch.send_close().await;
+        ch.expect_ack().await;
     })
     .await;
 

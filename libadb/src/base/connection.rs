@@ -397,8 +397,7 @@ where
     where
         T: crate::transport::ReadCancelSafety,
     {
-        let id = self.open_channel(destination).await?;
-        Ok(Channel { session: self, id })
+        crate::base::session::Session::open(self, destination).await
     }
 
     /// Open a channel, returning a [`ChannelId`] for multiplexed use.
@@ -510,20 +509,10 @@ where
         self.desync.check()?;
         let delayed_ack = self.delayed_ack;
         let watermark = self.config.rx_watermark();
-        let ack = {
-            let slot = self.slot_mut(ch)?;
-            if !slot.rx_buf.is_empty() {
-                let n = buf.len().min(slot.rx_buf.len());
-                buf[..n].copy_from_slice(&slot.rx_buf[..n]);
-                let _ = slot.rx_buf.split_to(n);
-                Some((n, slot.consume(n, delayed_ack, watermark)))
-            } else if slot.is_closed() {
-                return Err(Error::ChannelClosed);
-            } else {
-                None
-            }
-        };
-        if let Some((n, ack)) = ack {
+        let buffered = self
+            .slot_mut(ch)?
+            .take_buffered(buf, delayed_ack, watermark)?;
+        if let Some((n, ack)) = buffered {
             if let Some((local_id, remote_id, len)) = ack {
                 self.send_okay(local_id, remote_id, len).await?;
             }
@@ -737,20 +726,9 @@ where
         let cancel_safe = self.transport.read_cancel_safe();
         let delayed_ack_now = self.delayed_ack;
         let watermark_now = self.config.rx_watermark();
-        let buffered = {
-            let slot = self.slot_mut(ch)?;
-            if !slot.rx_buf.is_empty() {
-                let n = buf.len().min(slot.rx_buf.len());
-                buf[..n].copy_from_slice(&slot.rx_buf[..n]);
-                let _ = slot.rx_buf.split_to(n);
-                let ack = slot.consume(n, delayed_ack_now, watermark_now);
-                Some((n, ack))
-            } else if slot.is_closed() {
-                return Err(Error::ChannelClosed);
-            } else {
-                None
-            }
-        };
+        let buffered = self
+            .slot_mut(ch)?
+            .take_buffered(buf, delayed_ack_now, watermark_now)?;
         if let Some((n, ack)) = buffered {
             if let Some((local_id, remote_id, len)) = ack {
                 self.send_okay(local_id, remote_id, len).await?;
