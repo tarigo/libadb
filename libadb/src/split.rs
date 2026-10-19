@@ -181,7 +181,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
             0
         };
         {
-            let mut wh = self.write_half.lock().await;
+            let mut wh = self.lock_write().await;
             send_raw(
                 &mut *wh,
                 &self.desync,
@@ -202,7 +202,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     where
         WH: Write,
     {
-        let mut wh = self.write_half.lock().await;
+        let mut wh = self.lock_write().await;
         let _ = send_raw(
             &mut *wh,
             &self.desync,
@@ -224,7 +224,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     where
         WH: Write,
     {
-        let mut wh = self.write_half.lock().await;
+        let mut wh = self.lock_write().await;
         send_okay_to(
             &mut *wh,
             &self.desync,
@@ -261,16 +261,67 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     /// Mark the connection unread and wake every waiter to see it.
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
+        self.wake_all();
+    }
+
+    fn wake_all(&self) {
         for signal in &self.signals {
             signal.wake();
         }
     }
 
-    fn check_read<E>(&self) -> Result<(), Error<E>> {
+    /// Fail once waiting can no longer end well: a write abandoned
+    /// mid-packet desynchronized the connection, or the [`Reader`] is
+    /// gone and nothing will be dispatched any more.
+    fn check_live<E>(&self) -> Result<(), Error<E>> {
+        self.desync.check()?;
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Disconnected);
         }
         Ok(())
+    }
+
+    /// Take the write half for one packet.
+    async fn lock_write(&self) -> WriteLock<'_, WH, MC, MP, MF> {
+        WriteLock {
+            guard: self.write_half.lock().await,
+            shared: self,
+        }
+    }
+}
+
+/// The write half, held for one packet. A packet abandoned partway —
+/// its future dropped, or the transport failing mid-write —
+/// desynchronizes the connection, and letting go then wakes every
+/// waiter to see that rather than wait for traffic that cannot come.
+struct WriteLock<'a, WH, const MC: usize, const MP: usize, const MF: usize> {
+    guard: async_lock::MutexGuard<'a, WH>,
+    shared: &'a Shared<WH, MC, MP, MF>,
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> core::ops::Deref
+    for WriteLock<'_, WH, MC, MP, MF>
+{
+    type Target = WH;
+
+    fn deref(&self) -> &WH {
+        &self.guard
+    }
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> core::ops::DerefMut
+    for WriteLock<'_, WH, MC, MP, MF>
+{
+    fn deref_mut(&mut self) -> &mut WH {
+        &mut self.guard
+    }
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for WriteLock<'_, WH, MC, MP, MF> {
+    fn drop(&mut self) {
+        if self.shared.desync.check::<Infallible>().is_err() {
+            self.shared.wake_all();
+        }
     }
 }
 
@@ -920,7 +971,7 @@ where
         };
         let Some((slot_idx, local_id)) = reserved else {
             // No slot to give: refuse, and consume the request.
-            let mut wh = shared.write_half.lock().await;
+            let mut wh = shared.lock_write().await;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -942,7 +993,7 @@ where
             &[]
         };
         {
-            let mut wh = shared.write_half.lock().await;
+            let mut wh = shared.lock_write().await;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -981,7 +1032,7 @@ where
         let shared = Arc::clone(&self.shared);
         let checksum = shared.checksum();
         {
-            let mut wh = shared.write_half.lock().await;
+            let mut wh = shared.lock_write().await;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -1108,8 +1159,7 @@ where
         &self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
-        self.shared.check_read()?;
+        self.shared.check_live()?;
         let (ch, mut guard) = self.shared.send_open(destination).await?;
 
         let result = self.await_open_ack(ch, &mut guard).await;
@@ -1149,7 +1199,7 @@ where
                     _ => return Err(Error::ChannelClosed),
                 }
             }
-            self.shared.check_read()?;
+            self.shared.check_live()?;
             listener.await;
         }
     }
@@ -1214,7 +1264,7 @@ where
                 }
                 return Ok(SelectResult::Data(n));
             }
-            self.shared.check_read()?;
+            self.shared.check_live()?;
             // Register, then look once more before waiting: data that
             // lands in between still wakes us, and a read that finds
             // data at once never registers at all.
@@ -1257,7 +1307,8 @@ where
     /// next as the rest of that packet. The connection is marked
     /// desynchronized instead: this and every other operation on it
     /// then fails with [`Error::Desynchronized`], including on the
-    /// paired [`Reader`]. Close it and open a new one.
+    /// paired [`Reader`] and calls already waiting on a `Writer`. Close
+    /// it and open a new one.
     ///
     /// The mark goes up from the moment the header write is first
     /// polled, not only between the two writes — a transport that took
@@ -1285,7 +1336,7 @@ where
             let chunk = &data[offset..offset + n];
 
             {
-                let mut wh = self.shared.write_half.lock().await;
+                let mut wh = self.shared.lock_write().await;
                 send_raw(
                     &mut *wh,
                     &self.shared.desync,
@@ -1365,7 +1416,7 @@ where
                 }
                 Some(Err(e)) => return Err(e),
                 None => {
-                    self.shared.check_read()?;
+                    self.shared.check_live()?;
                     listener.await;
                 }
             }
@@ -1413,7 +1464,7 @@ where
         channel_ids_of(&*chs, ch)?
     };
     {
-        let mut wh = shared.write_half.lock().await;
+        let mut wh = shared.lock_write().await;
         send_pkt(
             &mut *wh,
             &shared.desync,
@@ -1761,6 +1812,48 @@ mod tests {
             matches!(err, Error::Desynchronized),
             "reader: expected Desynchronized, got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_cancelled_write_wakes_reads_waiting_on_other_channels() {
+        use alloc::task::Wake;
+        use core::task::{Context, Waker};
+
+        struct Woken(AtomicBool);
+        impl Wake for Woken {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+
+        // Two channels; the write on `a` hangs after its header (the
+        // handshake and both OPENs take the first six writes).
+        let mut mock = Mock::new();
+        mock.feed(&crate::base::mock::cnxn())
+            .feed(&okay(1))
+            .feed(&okay(2))
+            .stall_write(6 + 1);
+        let conn = now(Connection::<_>::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let a = now(reader.open_channel(b"shell:\0")).unwrap();
+        let b = now(reader.open_channel(b"shell:\0")).unwrap();
+
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut buf = [0u8; 16];
+        let mut read = pin!(writer.read_channel(b, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+
+        abandon(writer.write_channel(a, b"payload-that-never-made-it"));
+        assert!(
+            woken.0.load(Ordering::Relaxed),
+            "the read on b slept through the desync"
+        );
+        let err = now(read).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
     }
 
     #[test]
