@@ -49,6 +49,9 @@ typedef enum {
      * match, or the device ended the exchange itself (dialog dismissed,
      * attempts used up); adb_last_error() says which. */
     ADB_ERR_PAIRING         = 12,
+    /* The connection's read side is gone, so nothing more will arrive
+     * from the device; open a new connection. */
+    ADB_ERR_DISCONNECTED    = 13,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
 
