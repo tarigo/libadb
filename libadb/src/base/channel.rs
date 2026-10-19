@@ -36,7 +36,10 @@ pub(crate) enum AckDecision {
 }
 
 pub(crate) enum DispatchOutcome {
+    /// A WRTE was buffered and has to be acknowledged now.
     AckWrite {
+        #[allow(dead_code)] // read only by split::Reader, to wake readers
+        idx: usize,
         local_id: u32,
         remote_id: u32,
         len: usize,
@@ -51,9 +54,12 @@ pub(crate) enum DispatchOutcome {
         #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
-    /// A WRTE was buffered with its acknowledgement held back: readers
-    /// wait on the socket and writers on credit, so nobody needs waking.
-    DataBuffered,
+    /// A WRTE was buffered with its acknowledgement held back until it
+    /// is read.
+    DataBuffered {
+        #[allow(dead_code)] // read only by split::Reader, to wake readers
+        idx: usize,
+    },
     /// The device opened a channel toward the host (`adb reverse`).
     /// The host queues it for [`accept_incoming`] and answers READY on
     /// accept or CLSE on refusal.
@@ -149,16 +155,21 @@ pub(crate) fn dispatch_packet<E>(
                             remote_id,
                             len,
                         } => DispatchOutcome::AckWrite {
+                            idx,
                             local_id,
                             remote_id,
                             len,
                         },
-                        AckDecision::Hold => DispatchOutcome::DataBuffered,
+                        AckDecision::Hold => DispatchOutcome::DataBuffered { idx },
                     },
                 );
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
-                slot.apply_ready(&pkt.data, delayed_ack)?;
+                if slot.state == ChannelState::Opening {
+                    slot.accept_open_ready(pkt.arg0, &pkt.data, delayed_ack)?;
+                } else {
+                    slot.apply_ready(&pkt.data, delayed_ack)?;
+                }
                 return Ok(DispatchOutcome::CreditGranted { idx });
             }
             Command::Close if pkt.arg1 == slot.local_id => {

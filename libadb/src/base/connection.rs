@@ -199,6 +199,7 @@ async fn dispatch_to<T: Write>(
             local_id,
             remote_id,
             len,
+            ..
         } => {
             send_okay_to(
                 transport,
@@ -358,7 +359,7 @@ where
     {
         use crate::split::{Reader, Shared, Writer};
         use alloc::sync::Arc;
-        use core::sync::atomic::AtomicU32;
+        use core::sync::atomic::{AtomicBool, AtomicU32};
 
         let (read_half, write_half) = self.transport.split().map_err(Error::Io)?;
 
@@ -375,6 +376,7 @@ where
             desync: self.desync,
             incoming: std::sync::Mutex::new(self.incoming),
             staged: std::sync::Mutex::new(alloc::vec::Vec::new()),
+            stopped: AtomicBool::new(false),
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
