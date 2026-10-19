@@ -1125,12 +1125,16 @@ where
                 let chs = self.shared.lock_channels();
                 match chs[slot_idx].as_ref() {
                     Some(slot) if slot.local_id == local_id => match slot.state {
-                        ChannelState::Open => {
+                        ChannelState::Opening => {}
+                        // A remote id comes only with READY: the channel was
+                        // opened, even if the device has closed it since.
+                        ChannelState::Closed if slot.remote_id == 0 => {
+                            return Err(Error::ChannelClosed)
+                        }
+                        ChannelState::Open | ChannelState::Closed => {
                             guard.disarm();
                             return Ok(ch);
                         }
-                        ChannelState::Closed => return Err(Error::ChannelClosed),
-                        ChannelState::Opening => {}
                     },
                     _ => return Err(Error::ChannelClosed),
                 }
