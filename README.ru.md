@@ -182,7 +182,7 @@ let conn = Connection::<_>::connect_with_config(
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Бинарные записи logcat, распарсенные |
 | `sync`        | `sync:`                      | `STAT`/`LIST`/`SEND`/`RECV`, v1 и v2 |
 | `track_app`   | `track-app:`                 | Стриминг снапшотов debuggable-процессов |
-| `reverse`     | `reverse:…`                  | Правила обратного проброса; входящие каналы — `accept_incoming` |
+| `reverse`     | `reverse:…`                  | Правила обратного проброса; входящие каналы — `accept_incoming` (при `Reader::run` — `Writer::listen_incoming`) |
 
 ## Ограничения
 

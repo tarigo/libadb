@@ -362,7 +362,7 @@ where
     {
         use crate::split::{Reader, Shared, Writer};
         use alloc::sync::Arc;
-        use core::sync::atomic::{AtomicBool, AtomicU32};
+        use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 
         let (read_half, write_half) = self.transport.split().map_err(Error::Io)?;
 
@@ -380,6 +380,8 @@ where
             incoming: std::sync::Mutex::new(self.incoming),
             staged: std::sync::Mutex::new(alloc::vec::Vec::new()),
             stopped: AtomicBool::new(false),
+            listeners: AtomicUsize::new(0),
+            incoming_signal: event_listener::Event::new(),
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
