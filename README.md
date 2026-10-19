@@ -176,7 +176,7 @@ dominates the cost of a channel write: skipping it made a 32 KiB
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Binary logcat entries, parsed     |
 | `sync`        | `sync:`                      | `STAT`/`LIST`/`SEND`/`RECV`, v1 + v2 |
 | `track_app`   | `track-app:`                 | Streaming debuggable-process snapshots |
-| `reverse`     | `reverse:…`                  | Reverse-forward rules; incoming channels via `accept_incoming` |
+| `reverse`     | `reverse:…`                  | Reverse-forward rules; incoming channels via `accept_incoming` (`Writer::listen_incoming` under `Reader::run`) |
 
 See the [`libadb/examples/`](libadb/examples/) directory for end-to-end
 programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).

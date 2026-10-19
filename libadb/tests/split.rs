@@ -845,3 +845,41 @@ async fn split_run_closes_only_the_channel_a_packet_broke() {
         .expect("device hung");
 }
 }
+
+// With a listener alive, `run` keeps a device-initiated channel for it
+// instead of refusing it, and the accepted channel then works on the
+// Writer like any other.
+rt_test! {
+async fn split_run_hands_device_initiated_open_to_a_listener() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (ready, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(ready.arg1, 7);
+        s.send(CMD_WRTE, 7, ready.arg0, b"hello").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (ready.arg0, 7));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let listener = writer.listen_incoming();
+    let _driver = rt::spawn(reader.run());
+    // The OPEN arrives and is dispatched before anyone waits for it:
+    // the listener alone has to keep `run` from refusing it.
+    rt::sleep_ms(100).await;
+
+    let incoming = rt::timeout_ms(5000, listener.accept())
+        .await
+        .expect("the OPEN never reached the listener")
+        .unwrap();
+    assert_eq!(incoming.destination(), b"tcp:1234\0");
+    let ch = incoming.accept().await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    rt::join(device).await;
+}
+}

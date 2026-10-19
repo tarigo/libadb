@@ -146,7 +146,7 @@ pub use keys::AdbKey;
 pub use tls::{TlsClientConfig, TlsIdentity};
 
 #[cfg(feature = "split")]
-pub use split::{Reader, SplitIncoming, Writer};
+pub use split::{IncomingListener, Reader, SplitIncoming, Writer};
 
 #[cfg(feature = "tokio")]
 pub use transport::tcp::TokioTcp;

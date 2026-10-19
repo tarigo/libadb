@@ -6,7 +6,9 @@
 //! device-initiated OPEN whose destination is the rule's `<local>`
 //! spec: receive them with
 //! [`Connection::accept_incoming`](crate::Connection::accept_incoming)
-//! (or `Reader::accept_incoming` on a split connection).
+//! (or `Reader::accept_incoming` on a split connection, and an
+//! `IncomingListener` from `Writer::listen_incoming` while
+//! `Reader::run` dispatches; without one, `run` refuses them).
 //!
 //! Specs are passed through verbatim, e.g. `tcp:8080` or
 //! `localabstract:name`. On the device, adbd binds `tcp:` listeners on

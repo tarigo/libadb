@@ -23,6 +23,8 @@
 //!   [`Writer::read_channel`], [`Writer::write_channel`],
 //!   [`Writer::close_channel`] — so any number of tasks can work on
 //!   their own channels at once and none waits on another's traffic.
+//!   Channels the device opens (`adb reverse`) are taken through an
+//!   [`IncomingListener`] from [`Writer::listen_incoming`].
 //!
 //! Once the `Reader` is gone — `run` returned or the `Reader` was
 //! dropped — every waiting and later call on the `Writer` fails with
@@ -52,7 +54,7 @@ use bytes::BytesMut;
 use core::convert::Infallible;
 use core::future::{poll_fn, Future};
 use core::pin::{pin, Pin};
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use core::task::Poll;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
@@ -123,6 +125,11 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     /// Set once the [`Reader`] is gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
     pub(crate) stopped: AtomicBool,
+    /// Live [`IncomingListener`]s. While there is one, [`Reader::run`]
+    /// keeps device-initiated OPENs for it instead of refusing them.
+    pub(crate) listeners: AtomicUsize,
+    /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
+    pub(crate) incoming_signal: Event,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -300,6 +307,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         for signal in &self.signals {
             signal.wake();
         }
+        self.incoming_signal.notify(usize::MAX);
     }
 
     /// Fail once waiting can no longer end well: a write abandoned
@@ -647,8 +655,10 @@ where
     /// why its `Ok` side is [`Infallible`]; the `Reader` is gone then,
     /// and waiters on the `Writer` get [`Error::Disconnected`].
     ///
-    /// Channels the device opens toward the host (`adb reverse`) are
-    /// refused: nobody is left to accept them.
+    /// Channels the device opens toward the host (`adb reverse`) wait
+    /// for an [`IncomingListener`] while one is alive, and are refused
+    /// otherwise: nobody would accept them. Requests still queued when
+    /// the last listener goes are refused once the next packet arrives.
     ///
     /// A packet that breaks one channel alone — data past its receive
     /// cap, a READY it cannot take — closes that channel: the device
@@ -676,6 +686,9 @@ where
             )
             .await?;
             self.dispatch(pkt, OnFault::CloseChannel).await?;
+            if self.shared.listeners.load(Ordering::Acquire) > 0 {
+                continue;
+            }
             while let Some(pending) = self.shared.pop_incoming() {
                 self.shared.stage_incoming(pending).reject().await?;
             }
@@ -864,6 +877,9 @@ where
                         None
                     }
                 };
+                if refused.is_none() {
+                    self.shared.incoming_signal.notify(usize::MAX);
+                }
                 if let Some(pending) = refused {
                     // The refusal owes adbd a CLSE, and waiting for the
                     // write lock is a cancellation point: dropped
@@ -1210,6 +1226,17 @@ where
         self.shared.device_banner.as_ref()
     }
 
+    /// Take the channels the device opens toward the host (`adb
+    /// reverse`) on a connection whose [`Reader::run`] dispatches
+    /// packets. While the listener lives, `run` keeps them for its
+    /// [`accept`](IncomingListener::accept) instead of refusing them.
+    pub fn listen_incoming(&self) -> IncomingListener<WH, MC, MP, MF> {
+        self.shared.listeners.fetch_add(1, Ordering::AcqRel);
+        IncomingListener {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
     /// Open a channel to `destination` on a connection whose
     /// [`Reader::run`] dispatches packets.
     ///
@@ -1513,6 +1540,60 @@ where
                 slot.send_advance();
                 Ok((n, slot.send_budget > 0))
             })
+    }
+}
+
+/// Channels the device opens toward the host, taken on a connection
+/// whose [`Reader::run`] dispatches packets. Made by
+/// [`Writer::listen_incoming`]; while any listener lives, `run` keeps
+/// such requests for it — up to the channel table's size, past which
+/// they are refused on arrival — and refuses them once none does.
+pub struct IncomingListener<
+    WH,
+    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
+    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
+    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
+> where
+    WH: Write,
+{
+    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> IncomingListener<WH, MC, MP, MF>
+where
+    WH: Write,
+{
+    /// Wait for a device-initiated channel and hand it over for a
+    /// verdict, as [`Reader::accept_incoming`] does on a reader-driven
+    /// connection. The accepted channel is then worked through the
+    /// [`Writer`] like any other.
+    ///
+    /// Cancellation-safe: a request is only taken once it is returned.
+    pub async fn accept(
+        &self,
+    ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>> {
+        let mut listener: Option<EventListener> = None;
+        loop {
+            if let Some(pending) = self.shared.pop_incoming() {
+                return Ok(self.shared.stage_incoming(pending));
+            }
+            self.shared.check_live()?;
+            // Register, then look once more before waiting, as reads do.
+            match listener.take() {
+                Some(waiting) => waiting.await,
+                None => listener = Some(self.shared.incoming_signal.listen()),
+            }
+        }
+    }
+}
+
+impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
+    for IncomingListener<WH, MC, MP, MF>
+where
+    WH: Write,
+{
+    fn drop(&mut self) {
+        self.shared.listeners.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
