@@ -17,16 +17,12 @@
 
 use alloc::vec::Vec;
 use core::future::Future;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::base::channel::{Channel, SelectResult};
-use crate::base::connection::{
-    Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
 use crate::base::destination::build_shell_v2_destination;
 use crate::base::error::{Error, ProtocolError};
 use crate::base::protocol::features::Feature;
+use crate::base::session::Session;
 
 /// Stdin payload from host to device.
 pub const STDIN: u8 = 0;
@@ -100,32 +96,13 @@ pub struct CommandOutput {
 /// is fully occupied with one in-progress frame — operations return
 /// [`Error::ReceiveBufferFull`]. Frames whose payload exceeds the
 /// buffer size are delivered in multiple chunks transparently.
-pub struct Shell<
-    'a,
-    'b,
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
-    T: Read + Write,
-{
-    channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+pub struct Shell<'a, 'b, S> {
+    channel: Channel<'a, S>,
     rx: &'b mut [u8],
     decoder: FrameDecoder,
 }
 
-impl<
-        'a,
-        'b,
-        T,
-        const MAX_CHANNELS: usize,
-        const MAX_PROPERTIES: usize,
-        const MAX_FEATURES: usize,
-    > Shell<'a, 'b, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
+impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// Wrap an already-opened channel.
     ///
     /// The channel must have been opened against a `shell,v2,...`
@@ -141,10 +118,7 @@ where
     /// able to surface a [`ReceiveBufferFull`](Error::ReceiveBufferFull)
     /// error — turning that into a loud failure at construction time
     /// is friendlier than at the first read.
-    pub fn new(
-        channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
-        rx: &'b mut [u8],
-    ) -> Self {
+    pub fn new(channel: Channel<'a, S>, rx: &'b mut [u8]) -> Self {
         assert!(
             rx.len() >= HEADER_SIZE,
             "Shell rx buffer must be at least HEADER_SIZE ({}) bytes",
@@ -165,11 +139,7 @@ where
     /// payload are written as two separate channel writes (still
     /// zero-alloc — shell_v2 is stream-oriented so the receiver
     /// reassembles from the byte stream regardless of WRTE boundaries).
-    pub async fn send_frame(
-        &mut self,
-        id: u8,
-        payload: &[u8],
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn send_frame(&mut self, id: u8, payload: &[u8]) -> Result<(), Error<S::IoError>> {
         let len_u32 = u32::try_from(payload.len()).map_err(|_| ProtocolError::PayloadTooLarge)?;
         let hdr: [u8; HEADER_SIZE] = {
             let b = len_u32.to_le_bytes();
@@ -195,22 +165,18 @@ where
     }
 
     /// Send a `STDIN` frame.
-    pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
         self.send_frame(STDIN, data).await
     }
 
     /// Send a `CLOSE_STDIN` frame, telling the device that no further
     /// stdin will be written.
-    pub async fn close_stdin(&mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn close_stdin(&mut self) -> Result<(), Error<S::IoError>> {
         self.send_frame(CLOSE_STDIN, &[]).await
     }
 
     /// Send a `WINDOW_SIZE_CHANGE` frame.
-    pub async fn set_window_size(
-        &mut self,
-        rows: u16,
-        cols: u16,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn set_window_size(&mut self, rows: u16, cols: u16) -> Result<(), Error<S::IoError>> {
         let payload = encode_window_size(rows, cols);
         self.send_frame(WINDOW_SIZE_CHANGE, &payload).await
     }
@@ -224,7 +190,7 @@ where
     ///
     /// Returns [`Error::ReceiveBufferFull`] if the caller-provided
     /// receive buffer cannot fit the frame currently being assembled.
-    pub async fn read_frame(&mut self) -> Result<Frame, Error<<T as ErrorType>::Error>> {
+    pub async fn read_frame(&mut self) -> Result<Frame, Error<S::IoError>> {
         loop {
             if let Some(frame) = self.try_next_frame()? {
                 return Ok(frame);
@@ -255,7 +221,7 @@ where
     ///
     /// Allocates a [`Vec`] for the payload. For throughput-sensitive
     /// streaming use [`try_next_raw_ref`](Self::try_next_raw_ref).
-    pub fn try_next_frame(&mut self) -> Result<Option<Frame>, Error<<T as ErrorType>::Error>> {
+    pub fn try_next_frame(&mut self) -> Result<Option<Frame>, Error<S::IoError>> {
         self.decoder
             .try_next_frame(self.rx)
             .map_err(Error::Protocol)
@@ -275,9 +241,7 @@ where
     /// }
     /// ```
     #[allow(clippy::type_complexity)]
-    pub fn try_next_raw_ref(
-        &mut self,
-    ) -> Result<Option<(u8, &[u8])>, Error<<T as ErrorType>::Error>> {
+    pub fn try_next_raw_ref(&mut self) -> Result<Option<(u8, &[u8])>, Error<S::IoError>> {
         self.decoder
             .try_next_raw_ref(self.rx)
             .map_err(Error::Protocol)
@@ -303,10 +267,7 @@ where
     pub async fn pump<F: Future>(
         &mut self,
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
-    where
-        T: crate::transport::ReadCancelSafety,
-    {
+    ) -> Result<SelectResult<F::Output>, Error<S::IoError>> {
         self.ensure_writable()?;
         let result = self
             .channel
@@ -318,7 +279,7 @@ where
         Ok(result)
     }
 
-    fn ensure_writable(&mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    fn ensure_writable(&mut self) -> Result<(), Error<S::IoError>> {
         if self.decoder.tail < self.rx.len() {
             return Ok(());
         }
@@ -331,7 +292,7 @@ where
 
     /// Read frames until [`Frame::Exit`] is received, accumulating
     /// stdout/stderr along the way. Closes the channel before returning.
-    pub async fn collect(mut self) -> Result<CommandOutput, Error<<T as ErrorType>::Error>> {
+    pub async fn collect(mut self) -> Result<CommandOutput, Error<S::IoError>> {
         let mut out = CommandOutput::default();
         loop {
             match self.read_frame().await? {
@@ -348,29 +309,27 @@ where
     }
 
     /// Close the underlying channel without consuming any further frames.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
     }
 }
 
-/// Open a `shell,v2,raw:` channel against `conn`, wrap it in a [`Shell`]
+/// Open a `shell,v2,raw:` channel on `session`, wrap it in a [`Shell`]
 /// using the caller-provided receive buffer, and return the wrapper.
 /// Stdin remains open.
 ///
-/// The channel borrows `conn`, so only one shell session can exist at a
-/// time over a given connection. `rx` is the caller-owned receive
-/// buffer; see [`Shell::new`] for details.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+/// The channel borrows `session`, so only one shell session can exist
+/// at a time over it. A split connection runs several at once, each over
+/// its own clone of the [`Writer`](crate::Writer). `rx` is the
+/// caller-owned receive buffer; see [`Shell::new`] for details.
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     command: &str,
     rx: &'b mut [u8],
-) -> Result<Shell<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(Feature::ShellV2)?;
+) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
+    session.require_feature(Feature::ShellV2)?;
     let dest = build_shell_v2_destination(false, "", command)?;
-    let channel = conn.open(dest.as_bytes()).await?;
+    let channel = session.open(dest.as_bytes()).await?;
     Ok(Shell::new(channel, rx))
 }
 
@@ -391,19 +350,16 @@ where
 /// [`Shell::pump`] in a loop, forward stdin with
 /// [`Shell::write_stdin`], and handle resize events with
 /// [`Shell::set_window_size`].
-pub async fn open_interactive<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open_interactive<'a, 'b, S: Session>(
+    session: &'a mut S,
     command: &str,
     term: &str,
     window_size: Option<(u16, u16)>,
     rx: &'b mut [u8],
-) -> Result<Shell<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(Feature::ShellV2)?;
+) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
+    session.require_feature(Feature::ShellV2)?;
     let dest = build_shell_v2_destination(true, term, command)?;
-    let channel = conn.open(dest.as_bytes()).await?;
+    let channel = session.open(dest.as_bytes()).await?;
     let mut shell = Shell::new(channel, rx);
     if let Some((rows, cols)) = window_size {
         shell.set_window_size(rows, cols).await?;
@@ -424,15 +380,12 @@ where
 /// into it is the caller's to quote. [`cmd`](crate::cmd) quotes its
 /// arguments, but it always runs Android's `cmd` utility — it is not a
 /// general argv form of this call.
-pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn exec<S: Session>(
+    session: &mut S,
     command: &str,
     rx: &mut [u8],
-) -> Result<CommandOutput, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let mut shell = open(conn, command, rx).await?;
+) -> Result<CommandOutput, Error<S::IoError>> {
+    let mut shell = open(session, command, rx).await?;
     shell.close_stdin().await?;
     shell.collect().await
 }

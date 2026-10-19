@@ -1,15 +1,11 @@
 use alloc::collections::BTreeSet;
 use bytes::{Bytes, BytesMut};
 use core::future::Future;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
-use super::connection::{
-    Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
 use super::error::{Error, ProtocolError, RxOverflow};
 use super::protocol::command::Command;
 use super::protocol::Packet;
+use super::session::Session;
 
 /// AOSP's adbd always sends the 4-byte credit; when a peer omits it,
 /// the operation that received the packet fails with
@@ -182,7 +178,7 @@ pub(crate) fn dispatch_packet<E>(
     Ok(DispatchOutcome::Unmatched)
 }
 
-/// Result of [`Channel::select`] / [`Connection::select_channel`].
+/// Result of [`Channel::select`] / [`Session::select_channel`].
 #[derive(Debug)]
 pub enum SelectResult<T> {
     /// The channel produced data — value is the number of bytes read.
@@ -195,8 +191,10 @@ pub enum SelectResult<T> {
 
 /// Opaque handle to an open ADB channel.
 ///
-/// Used with [`Connection::open_channel`], [`read_channel`](Connection::read_channel),
-/// [`write_channel`](Connection::write_channel), [`close_channel`](Connection::close_channel).
+/// Used with [`Session::open_channel`], [`read_channel`](Session::read_channel),
+/// [`write_channel`](Session::write_channel), [`close_channel`](Session::close_channel),
+/// and the same methods on [`Connection`](crate::Connection) and the split
+/// [`Writer`](crate::Writer).
 /// A stale handle from a closed channel never aliases a later reopened
 /// one — it returns [`Error::ChannelClosed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -209,7 +207,7 @@ impl ChannelId {
     /// Build a `ChannelId` from raw `(slot, local_id)`. Intended for
     /// FFI bridges that round-trip a handle through an opaque integer;
     /// ordinary Rust callers should use the `ChannelId` returned by
-    /// [`Connection::open_channel`] directly.
+    /// [`Session::open_channel`] directly.
     pub fn from_raw(slot: usize, local_id: u32) -> Self {
         Self { slot, local_id }
     }
@@ -498,42 +496,33 @@ pub(crate) fn slot_for_mut(
         .filter(|s| s.local_id == ch.local_id)
 }
 
-/// An open ADB channel tied to a [`Connection`].
+/// An open ADB channel tied to a [`Session`].
 ///
 /// Provides [`read`](Self::read), [`write`](Self::write), and
-/// [`close`](Self::close) methods.  Created by [`Connection::open`].
+/// [`close`](Self::close) methods.  Created by [`Session::open`] or
+/// [`Connection::open`](crate::Connection::open).
 ///
-/// Because `Channel` holds a mutable borrow on the connection,
-/// only one `Channel` can be active at a time.  For concurrent access to
+/// Because `Channel` holds a mutable borrow on the session, only one
+/// `Channel` can be active at a time on it.  For concurrent access to
 /// multiple channels, use the [`ChannelId`]-based methods on
-/// [`Connection`] directly ([`open_channel`](Connection::open_channel),
-/// [`read_channel`](Connection::read_channel), etc.).
-pub struct Channel<
-    'a,
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
-    T: Read + Write,
-{
-    pub(crate) conn: &'a mut Connection<T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+/// [`Connection`](crate::Connection) directly
+/// ([`open_channel`](crate::Connection::open_channel),
+/// [`read_channel`](crate::Connection::read_channel), etc.), or split the
+/// connection and give each task a clone of the
+/// [`Writer`](crate::Writer).
+pub struct Channel<'a, S> {
+    pub(crate) session: &'a mut S,
     pub(crate) id: ChannelId,
 }
 
-impl<'a, T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
+impl<S: Session> Channel<'_, S> {
     /// Read data from the channel into `buf`.
     ///
     /// Returns the number of bytes read. If data was already buffered
     /// (from a previous WRTE) the call returns immediately. Otherwise it
-    /// blocks until a WRTE arrives for this channel, buffering messages
-    /// for other channels in the meantime.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<<T as ErrorType>::Error>> {
-        self.conn.read_channel(self.id, buf).await
+    /// waits until a WRTE arrives for this channel.
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
+        self.session.read_channel(self.id, buf).await
     }
 
     /// Write data to the channel.
@@ -541,8 +530,8 @@ where
     /// Data is split into `max_payload`-sized chunks with appropriate
     /// flow-control (OKAY acknowledgement in legacy mode, credit-based
     /// budgeting in delayed ACK mode).
-    pub async fn write(&mut self, data: &[u8]) -> Result<(), Error<<T as ErrorType>::Error>> {
-        self.conn.write_channel(self.id, data).await
+    pub async fn write(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
+        self.session.write_channel(self.id, data).await
     }
 
     /// Read from the channel, but return early if `interrupt` resolves first.
@@ -552,13 +541,14 @@ where
     /// If `interrupt` wins, the channel state is unchanged and the next
     /// call resumes normally.
     ///
-    /// How quickly `interrupt` can win depends on the transport. Over
-    /// TCP it is raced against the read itself, so a pending read is
-    /// dropped the moment the interrupt is due. A transport that would
-    /// lose data that way — USB, where cancelling a bulk transfer
-    /// discards what the device already wrote into it — has the
-    /// interrupt checked between reads instead, so it takes effect once
-    /// the read in flight has finished. See
+    /// How quickly `interrupt` can win depends on the session. On a
+    /// split [`Writer`](crate::Writer) it is raced against the wait for
+    /// data. On a [`Connection`](crate::Connection) over TCP it is raced against the read
+    /// itself, so a pending read is dropped the moment the interrupt is
+    /// due. A transport that would lose data that way — USB, where
+    /// cancelling a bulk transfer discards what the device already
+    /// wrote into it — has the interrupt checked between reads instead,
+    /// so it takes effect once the read in flight has finished. See
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// ```ignore
@@ -575,18 +565,15 @@ where
         &mut self,
         buf: &mut [u8],
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
-    where
-        T: crate::transport::ReadCancelSafety,
-    {
-        self.conn.select_channel(self.id, buf, interrupt).await
+    ) -> Result<SelectResult<F::Output>, Error<S::IoError>> {
+        self.session.select_channel(self.id, buf, interrupt).await
     }
 
     /// Close the channel, sending CLSE to the device and freeing the slot.
     ///
     /// Consumes the `Channel`.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
-        self.conn.close_channel(self.id).await
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
+        self.session.close_channel(self.id).await
     }
 }
 

@@ -393,12 +393,12 @@ where
     pub async fn open(
         &mut self,
         destination: &[u8],
-    ) -> Result<
-        Channel<'_, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
-        Error<<T as ErrorType>::Error>,
-    > {
+    ) -> Result<Channel<'_, Self>, Error<<T as ErrorType>::Error>>
+    where
+        T: crate::transport::ReadCancelSafety,
+    {
         let id = self.open_channel(destination).await?;
-        Ok(Channel { conn: self, id })
+        Ok(Channel { session: self, id })
     }
 
     /// Open a channel, returning a [`ChannelId`] for multiplexed use.

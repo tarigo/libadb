@@ -27,15 +27,11 @@
 //! collects output into a single caller-owned buffer.
 
 use core::future::Future;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::base::channel::{Channel, SelectResult};
-use crate::base::connection::{
-    Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
 use crate::base::destination::{self, DestinationError};
 use crate::base::error::Error;
+use crate::base::session::Session;
 
 fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"exec:", command.as_bytes()], &[])
@@ -46,35 +42,23 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
 /// Provides named methods for reading the combined stdout+stderr byte
 /// stream, forwarding stdin, and integrating with [`Channel::select`]
 /// for full-duplex use. Output is binary-clean.
-pub struct Exec<
-    'a,
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
-    T: Read + Write,
-{
-    channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+pub struct Exec<'a, S> {
+    channel: Channel<'a, S>,
 }
 
-impl<'a, T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Exec<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
+impl<'a, S: Session> Exec<'a, S> {
     /// Read raw output bytes from the device into `buf`. Returns the
     /// number of bytes read.
     ///
     /// Output combines stdout and stderr in whatever order the device
     /// produced them. [`Error::ChannelClosed`] signals that the remote
     /// command has exited.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<<T as ErrorType>::Error>> {
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
         self.channel.read(buf).await
     }
 
     /// Send raw bytes to the device as stdin.
-    pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
         self.channel.write(data).await
     }
 
@@ -94,15 +78,12 @@ where
         &mut self,
         buf: &mut [u8],
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
-    where
-        T: crate::transport::ReadCancelSafety,
-    {
+    ) -> Result<SelectResult<F::Output>, Error<S::IoError>> {
         self.channel.select(buf, interrupt).await
     }
 
     /// Close the underlying channel.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
     }
 }
@@ -116,20 +97,18 @@ where
 /// `exec:<command>\0` destination string. It must be at least
 /// `command.len() + 6` bytes long; [`Error::ReceiveBufferFull`] is
 /// returned otherwise. The buffer is free for reuse after this call
-/// returns — [`Connection::open`] copies the destination internally.
+/// returns — opening copies the destination internally.
 ///
-/// The channel borrows `conn`, so only one exec session can exist at a
-/// time over a given connection.
-pub async fn open<'a, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+/// The channel borrows `session`, so only one exec session can exist
+/// at a time over it. A split connection runs several at once, each over
+/// its own clone of the [`Writer`](crate::Writer).
+pub async fn open<'a, S: Session>(
+    session: &'a mut S,
     command: &str,
     dest_buf: &mut [u8],
-) -> Result<Exec<'a, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+) -> Result<Exec<'a, S>, Error<S::IoError>> {
     let dest_len = write_destination(dest_buf, command)?;
-    let channel = conn.open(&dest_buf[..dest_len]).await?;
+    let channel = session.open(&dest_buf[..dest_len]).await?;
     Ok(Exec { channel })
 }
 
@@ -146,16 +125,13 @@ where
 /// Note: `exec:` provides no exit code. If the caller needs one, use
 /// [`shell::v2::exec`](crate::shell::v2::exec) on devices that advertise
 /// the `shell_v2` feature.
-pub async fn run<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn run<S: Session>(
+    session: &mut S,
     command: &str,
     buf: &mut [u8],
-) -> Result<usize, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
+) -> Result<usize, Error<S::IoError>> {
     let dest_len = write_destination(buf, command)?;
-    let channel = conn.open(&buf[..dest_len]).await?;
+    let channel = session.open(&buf[..dest_len]).await?;
     let mut session = Exec { channel };
 
     let mut tail = 0;

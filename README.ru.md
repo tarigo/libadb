@@ -228,7 +228,9 @@ let conn = Connection::<_>::connect_with_config(
   разные нижележащие типы), поэтому смена бэкенда затрагивает код,
   который называет эти типы.
 - Любой тип, реализующий `embedded_io_async::{Read, Write}` +
-  `libadb::Splittable`, работает как свой транспорт
+  `libadb::Splittable`, работает как свой транспорт; модулям сервисов
+  нужен ещё `transport::ReadCancelSafety`, по которому `select` знает,
+  можно ли бросить чтение на полпути
 
 Рантайм и бэкенд выбираются в месте вызова, поэтому в сборке могут
 жить сразу все:
@@ -252,7 +254,29 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 
 `Connection::split()` возвращает полнодуплексную пару `Reader` /
 `Writer` — задача-читатель и задача-писатель могут работать на одном
-соединении, не блокируя друг друга.
+соединении, не блокируя друг друга. Отдайте `Reader` в `Reader::run`, и
+соединение обслуживает сколько угодно каналов сразу: каждый модуль
+сервисов принимает `libadb::Session` — `Connection` или `Writer`, — так
+что каждая задача ведёт свой shell, logcat или sync через клон
+`Writer` и не ждёт чужого трафика. По USB, где устройство допускает
+одно соединение, так несколько сервисов его и делят.
+
+```rust,ignore
+let (reader, writer) = conn.split()?;
+tokio::spawn(reader.run());
+
+let mut logs = writer.clone();
+tokio::spawn(async move {
+    let mut rx = vec![0; 64 * 1024];
+    let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
+    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    Ok::<_, libadb::Error<_>>(())
+});
+
+let mut shell = writer.clone();
+let mut rx = vec![0; 64 * 1024];
+let out = shell::v2::exec(&mut shell, "getprop ro.product.model", &mut rx).await?;
+```
 
 ## C ABI (`libadb-ffi`)
 

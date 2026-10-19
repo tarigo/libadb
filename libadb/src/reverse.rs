@@ -29,6 +29,7 @@ use core::future::Future;
 
 use crate::base::channel::ChannelId;
 use crate::base::error::{Error, ProtocolError, ReverseError};
+use crate::base::session::Session;
 
 /// Replies are tiny (a port number, a listing); anything past this is
 /// not the service we think we are talking to.
@@ -36,10 +37,9 @@ const REPLY_CAP: usize = 64 * 1024;
 
 /// A connection the reverse service can drive: open a service channel,
 /// read it to close, close it back to free the slot. Implemented for
-/// both [`Connection`] and the split [`Reader`], so the FFI's split
-/// halves reach it too.
+/// every [`Session`] and for the split [`Reader`] driving its own
+/// reads, so the FFI's split halves reach it too.
 ///
-/// [`Connection`]: crate::Connection
 /// [`Reader`]: crate::Reader
 pub trait ReverseChannel {
     /// Transport error carried by this connection's [`Error`].
@@ -70,12 +70,8 @@ pub trait ReverseChannel {
     ) -> impl Future<Output = Result<(), Error<Self::IoError>>>;
 }
 
-impl<T, const MC: usize, const MP: usize, const MF: usize> ReverseChannel
-    for crate::base::connection::Connection<T, MC, MP, MF>
-where
-    T: embedded_io_async::Read + embedded_io_async::Write,
-{
-    type IoError = <T as embedded_io::ErrorType>::Error;
+impl<S: Session> ReverseChannel for S {
+    type IoError = S::IoError;
 
     async fn open_service_channel(
         &mut self,

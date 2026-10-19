@@ -518,14 +518,16 @@ async fn split_run_serves_a_channel_while_another_waits() {
         assert_eq!(okay.arg0, open_b.arg0);
 
         s.send(CMD_WRTE, 100, open_a.arg0, b"late").await;
-        let (okay, _) = s.expect(CMD_OKAY).await;
-        assert_eq!(okay.arg0, open_a.arg0);
-
-        let mut closes = 0;
-        while closes < 2 {
+        let (mut acked, mut closes) = (false, 0);
+        while !acked || closes < 2 {
             let (hdr, _) = s.recv().await;
-            if hdr.command == CMD_CLSE {
-                closes += 1;
+            match hdr.command {
+                CMD_OKAY => {
+                    assert_eq!(hdr.arg0, open_a.arg0);
+                    acked = true;
+                }
+                CMD_CLSE => closes += 1,
+                other => panic!("unexpected command 0x{other:08X}"),
             }
         }
     })
