@@ -606,6 +606,50 @@ async fn split_writer_open_channel_reports_refusal() {
 }
 }
 
+// A device may accept a channel, answer and close it before the opener
+// looks again. The opener polls once, so OPEN is out; `run` then takes
+// READY, WRTE and CLSE in one go; only then does the opener look. The
+// channel was opened, so the opener gets it, with its data to read.
+rt_test! {
+async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        s.send(CMD_WRTE, 300, open.arg0, b"bye").await;
+        s.send(CMD_CLSE, 300, open.arg0, &[]).await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(okay.arg0, open.arg0);
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let mut open = core::pin::pin!(writer.open_channel(b"svc:\0"));
+    assert!(poll_once(open.as_mut()).await.is_pending());
+    rt::sleep_ms(100).await;
+    let mut run = core::pin::pin!(reader.run());
+    assert!(poll_once(run.as_mut()).await.is_pending());
+
+    let ch = match poll_once(open.as_mut()).await {
+        core::task::Poll::Ready(opened) => opened.expect("the device opened the channel"),
+        core::task::Poll::Pending => panic!("open still waiting after READY"),
+    };
+    let mut buf = [0u8; 8];
+    let n = writer.read_channel(ch, &mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"bye");
+    let err = writer.read_channel(ch, &mut buf).await.unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its OKAY");
+}
+}
+
+async fn poll_once<F: core::future::Future>(
+    mut f: core::pin::Pin<&mut F>,
+) -> core::task::Poll<F::Output> {
+    core::future::poll_fn(|cx| core::task::Poll::Ready(f.as_mut().poll(cx))).await
+}
+
 // Data the device sent before closing is still read; after it the
 // channel reports `ChannelClosed`.
 rt_test! {
