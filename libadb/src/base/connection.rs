@@ -232,6 +232,18 @@ async fn dispatch_to<T: Write>(
         DispatchOutcome::CancelPendingOpen { remote_id } => {
             incoming.retain(|p| p.remote_id != remote_id);
         }
+        DispatchOutcome::StrayReady {
+            local_id,
+            remote_id,
+        } => {
+            send_pkt(
+                transport,
+                desync,
+                &Packet::close(local_id, remote_id),
+                checksum,
+            )
+            .await?;
+        }
         // The fault surfaces on whichever call is driving the
         // connection, and the channel itself stays as it was.
         DispatchOutcome::ChannelFault { fault, .. } => return Err(fault.error()),
@@ -415,11 +427,12 @@ where
     /// the initial send budget granted by the device.
     ///
     /// **Not cancellation-safe.** Dropping the future after the OPEN
-    /// packet has been sent leaves the device-side channel half-open
-    /// until the connection is closed — async Drop cannot send the
-    /// matching CLSE. If the call returns `Err`, a best-effort CLSE is
-    /// sent before the error propagates. Dropping it mid-packet is
-    /// worse: see [`write_channel`](Self::write_channel).
+    /// packet has been sent gives the channel up before the device
+    /// answers. Should it accept after all, the next call that reads
+    /// the connection answers its READY with CLSE, so the device's end
+    /// does not stay open; the same goes for an `Err` returned before
+    /// the answer. Dropping it mid-packet is worse: see
+    /// [`write_channel`](Self::write_channel).
     pub async fn open_channel(
         &mut self,
         destination: &[u8],
@@ -441,22 +454,7 @@ where
         let checksum = self.checksum();
         send_pkt(&mut self.transport, &self.desync, &pkt, checksum).await?;
 
-        let result = self.await_open_ack(local_id, slot_idx).await;
-        if let Err(ref e) = result {
-            if !matches!(e, Error::ChannelClosed) {
-                let _ = send_raw(
-                    &mut self.transport,
-                    &self.desync,
-                    Command::Close,
-                    local_id,
-                    0,
-                    &[],
-                    checksum,
-                )
-                .await;
-            }
-        }
-        result
+        self.await_open_ack(local_id, slot_idx).await
     }
 
     async fn await_open_ack(

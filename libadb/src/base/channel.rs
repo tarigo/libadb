@@ -73,6 +73,14 @@ pub(crate) enum DispatchOutcome {
     CancelPendingOpen {
         remote_id: u32,
     },
+    /// A READY for no channel of ours: the device accepted an OPEN its
+    /// opener gave up on before the answer. Answer CLSE with both ids —
+    /// adbd ignores one that does not name its own — or the device's
+    /// end stays open.
+    StrayReady {
+        local_id: u32,
+        remote_id: u32,
+    },
     /// A packet broke this slot's channel alone. The slot is not
     /// closed: whoever dispatched decides what the fault costs.
     ChannelFault {
@@ -214,6 +222,12 @@ pub(crate) fn dispatch_packet(
             }
             _ => {}
         }
+    }
+    if pkt.command == Command::Ready && pkt.arg0 != 0 && pkt.arg1 != 0 {
+        return DispatchOutcome::StrayReady {
+            local_id: pkt.arg1,
+            remote_id: pkt.arg0,
+        };
     }
     DispatchOutcome::Unmatched
 }

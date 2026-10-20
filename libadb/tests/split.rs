@@ -10,15 +10,9 @@ mod rt;
 mod fake_device;
 use fake_device::{session, session_with_config, wrap, FakeDevice, TestAuth};
 
-macro_rules! rt_test {
-    ($(#[$attr:meta])* async fn $name:ident() $body:block) => {
-        $(#[$attr])*
-        #[test]
-        fn $name() {
-            $crate::rt::block_on(async move $body);
-        }
-    };
-}
+#[path = "common/common.rs"]
+mod common;
+use common::poll_once;
 
 const DA_BANNER: &[u8] = b"device::features=delayed_ack";
 const DA_MAX_PAYLOAD: u32 = 16;
@@ -607,25 +601,31 @@ async fn split_writer_open_channel_reports_refusal() {
 }
 }
 
-// An OPEN given up on before the device answered — here because the
-// Reader is gone — is closed again, so the device does not keep its
-// end half-open.
+// An OPEN given up on before the device answered leaves nothing open
+// on the device: `run` answers the READY that comes for it later with
+// a CLSE naming the device's id, which adbd needs to find the channel.
 rt_test! {
-async fn split_writer_open_channel_closes_an_open_it_gave_up_on() {
+async fn split_run_closes_a_channel_its_opener_gave_up_on() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
-        let (open, _) = s.expect(CMD_OPEN).await;
+        let (a, _) = s.expect(CMD_OPEN).await;
+        let (b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, a.arg0, &[]).await;
         let (close, _) = s.expect(CMD_CLSE).await;
-        assert_eq!((close.arg0, close.arg1), (open.arg0, 0));
+        assert_eq!((close.arg0, close.arg1), (a.arg0, 300));
+        s.send(CMD_OKAY, 301, b.arg0, &[]).await;
     })
     .await;
 
     let (reader, writer) = conn.split().unwrap();
-    let mut open = core::pin::pin!(writer.open_channel(b"svc:\0"));
-    assert!(poll_once(open.as_mut()).await.is_pending());
-    drop(reader);
-
-    let err = open.await.unwrap_err();
-    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+    let _driver = rt::spawn(reader.run());
+    {
+        let mut open = core::pin::pin!(writer.open_channel(b"a:\0"));
+        assert!(poll_once(open.as_mut()).await.is_pending());
+    }
+    rt::timeout_ms(5000, writer.open_channel(b"b:\0"))
+        .await
+        .expect("open b hung")
+        .unwrap();
     rt::timeout_ms(5000, rt::join(device))
         .await
         .expect("device never got its CLSE");
@@ -669,12 +669,6 @@ async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
         .await
         .expect("device never got its OKAY");
 }
-}
-
-async fn poll_once<F: core::future::Future>(
-    mut f: core::pin::Pin<&mut F>,
-) -> core::task::Poll<F::Output> {
-    core::future::poll_fn(|cx| core::task::Poll::Ready(f.as_mut().poll(cx))).await
 }
 
 // Data the device sent before closing is still read; after it the
