@@ -394,6 +394,7 @@ where
             stopped: AtomicBool::new(false),
             listeners: AtomicUsize::new(0),
             incoming_signal: event_listener::Event::new(),
+            owed_closes: std::sync::Mutex::new(alloc::vec::Vec::new()),
         });
 
         let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));

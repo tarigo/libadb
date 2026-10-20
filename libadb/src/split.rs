@@ -133,6 +133,10 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(crate) incoming_signal: Event,
+    /// CLSEs for channels the device accepted just as their opener gave
+    /// up, `(local id, remote id)`: `Drop` cannot send them, so whoever
+    /// takes the write half next does.
+    pub(crate) owed_closes: Mutex<Vec<(u32, u32)>>,
 }
 
 impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
@@ -155,6 +159,10 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     fn lock_staged(&self) -> std::sync::MutexGuard<'_, Vec<(u32, Arc<AtomicBool>)>> {
         self.staged.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn lock_owed(&self) -> std::sync::MutexGuard<'_, Vec<(u32, u32)>> {
+        self.owed_closes.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Reserve a free slot and send OPEN for `destination` — the start
@@ -185,7 +193,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
             0
         };
         {
-            let mut wh = self.lock_write().await;
+            let mut wh = self.lock_write().await?;
             send_raw(
                 &mut *wh,
                 &self.desync,
@@ -222,7 +230,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
             return Ok(());
         }
         self.signals[idx].wake();
-        let mut wh = self.lock_write().await;
+        let mut wh = self.lock_write().await?;
         send_pkt(
             &mut *wh,
             &self.desync,
@@ -257,7 +265,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
                 return Ok(taken.map(|(n, _)| n));
             }
         }
-        let mut wh = self.lock_write().await;
+        let mut wh = self.lock_write().await?;
         let taken = {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
@@ -290,7 +298,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     where
         WH: Write,
     {
-        let mut wh = self.lock_write().await;
+        let mut wh = self.lock_write().await?;
         send_okay_to(
             &mut *wh,
             &self.desync,
@@ -389,11 +397,29 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         Ok(())
     }
 
-    /// Take the write half for one packet.
-    async fn lock_write(&self) -> WriteLock<'_, WH, MC, MP, MF> {
-        WriteLock {
+    /// Take the write half for one packet, once the owed CLSEs are out.
+    async fn lock_write(
+        &self,
+    ) -> Result<WriteLock<'_, WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let mut lock = WriteLock {
             guard: self.write_half.lock().await,
             shared: self,
+        };
+        loop {
+            let owed = self.lock_owed().pop();
+            let Some((local_id, remote_id)) = owed else {
+                return Ok(lock);
+            };
+            send_pkt(
+                &mut *lock,
+                &self.desync,
+                &Packet::close(local_id, remote_id),
+                self.checksum(),
+            )
+            .await?;
         }
     }
 }
@@ -459,8 +485,15 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for SlotGuard<W
             return;
         }
         let mut chs = self.shared.lock_channels();
-        if self.idx < chs.len() {
-            chs[self.idx] = None;
+        let Some(slot) = chs.get_mut(self.idx).and_then(Option::take) else {
+            return;
+        };
+        // The device accepted before the opener gave up: its end is
+        // open, and the CLSE for it is owed to whoever writes next.
+        if slot.remote_id != 0 && slot.failed.is_none() {
+            self.shared
+                .lock_owed()
+                .push((slot.local_id, slot.remote_id));
         }
     }
 }
@@ -748,6 +781,11 @@ where
             )
             .await?;
             self.dispatch(pkt, OnFault::CloseChannel).await?;
+            // Owed CLSEs go out now, not whenever some task next writes.
+            let owes = !self.shared.lock_owed().is_empty();
+            if owes {
+                drop(self.shared.lock_write().await?);
+            }
             if self.shared.listeners.load(Ordering::Acquire) > 0 {
                 continue;
             }
@@ -991,7 +1029,7 @@ where
                 local_id,
                 remote_id,
             } => {
-                let mut wh = self.shared.lock_write().await;
+                let mut wh = self.shared.lock_write().await?;
                 send_pkt(
                     &mut *wh,
                     &self.shared.desync,
@@ -1126,7 +1164,7 @@ where
         };
         let Some((slot_idx, local_id)) = reserved else {
             // No slot to give: refuse, and consume the request.
-            let mut wh = shared.lock_write().await;
+            let mut wh = shared.lock_write().await?;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -1148,7 +1186,7 @@ where
             &[]
         };
         {
-            let mut wh = shared.lock_write().await;
+            let mut wh = shared.lock_write().await?;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -1187,7 +1225,7 @@ where
         let shared = Arc::clone(&self.shared);
         let checksum = shared.checksum();
         {
-            let mut wh = shared.lock_write().await;
+            let mut wh = shared.lock_write().await?;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -1319,9 +1357,11 @@ where
     ///
     /// **Not cancellation-safe.** Dropping the future after OPEN went
     /// out gives the channel up before the device answers. Should it
-    /// accept after all, `run` answers its READY with CLSE, so the
-    /// device's end does not stay open — unless the [`Reader`] is gone
-    /// by then, and with it whatever would read that READY.
+    /// accept after all, `run` answers its READY with CLSE; if `run`
+    /// took that READY before the drop, the CLSE goes out with the
+    /// next packet anyone writes or `run` receives. Either way the
+    /// device's end does not stay open for long — unless the
+    /// [`Reader`] is gone, and with it whatever would read the READY.
     pub async fn open_channel(
         &self,
         destination: &[u8],
@@ -1490,7 +1530,7 @@ where
             let chunk = &data[offset..offset + n];
 
             {
-                let mut wh = self.shared.lock_write().await;
+                let mut wh = self.shared.lock_write().await?;
                 send_raw(
                     &mut *wh,
                     &self.shared.desync,
@@ -1672,7 +1712,7 @@ where
         channel_ids_of(&*chs, ch)?
     };
     {
-        let mut wh = shared.lock_write().await;
+        let mut wh = shared.lock_write().await?;
         send_pkt(
             &mut *wh,
             &shared.desync,
@@ -2135,6 +2175,42 @@ mod tests {
         drop(wh);
         let n = now(writer.read_channel(ch, &mut buf)).unwrap();
         assert_eq!(&buf[..n], b"hello");
+    }
+
+    #[test]
+    fn an_opener_dropped_after_its_ready_was_taken_still_closes_the_channel() {
+        use core::task::{Context, Waker};
+
+        let mut mock = Mock::new();
+        mock.feed(&crate::base::mock::cnxn())
+            .feed(&okay(1))
+            // The device accepts the Writer's OPEN (local id 2), then
+            // writes on the first channel.
+            .feed(&Packet::new(Command::Ready, 43, 2, Vec::new()))
+            .feed(&Packet::new(Command::Write, 42, 1, b"x".to_vec()));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::<_>::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        {
+            let mut open = pin!(writer.open_channel(b"svc:\0"));
+            assert!(open
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
+            // Another call takes the READY; the opener never looks again.
+            let mut buf = [0u8; 4];
+            assert_eq!(now(reader.read_channel(ch, &mut buf)).unwrap(), 1);
+        }
+
+        // The next packet anyone writes goes out behind the owed CLSE.
+        now(writer.write_channel(ch, b"y")).unwrap();
+        let sent = seen.sent();
+        let tail: Vec<_> = sent[sent.len() - 2..]
+            .iter()
+            .map(|(cmd, arg0, arg1, _)| (*cmd, *arg0, *arg1))
+            .collect();
+        assert_eq!(tail, [(Command::Close, 2, 43), (Command::Write, 1, 42)]);
     }
 
     #[test]
