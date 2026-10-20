@@ -209,8 +209,10 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     }
 
     /// Close a channel a packet broke on its own: its calls fail with
-    /// `fault` from now on, and the device gets its CLSE. A channel
-    /// already closed and freed in the meantime is left alone.
+    /// `fault` from now on, and the device gets its CLSE. The CLSE goes
+    /// out even when the slot is gone by now — an opener given up on in
+    /// the meantime took it, and the device still holds its end; a
+    /// second CLSE for a channel already closed is one adbd ignores.
     async fn fail_channel(
         &self,
         idx: usize,
@@ -226,10 +228,9 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
             let slot = chs[idx].as_mut().filter(|s| s.local_id == local_id);
             slot.map(|s| s.fail(fault)).is_some()
         };
-        if !found {
-            return Ok(());
+        if found {
+            self.signals[idx].wake();
         }
-        self.signals[idx].wake();
         let mut wh = self.lock_write().await?;
         send_pkt(
             &mut *wh,
@@ -2211,6 +2212,20 @@ mod tests {
             .map(|(cmd, arg0, arg1, _)| (*cmd, *arg0, *arg1))
             .collect();
         assert_eq!(tail, [(Command::Close, 2, 43), (Command::Write, 1, 42)]);
+    }
+
+    #[test]
+    fn a_fault_closes_the_device_end_even_once_the_slot_is_gone() {
+        // The opener was given up on between the fault and this: its
+        // slot is free, but the device still holds the channel open.
+        let (reader, _writer, _ch) = split_with_channel(None);
+        let seen = reader.shared.write_half.try_lock().unwrap().clone();
+        now(reader
+            .shared
+            .fail_channel(5, 99, 77, ChannelFault::RxOverflow))
+        .unwrap();
+        let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
+        assert_eq!((cmd, arg0, arg1), (Command::Close, 99, 77));
     }
 
     #[test]
