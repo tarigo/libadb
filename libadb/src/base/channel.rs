@@ -456,22 +456,40 @@ impl ChannelSlot {
         delayed_ack: bool,
         watermark: usize,
     ) -> Option<(u32, u32, usize)> {
+        let len = self.ack_len(n, self.rx_buf.len(), delayed_ack, watermark)?;
+        self.unacked -= len;
+        Some((self.local_id, self.remote_id, len))
+    }
+
+    /// Whether taking up to `want` buffered bytes now would owe the
+    /// device an OKAY — what [`take_buffered`](Self::take_buffered)
+    /// would answer, without taking anything.
+    #[allow(dead_code)] // used only by split::Shared
+    pub fn take_acks(&self, want: usize, delayed_ack: bool, watermark: usize) -> bool {
+        let n = want.min(self.rx_buf.len());
+        let remaining = self.rx_buf.len() - n;
+        self.ack_len(n, remaining, delayed_ack, watermark).is_some()
+    }
+
+    /// How much taking `n` bytes acknowledges, `remaining` being what
+    /// the buffer holds once they are gone. With delayed ACK, the bytes
+    /// taken; without it, everything held back, once the buffer is
+    /// below `watermark` again.
+    fn ack_len(
+        &self,
+        n: usize,
+        remaining: usize,
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Option<usize> {
         if self.unacked == 0 {
             return None;
         }
         if delayed_ack {
             let len = n.min(self.unacked);
-            if len == 0 {
-                return None;
-            }
-            self.unacked -= len;
-            return Some((self.local_id, self.remote_id, len));
+            return (len > 0).then_some(len);
         }
-        if self.rx_buf.len() >= watermark {
-            return None;
-        }
-        let len = core::mem::take(&mut self.unacked);
-        Some((self.local_id, self.remote_id, len))
+        (remaining < watermark).then_some(self.unacked)
     }
 
     /// Copy buffered bytes into `buf`, and say what to acknowledge for
