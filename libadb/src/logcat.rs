@@ -56,12 +56,9 @@
 
 use alloc::vec::Vec;
 
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
-
 use crate::base::channel::Channel;
-use crate::base::connection::Connection;
 use crate::base::error::Error;
+use crate::base::session::Session;
 use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 
 /// A live `logcat -B` streaming session.
@@ -81,38 +78,16 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 /// STDOUT payloads are absorbed into the accumulation zone by shifting
 /// them over the 5-byte `shell_v2` header.  Non-STDOUT frames (stderr,
 /// exit) are skipped in-place.
-pub struct Logcat<
-    'a,
-    'b,
-    T,
-    const MAX_CHANNELS: usize = { crate::base::connection::DEFAULT_MAX_CHANNELS },
-    const MAX_PROPERTIES: usize = { crate::base::connection::DEFAULT_MAX_PROPERTIES },
-    const MAX_FEATURES: usize = { crate::base::connection::DEFAULT_MAX_FEATURES },
-> where
-    T: Read + Write,
-{
-    channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+pub struct Logcat<'a, 'b, S> {
+    channel: Channel<'a, S>,
     buf: &'b mut [u8],
     acc_end: usize,
     head: usize,
     tail: usize,
 }
 
-impl<
-        'a,
-        'b,
-        T,
-        const MAX_CHANNELS: usize,
-        const MAX_PROPERTIES: usize,
-        const MAX_FEATURES: usize,
-    > Logcat<'a, 'b, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
-    fn new(
-        channel: Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
-        buf: &'b mut [u8],
-    ) -> Self {
+impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
+    fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
         assert!(
             buf.len() >= shell_v2::HEADER_SIZE,
             "Logcat buffer must be at least {} bytes",
@@ -135,7 +110,7 @@ where
         }
     }
 
-    async fn fill_raw(&mut self, n: usize) -> Result<(), Error<<T as ErrorType>::Error>> {
+    async fn fill_raw(&mut self, n: usize) -> Result<(), Error<S::IoError>> {
         while self.tail - self.head < n {
             if self.tail >= self.buf.len() {
                 self.compact_raw();
@@ -166,7 +141,7 @@ where
     ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`].
-    pub async fn read_entry(&mut self) -> Result<LogEntry, Error<<T as ErrorType>::Error>> {
+    pub async fn read_entry(&mut self) -> Result<LogEntry, Error<S::IoError>> {
         loop {
             if let Some((entry, consumed)) =
                 parse_entry(&self.buf[..self.acc_end]).map_err(Error::Logcat)?
@@ -208,7 +183,7 @@ where
         }
     }
 
-    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<<T as ErrorType>::Error>> {
+    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<S::IoError>> {
         if let Some((entry, consumed)) =
             parse_entry(&self.buf[..self.acc_end]).map_err(Error::Logcat)?
         {
@@ -220,7 +195,7 @@ where
     }
 
     /// Close the underlying channel.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
     }
 }
@@ -233,18 +208,15 @@ fn write_destination(
     crate::base::destination::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
 }
 
-async fn open_shell_channel<'a, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+async fn open_shell_channel<'a, S: Session>(
+    session: &'a mut S,
     prefix: &[u8],
     args: &[&str],
     buf: &mut [u8],
-) -> Result<Channel<'a, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(crate::base::protocol::features::Feature::ShellV2)?;
+) -> Result<Channel<'a, S>, Error<S::IoError>> {
+    session.require_feature(crate::base::protocol::features::Feature::ShellV2)?;
     let dest_len = write_destination(buf, prefix, args)?;
-    conn.open(&buf[..dest_len]).await
+    session.open(&buf[..dest_len]).await
 }
 
 /// Open a streaming `logcat -B` session, returning a [`Logcat`] that
@@ -264,15 +236,12 @@ where
 /// `buf` is the caller-owned buffer used both for channel IO and for
 /// accumulating binary stdout data.  A few KiB is enough for typical
 /// use; increase for high-throughput streams.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     args: &[&str],
     buf: &'b mut [u8],
-) -> Result<Logcat<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let channel = open_shell_channel(conn, b"logcat -B", args, buf).await?;
+) -> Result<Logcat<'a, 'b, S>, Error<S::IoError>> {
+    let channel = open_shell_channel(session, b"logcat -B", args, buf).await?;
     Ok(Logcat::new(channel, buf))
 }
 
@@ -282,15 +251,12 @@ where
 /// to print the current log contents and exit instead of streaming.
 ///
 /// `args` and `buf` have the same meaning as in [`open`].
-pub async fn dump<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn dump<S: Session>(
+    session: &mut S,
     args: &[&str],
     buf: &mut [u8],
-) -> Result<Vec<LogEntry>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let channel = open_shell_channel(conn, b"logcat -B -d", args, buf).await?;
+) -> Result<Vec<LogEntry>, Error<S::IoError>> {
+    let channel = open_shell_channel(session, b"logcat -B -d", args, buf).await?;
     let mut logcat = Logcat::new(channel, buf);
 
     let mut entries = Vec::new();
@@ -301,6 +267,8 @@ where
             Err(e) => return Err(e),
         }
     }
+    // The device's CLSE only marks the slot closed; ours frees it.
+    let _ = logcat.close().await;
     Ok(entries)
 }
 
@@ -312,15 +280,12 @@ where
 ///
 /// For a one-shot dump pass `"-d"` in `args`; otherwise logcat streams
 /// indefinitely.
-pub async fn open_text<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open_text<'a, 'b, S: Session>(
+    session: &'a mut S,
     args: &[&str],
     rx: &'b mut [u8],
-) -> Result<Shell<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let channel = open_shell_channel(conn, b"logcat", args, rx).await?;
+) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
+    let channel = open_shell_channel(session, b"logcat", args, rx).await?;
     Ok(Shell::new(channel, rx))
 }
 
@@ -330,15 +295,12 @@ where
 /// `"-d"` (dump and exit) or `"-t"` / `"-T"` (last N entries) so that
 /// `logcat` terminates on its own; without one of these flags it will
 /// stream indefinitely and this function will never return.
-pub async fn exec_text<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn exec_text<S: Session>(
+    session: &mut S,
     args: &[&str],
     rx: &mut [u8],
-) -> Result<CommandOutput, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let channel = open_shell_channel(conn, b"logcat", args, rx).await?;
+) -> Result<CommandOutput, Error<S::IoError>> {
+    let channel = open_shell_channel(session, b"logcat", args, rx).await?;
     let mut shell = Shell::new(channel, rx);
     shell.close_stdin().await?;
     shell.collect().await

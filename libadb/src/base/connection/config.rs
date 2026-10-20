@@ -104,7 +104,9 @@ impl ConnectionConfig {
     /// the credit back under delayed ACK. Other channels and the
     /// connection stay usable, but this channel's byte stream now has a
     /// gap. The error surfaces on whichever call is driving the
-    /// connection, which may be a read on a different channel. The
+    /// connection, which may be a read on a different channel. On a
+    /// split connection driven by [`Reader::run`](crate::Reader::run)
+    /// it lands on this channel instead, which `run` closes. The
     /// effective cap is never below [`max_payload`](Self::max_payload),
     /// so one legal packet always fits.
     pub const fn with_max_rx_per_channel(mut self, bytes: usize) -> Self {

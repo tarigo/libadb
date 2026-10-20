@@ -1,24 +1,18 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
-use libadb::{Connection, Error};
+use libadb::{Connection, ConnectionConfig, Error, ProtocolError};
 
 #[path = "rt/rt.rs"]
 mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{session, wrap, FakeDevice, TestAuth};
+use fake_device::{session, session_with_config, wrap, FakeDevice, TestAuth};
 
-macro_rules! rt_test {
-    ($(#[$attr:meta])* async fn $name:ident() $body:block) => {
-        $(#[$attr])*
-        #[test]
-        fn $name() {
-            $crate::rt::block_on(async move $body);
-        }
-    };
-}
+#[path = "common/common.rs"]
+mod common;
+use common::poll_once;
 
 const DA_BANNER: &[u8] = b"device::features=delayed_ack";
 const DA_MAX_PAYLOAD: u32 = 16;
@@ -491,5 +485,489 @@ async fn split_two_cloned_writers_make_progress_on_different_channels() {
     assert_eq!(payloads.len(), 2);
     assert!(payloads.iter().any(|p| p.as_slice() == b"alpha"));
     assert!(payloads.iter().any(|p| p.as_slice() == b"beta"));
+}
+}
+
+// ---------------------------------------------------------------------------
+// Dispatched mode — `Reader::run` receives every packet, and channels are
+// opened and read through the `Writer`.
+// ---------------------------------------------------------------------------
+
+// A channel with nothing to read must not hold up another: the idle
+// read on channel `a` stays parked while a request on `b` gets its
+// answer, and only then does `a` receive its data.
+rt_test! {
+async fn split_run_serves_a_channel_while_another_waits() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open_a, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 100, open_a.arg0, &[]).await;
+        let (open_b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 200, open_b.arg0, &[]).await;
+
+        let (wrte, data) = s.expect(CMD_WRTE).await;
+        assert_eq!((wrte.arg0, data.as_slice()), (open_b.arg0, &b"ping"[..]));
+        s.send(CMD_OKAY, 200, open_b.arg0, &[]).await;
+        s.send(CMD_WRTE, 200, open_b.arg0, b"pong").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(okay.arg0, open_b.arg0);
+
+        s.send(CMD_WRTE, 100, open_a.arg0, b"late").await;
+        let (mut acked, mut closes) = (false, 0);
+        while !acked || closes < 2 {
+            let (hdr, _) = s.recv().await;
+            match hdr.command {
+                CMD_OKAY => {
+                    assert_eq!(hdr.arg0, open_a.arg0);
+                    acked = true;
+                }
+                CMD_CLSE => closes += 1,
+                other => panic!("unexpected command 0x{other:08X}"),
+            }
+        }
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let driver = rt::spawn(reader.run());
+
+    let a = rt::timeout_ms(5000, writer.open_channel(b"a:\0"))
+        .await
+        .expect("open a hung")
+        .unwrap();
+    let b = rt::timeout_ms(5000, writer.open_channel(b"b:\0"))
+        .await
+        .expect("open b hung")
+        .unwrap();
+
+    let idle = {
+        let writer = writer.clone();
+        rt::spawn(async move {
+            let mut buf = [0u8; 16];
+            let n = writer.read_channel(a, &mut buf).await.unwrap();
+            buf[..n].to_vec()
+        })
+    };
+
+    writer.write_channel(b, b"ping").await.unwrap();
+    let mut buf = [0u8; 16];
+    let n = rt::timeout_ms(5000, writer.read_channel(b, &mut buf))
+        .await
+        .expect("read on b waited for the idle channel a")
+        .unwrap();
+    assert_eq!(&buf[..n], b"pong");
+
+    let late = rt::timeout_ms(5000, rt::join(idle))
+        .await
+        .expect("idle read on a never woke");
+    assert_eq!(late, b"late");
+
+    writer.close_channel(a).await.unwrap();
+    writer.close_channel(b).await.unwrap();
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device hung");
+    rt::timeout_ms(5000, rt::join(driver))
+        .await
+        .expect("run kept going after the device left")
+        .unwrap_err();
+}
+}
+
+// A device that refuses the OPEN answers with CLSE; the Writer reports
+// it as `ChannelClosed` and frees the slot it had reserved.
+rt_test! {
+async fn split_writer_open_channel_reports_refusal() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_CLSE, 0, open.arg0, &[]).await;
+        s.accept_open(b"accepted:\0").await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    let err = rt::timeout_ms(5000, writer.open_channel(b"refused:\0"))
+        .await
+        .expect("refused open hung")
+        .unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+
+    rt::timeout_ms(5000, writer.open_channel(b"accepted:\0"))
+        .await
+        .expect("open after a refusal hung")
+        .unwrap();
+    rt::join(device).await;
+}
+}
+
+// An OPEN given up on before the device answered leaves nothing open
+// on the device: `run` answers the READY that comes for it later with
+// a CLSE naming the device's id, which adbd needs to find the channel.
+rt_test! {
+async fn split_run_closes_a_channel_its_opener_gave_up_on() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (a, _) = s.expect(CMD_OPEN).await;
+        let (b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, a.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (a.arg0, 300));
+        s.send(CMD_OKAY, 301, b.arg0, &[]).await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    {
+        let mut open = core::pin::pin!(writer.open_channel(b"a:\0"));
+        assert!(poll_once(open.as_mut()).await.is_pending());
+    }
+    rt::timeout_ms(5000, writer.open_channel(b"b:\0"))
+        .await
+        .expect("open b hung")
+        .unwrap();
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its CLSE");
+}
+}
+
+// A device may accept a channel, answer and close it before the opener
+// looks again. The opener polls once, so OPEN is out; `run` then takes
+// READY, WRTE and CLSE and runs to its end; only then does the opener
+// look. The channel was opened, so the opener gets it, with its data.
+rt_test! {
+async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"bye").await;
+        ch.send_close().await;
+        ch.expect_ack().await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let mut open = core::pin::pin!(writer.open_channel(b"svc:\0"));
+    assert!(poll_once(open.as_mut()).await.is_pending());
+    // `run` ends once the device, having had its OKAY, hangs up: by
+    // then it has taken READY, WRTE and CLSE, however slow the machine.
+    rt::timeout_ms(5000, reader.run())
+        .await
+        .expect("run kept going after the device left")
+        .unwrap_err();
+
+    let ch = match poll_once(open.as_mut()).await {
+        core::task::Poll::Ready(opened) => opened.expect("the device opened the channel"),
+        core::task::Poll::Pending => panic!("open still waiting after READY"),
+    };
+    let mut buf = [0u8; 8];
+    let n = writer.read_channel(ch, &mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"bye");
+    let err = writer.read_channel(ch, &mut buf).await.unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its OKAY");
+}
+}
+
+// Data the device sent before closing is still read; after it the
+// channel reports `ChannelClosed`.
+rt_test! {
+async fn split_writer_read_channel_drains_then_reports_close() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"bye").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 8];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"bye");
+
+    let err = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read after the device closed hung")
+        .unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    rt::join(device).await;
+}
+}
+
+// With delayed ACK the credit for data goes back when it is read, not
+// when it arrives.
+rt_test! {
+async fn split_writer_read_channel_returns_credit_as_it_reads() {
+    let dev = FakeDevice::new()
+        .banner(DA_BANNER)
+        .max_payload(DA_MAX_PAYLOAD)
+        .delayed_ack(64);
+    let (conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.send_write(b"abcdef").await;
+        ch.expect_ack().await
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 4];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"abcd");
+
+    let acked = rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("credit never returned");
+    assert_eq!(acked, 4);
+}
+}
+
+// Once the device is gone, `run` returns, and the Writer stops waiting:
+// a parked read and any later open fail with `Disconnected`.
+rt_test! {
+async fn split_waiters_see_disconnected_when_reception_ends() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let _ch = s.accept_open(b"svc:\0").await;
+        rt::sleep_ms(100).await;
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let mut buf = [0u8; 8];
+    let err = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read parked forever on a dead connection")
+        .unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+
+    let err = writer.open_channel(b"svc:\0").await.unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+
+    rt::join(device).await;
+    rt::join(driver).await.unwrap_err();
+}
+}
+
+// Nobody accepts device-initiated channels while `run` owns the reader,
+// so it refuses them instead of leaving the device waiting.
+rt_test! {
+async fn split_run_refuses_device_initiated_open() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    let (reader, _writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its refusal");
+}
+}
+
+// A packet that breaks one channel alone stays there: the device floods
+// `b` past its cap, `run` closes `b`, its reader drains what fit and
+// then gets the overflow, and `a` carries on.
+rt_test! {
+async fn split_run_closes_only_the_channel_a_packet_broke() {
+    const CHUNK: usize = 4096;
+    let config = ConnectionConfig::new()
+        .with_max_payload(CHUNK as u32)
+        .with_max_rx_per_channel(2 * CHUNK);
+    let dev = FakeDevice::new().max_payload(CHUNK as u32);
+    let (conn, device) = session_with_config(dev, b"host::", config, |mut s| async move {
+        let (a_dev, a_cli) = {
+            let ch = s.accept_open(b"a:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        let (b_dev, b_cli) = {
+            let ch = s.accept_open(b"b:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        for _ in 0..3 {
+            s.send(CMD_WRTE, b_dev, b_cli, &[0xEE; CHUNK]).await;
+        }
+        // Still in flight when `b` is closed: dropped, not read after
+        // the gap or taken for another overflow.
+        s.send(CMD_WRTE, b_dev, b_cli, b"late").await;
+        // The first fits under the watermark and is acknowledged; the
+        // third does not fit at all, and `b` is closed for it.
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (b_cli, b_dev));
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (b_cli, b_dev));
+
+        s.send(CMD_WRTE, a_dev, a_cli, b"fine").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (a_cli, a_dev));
+        s
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let a = writer.open_channel(b"a:\0").await.unwrap();
+    let b = writer.open_channel(b"b:\0").await.unwrap();
+
+    let mut buf = vec![0u8; 2 * CHUNK];
+    let n = rt::timeout_ms(5000, writer.read_channel(a, &mut buf))
+        .await
+        .expect("read on a hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"fine");
+
+    let n = writer.read_channel(b, &mut buf).await.unwrap();
+    assert_eq!(n, 2 * CHUNK, "what fit before the overflow is still read");
+    let err = writer.read_channel(b, &mut buf).await.unwrap_err();
+    assert!(matches!(err, Error::ChannelRxOverflow), "got {err:?}");
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device hung");
+}
+}
+
+// With a listener alive, `run` keeps a device-initiated channel for it
+// instead of refusing it, and the accepted channel then works on the
+// Writer like any other.
+rt_test! {
+async fn split_run_hands_device_initiated_open_to_a_listener() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (ready, _) = s.expect(CMD_OKAY).await;
+        assert_eq!(ready.arg1, 7);
+        s.send(CMD_WRTE, 7, ready.arg0, b"hello").await;
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (ready.arg0, 7));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let listener = writer.listen_incoming();
+    let _driver = rt::spawn(reader.run());
+    // The OPEN arrives and is dispatched before anyone waits for it:
+    // the listener alone has to keep `run` from refusing it.
+    rt::sleep_ms(100).await;
+
+    let incoming = rt::timeout_ms(5000, listener.accept())
+        .await
+        .expect("the OPEN never reached the listener")
+        .unwrap();
+    assert_eq!(incoming.destination(), b"tcp:1234\0");
+    let ch = incoming.accept().await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = rt::timeout_ms(5000, writer.read_channel(ch, &mut buf))
+        .await
+        .expect("read hung")
+        .unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    rt::join(device).await;
+}
+}
+
+// A request handed back undecided goes to a listener already waiting,
+// rather than sit in the queue until some other OPEN wakes it.
+rt_test! {
+async fn split_listener_gets_a_request_handed_back_undecided() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let listener = writer.listen_incoming();
+    let _driver = rt::spawn(reader.run());
+
+    let first = rt::timeout_ms(5000, listener.accept())
+        .await
+        .expect("the OPEN never reached the listener")
+        .unwrap();
+    let mut waiting = core::pin::pin!(listener.accept());
+    assert!(poll_once(waiting.as_mut()).await.is_pending());
+    drop(first);
+
+    let again = rt::timeout_ms(5000, waiting)
+        .await
+        .expect("the request handed back never reached the waiting listener")
+        .unwrap();
+    assert_eq!(again.destination(), b"tcp:1234\0");
+    again.reject().await.unwrap();
+    rt::join(device).await;
+}
+}
+
+// A READY the opener cannot take — delayed ACK without its credit —
+// fails the open, and the device gets a CLSE for the end it opened.
+rt_test! {
+async fn split_writer_open_channel_fails_on_a_ready_without_credit() {
+    let dev = FakeDevice::new()
+        .banner(DA_BANNER)
+        .max_payload(DA_MAX_PAYLOAD)
+        .delayed_ack(64);
+    let (conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (open.arg0, 300));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let err = rt::timeout_ms(5000, writer.open_channel(b"svc:\0"))
+        .await
+        .expect("open hung")
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+        "got {err:?}"
+    );
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its CLSE");
+}
+}
+
+// An OPEN the device sent while the connection was still whole waits in
+// its queue; `run` started with nobody listening refuses it at once,
+// rather than when some other packet arrives.
+rt_test! {
+async fn split_run_refuses_an_open_queued_before_it_started() {
+    let (mut conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    conn.open_channel(b"svc:\0").await.unwrap();
+    let (reader, _writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its refusal");
 }
 }

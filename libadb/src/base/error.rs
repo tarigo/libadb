@@ -69,6 +69,11 @@ pub enum Error<E> {
     /// that took none. Nothing can recover the framing from this side —
     /// close the connection and open a new one.
     Desynchronized,
+    /// The read half of a split connection is gone: its `Reader::run`
+    /// ended or the `Reader` was dropped, so nothing more will arrive
+    /// from the device. Waiting on such a connection would never end;
+    /// open a new one.
+    Disconnected,
 }
 
 /// What stopped the exchange at the protocol level: something from the
@@ -285,6 +290,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 )
             }
             Self::Desynchronized => f.write_str("connection desynchronized by an unfinished write"),
+            Self::Disconnected => f.write_str("connection no longer read"),
         }
     }
 }
@@ -314,6 +320,7 @@ where
             | Self::ReceiveBufferFull
             | Self::ChannelRxOverflow
             | Self::Desynchronized
+            | Self::Disconnected
             | Self::MissingFeature(_) => None,
         }
     }

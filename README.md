@@ -50,7 +50,7 @@ code talks to. To use the libusb backend, disable defaults and enable
 `rusb` directly:
 
 ```toml
-libadb = { version = "0.6", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
@@ -59,7 +59,7 @@ The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
 
 ```toml
 [dependencies]
-libadb = { version = "0.6", features = ["tokio"] }
+libadb = { version = "0.7", features = ["tokio"] }
 ```
 
 One-shot command over `shell::v2`:
@@ -176,7 +176,7 @@ dominates the cost of a channel write: skipping it made a 32 KiB
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Binary logcat entries, parsed     |
 | `sync`        | `sync:`                      | `STAT`/`LIST`/`SEND`/`RECV`, v1 + v2 |
 | `track_app`   | `track-app:`                 | Streaming debuggable-process snapshots |
-| `reverse`     | `reverse:…`                  | Reverse-forward rules; incoming channels via `accept_incoming` |
+| `reverse`     | `reverse:…`                  | Reverse-forward rules; incoming channels via `accept_incoming` (`Writer::listen_incoming` under `Reader::run`) |
 
 See the [`libadb/examples/`](libadb/examples/) directory for end-to-end
 programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
@@ -222,7 +222,9 @@ programs (`cargo run -p libadb --example shell_v2 -- 127.0.0.1:5555 …`).
   wrap different underlying types), so switching backends touches any
   code that names those types.
 - Any type implementing `embedded_io_async::{Read, Write}` +
-  `libadb::Splittable` works as a custom transport
+  `libadb::Splittable` works as a custom transport; the service modules
+  also need `transport::ReadCancelSafety`, which tells `select` whether
+  a read may be dropped mid-way
 
 Runtime and backend are chosen per call site, so a build may carry all
 of them at once:
@@ -246,7 +248,30 @@ let tcp = any::connect::<Tokio, NoUsb>("tcp://127.0.0.1:5555").await?;
 
 `Connection::split()` gives you a full-duplex `Reader` / `Writer` pair
 so that a reader task and a writer task can coexist on the same
-connection without locking each other out.
+connection without locking each other out. Hand the `Reader` to
+`Reader::run` and the connection serves any number of channels at once:
+every service module takes a `libadb::Session` — a `Connection` or a
+`Writer` — so each task runs its own shell, logcat or sync over a clone
+of the `Writer`, and none waits on another's traffic. Over USB, where a
+device admits a single connection, this is how several services share
+it.
+
+```rust,ignore
+let (reader, writer) = conn.split()?;
+tokio::spawn(reader.run());
+
+let mut logs = writer.clone();
+tokio::spawn(async move {
+    let mut rx = vec![0; 64 * 1024];
+    let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
+    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    Ok::<_, libadb::Error<_>>(())
+});
+
+let mut shell = writer.clone();
+let mut rx = vec![0; 64 * 1024];
+let out = shell::v2::exec(&mut shell, "getprop ro.product.model", &mut rx).await?;
+```
 
 ## C ABI (`libadb-ffi`)
 

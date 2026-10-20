@@ -9,7 +9,7 @@ mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{wrap, FakeDevice, FakeSession, TestAuth};
+use fake_device::{session_with_config, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
@@ -17,37 +17,7 @@ mod common;
 use libadb::protocol::command::CMD_WRTE;
 use libadb::protocol::constant::MAX_PAYLOAD;
 use libadb::protocol::features::INITIAL_DELAYED_ACK_BYTES;
-use libadb::{Connection, ConnectionConfig, Error, ProtocolError};
-
-/// Same as `fake_device::session`, but drives the handshake through
-/// `connect_with_config`.
-async fn session_with_config<F, Fut, R>(
-    device: FakeDevice,
-    host_banner: &[u8],
-    config: ConnectionConfig,
-    scenario: F,
-) -> (Connection<rt::AdbTransport>, rt::JoinHandle<R>)
-where
-    F: FnOnce(FakeSession) -> Fut + Send + 'static,
-    Fut: core::future::Future<Output = R> + Send + 'static,
-    R: Send + 'static,
-{
-    let (handle, addr) = device.bind().await;
-    let task = rt::spawn(async move {
-        let s = handle.accept().await;
-        scenario(s).await
-    });
-    let stream = rt::connect(addr).await;
-    let conn = Connection::<_>::connect_with_raw_banner_and_config(
-        wrap(stream),
-        TestAuth,
-        host_banner,
-        config,
-    )
-    .await
-    .unwrap();
-    (conn, task)
-}
+use libadb::{ConnectionConfig, Error, ProtocolError};
 
 const HOST_BANNER: &[u8] = b"host::features=shell_v2";
 const DA_HOST_BANNER: &[u8] = b"host::features=shell_v2,delayed_ack";

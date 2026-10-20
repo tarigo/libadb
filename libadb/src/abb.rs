@@ -35,14 +35,12 @@
 //! ```
 
 use alloc::vec::Vec;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
 use crate::base::channel::Channel;
-use crate::base::connection::Connection;
 use crate::base::destination::build_nul_destination;
 use crate::base::error::Error;
 use crate::base::protocol::features::Feature;
+use crate::base::session::Session;
 use crate::shell::v2::Shell;
 
 /// Open a raw `abb_exec:` channel. The device sends plain stdout bytes
@@ -52,16 +50,13 @@ use crate::shell::v2::Shell;
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// For example, to run `cmd package list packages -3` pass
 /// `&["package", "list", "packages", "-3"]`.
-pub async fn open_exec<'a, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open_exec<'a, S: Session>(
+    session: &'a mut S,
     args: &[&str],
-) -> Result<Channel<'a, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(Feature::AbbExec)?;
+) -> Result<Channel<'a, S>, Error<S::IoError>> {
+    session.require_feature(Feature::AbbExec)?;
     let dest = build_nul_destination("abb_exec:", args)?;
-    conn.open(&dest).await
+    session.open(&dest).await
 }
 
 /// Run a one-shot ABB command, returning the raw stdout output.
@@ -71,15 +66,12 @@ where
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// `rx` is used as a temporary read buffer (not retained after return).
-pub async fn exec<T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &mut Connection<T, MC, MP, MF>,
+pub async fn exec<S: Session>(
+    session: &mut S,
     args: &[&str],
     rx: &mut [u8],
-) -> Result<Vec<u8>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    let mut channel = open_exec(conn, args).await?;
+) -> Result<Vec<u8>, Error<S::IoError>> {
+    let mut channel = open_exec(session, args).await?;
     let mut output = Vec::new();
     loop {
         match channel.read(rx).await {
@@ -88,6 +80,8 @@ where
             Err(e) => return Err(e),
         }
     }
+    // The device's CLSE only marks the slot closed; ours frees it.
+    let _ = channel.close().await;
     Ok(output)
 }
 
@@ -101,17 +95,14 @@ where
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
 /// sizing advice.
-pub async fn open<'a, 'b, T, const MC: usize, const MP: usize, const MF: usize>(
-    conn: &'a mut Connection<T, MC, MP, MF>,
+pub async fn open<'a, 'b, S: Session>(
+    session: &'a mut S,
     args: &[&str],
     rx: &'b mut [u8],
-) -> Result<Shell<'a, 'b, T, MC, MP, MF>, Error<<T as ErrorType>::Error>>
-where
-    T: Read + Write,
-{
-    conn.require_feature(Feature::Abb)?;
+) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
+    session.require_feature(Feature::Abb)?;
     let dest = build_nul_destination("abb:", args)?;
-    let channel = conn.open(&dest).await?;
+    let channel = session.open(&dest).await?;
     Ok(Shell::new(channel, rx))
 }
 

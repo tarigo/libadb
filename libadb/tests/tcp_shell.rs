@@ -24,7 +24,7 @@ use common::{shell_v2_encode, shell_v2_parse, SH_CLOSE_STDIN, SH_EXIT, SH_STDERR
 /// frame — that's "no progress", not EOF. Real end-of-stream surfaces
 /// as `Err(ChannelClosed)` and triggers a panic here.
 async fn read_exact_or_panic(
-    ch: &mut libadb::channel::Channel<'_, rt::AdbTransport>,
+    ch: &mut libadb::channel::Channel<'_, libadb::Connection<rt::AdbTransport>>,
     buf: &mut [u8],
 ) {
     let mut pos = 0;
@@ -40,7 +40,7 @@ async fn read_exact_or_panic(
 }
 
 async fn read_shell_v2_frame(
-    ch: &mut libadb::channel::Channel<'_, rt::AdbTransport>,
+    ch: &mut libadb::channel::Channel<'_, libadb::Connection<rt::AdbTransport>>,
     buf: &mut [u8],
 ) -> (u8, usize) {
     let mut hdr5 = [0u8; 5];

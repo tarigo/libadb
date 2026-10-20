@@ -1,8 +1,6 @@
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
-
 use super::channel::Channel;
 use super::error::Error;
+use super::session::Session;
 
 pub(crate) struct RecvBuf<'b> {
     pub buf: &'b mut [u8],
@@ -27,14 +25,11 @@ impl<'b> RecvBuf<'b> {
         }
     }
 
-    pub async fn fill_at_least<T, const MC: usize, const MP: usize, const MF: usize>(
+    pub async fn fill_at_least<S: Session>(
         &mut self,
-        channel: &mut Channel<'_, T, MC, MP, MF>,
+        channel: &mut Channel<'_, S>,
         n: usize,
-    ) -> Result<(), Error<<T as ErrorType>::Error>>
-    where
-        T: Read + Write,
-    {
+    ) -> Result<(), Error<S::IoError>> {
         if n > self.buf.len() {
             return Err(Error::ReceiveBufferFull);
         }

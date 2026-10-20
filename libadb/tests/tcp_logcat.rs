@@ -12,46 +12,11 @@ use fake_device::{session, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
-use common::{shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT, SH_STDOUT};
+use common::{logger_entry, logger_payload, shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT, SH_STDOUT};
 
 // ---------------------------------------------------------------------------
 // Tests: logcat (binary and text modes)
 // ---------------------------------------------------------------------------
-
-/// Build a v4 `logger_entry` record: 28-byte header + caller-supplied
-/// payload.
-fn logger_entry(
-    pid: i32,
-    tid: u32,
-    sec: i32,
-    nsec: i32,
-    lid: u32,
-    uid: u32,
-    payload: &[u8],
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(28 + payload.len());
-    buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-    buf.extend_from_slice(&28u16.to_le_bytes());
-    buf.extend_from_slice(&pid.to_le_bytes());
-    buf.extend_from_slice(&tid.to_le_bytes());
-    buf.extend_from_slice(&sec.to_le_bytes());
-    buf.extend_from_slice(&nsec.to_le_bytes());
-    buf.extend_from_slice(&lid.to_le_bytes());
-    buf.extend_from_slice(&uid.to_le_bytes());
-    buf.extend_from_slice(payload);
-    buf
-}
-
-/// Build a `[priority][tag\0][message\0]` logcat payload.
-fn logger_payload(priority: u8, tag: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(1 + tag.len() + 1 + message.len() + 1);
-    p.push(priority);
-    p.extend_from_slice(tag);
-    p.push(0);
-    p.extend_from_slice(message);
-    p.push(0);
-    p
-}
 
 rt_test! {
 async fn logcat_open_yields_parsed_entries() {
@@ -112,6 +77,7 @@ async fn logcat_dump_collects_until_exit() {
         ch.send_write(&combined).await;
         ch.expect_ack().await;
         ch.send_close().await;
+        ch.expect_close().await;
     })
     .await;
 
@@ -123,7 +89,7 @@ async fn logcat_dump_collects_until_exit() {
     assert_eq!(entries[0].priority, logcat::Priority::Error);
     assert_eq!(entries[0].log_id, logcat::LogId::Crash);
 
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 

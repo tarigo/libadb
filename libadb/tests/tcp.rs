@@ -17,7 +17,7 @@ use fake_device::{
 
 #[path = "common/common.rs"]
 mod common;
-use common::{expect_missing_feature, handshake, shell_v2_encode, SH_EXIT, SH_STDOUT};
+use common::{expect_missing_feature, handshake, poll_once, shell_v2_encode, SH_EXIT, SH_STDOUT};
 
 // ---------------------------------------------------------------------------
 // Tests: connection handshake
@@ -427,6 +427,7 @@ async fn cmd_exec_uses_abb_exec_when_advertised() {
         ch.send_write(b"package:com.example\n").await;
         ch.expect_ack().await;
         ch.send_close().await;
+        ch.expect_close().await;
     })
     .await;
 
@@ -436,7 +437,7 @@ async fn cmd_exec_uses_abb_exec_when_advertised() {
         .unwrap();
     assert_eq!(output, b"package:com.example\n");
 
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 
@@ -700,5 +701,55 @@ async fn require_feature_works_after_connect_with_raw_banner() {
     expect_missing_feature(conn.require_feature(Feature::TrackApp), Feature::TrackApp);
 
     rt::join(device).await;
+}
+}
+
+// An open given up on before the device answered leaves nothing open on
+// the device: the READY that comes for it later is answered with a CLSE
+// naming the device's id, which adbd needs to find the channel.
+rt_test! {
+async fn a_ready_for_an_abandoned_open_is_answered_with_clse() {
+    let (mut conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (a, _) = s.expect(CMD_OPEN).await;
+        let (b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, a.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (a.arg0, 300));
+        s.send(CMD_OKAY, 301, b.arg0, &[]).await;
+    })
+    .await;
+
+    {
+        let mut open = core::pin::pin!(conn.open_channel(b"a:\0"));
+        assert!(poll_once(open.as_mut()).await.is_pending());
+    }
+    rt::within("open b", conn.open_channel(b"b:\0"))
+        .await
+        .unwrap();
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
+
+// A READY the opener cannot take — delayed ACK without its credit —
+// fails the open, and the device gets a CLSE for the end it opened.
+rt_test! {
+async fn open_fails_on_a_ready_without_credit_and_closes_it() {
+    let dev = FakeDevice::new()
+        .banner(b"device::features=delayed_ack".to_vec())
+        .delayed_ack(64);
+    let (mut conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (open.arg0, 300));
+    })
+    .await;
+
+    let err = conn.open_channel(b"svc:\0").await.unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+        "got {err:?}"
+    );
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }

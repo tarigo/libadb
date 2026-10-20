@@ -1,15 +1,11 @@
 use alloc::collections::BTreeSet;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use core::future::Future;
-use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 
-use super::connection::{
-    Connection, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
 use super::error::{Error, ProtocolError, RxOverflow};
 use super::protocol::command::Command;
 use super::protocol::Packet;
+use super::session::Session;
 
 /// AOSP's adbd always sends the 4-byte credit; when a peer omits it,
 /// the operation that received the packet fails with
@@ -36,7 +32,10 @@ pub(crate) enum AckDecision {
 }
 
 pub(crate) enum DispatchOutcome {
+    /// A WRTE was buffered and has to be acknowledged now.
     AckWrite {
+        #[allow(dead_code)] // read only by split::Reader, to wake readers
+        idx: usize,
         local_id: u32,
         remote_id: u32,
         len: usize,
@@ -51,9 +50,12 @@ pub(crate) enum DispatchOutcome {
         #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
-    /// A WRTE was buffered with its acknowledgement held back: readers
-    /// wait on the socket and writers on credit, so nobody needs waking.
-    DataBuffered,
+    /// A WRTE was buffered with its acknowledgement held back until it
+    /// is read.
+    DataBuffered {
+        #[allow(dead_code)] // read only by split::Reader, to wake readers
+        idx: usize,
+    },
     /// The device opened a channel toward the host (`adb reverse`).
     /// The host queues it for [`accept_incoming`] and answers READY on
     /// accept or CLSE on refusal.
@@ -71,7 +73,49 @@ pub(crate) enum DispatchOutcome {
     CancelPendingOpen {
         remote_id: u32,
     },
+    /// A READY for no channel of ours: the device accepted an OPEN its
+    /// opener gave up on before the answer. Answer CLSE with both ids —
+    /// adbd ignores one that does not name its own — or the device's
+    /// end stays open.
+    StrayReady {
+        local_id: u32,
+        remote_id: u32,
+    },
+    /// A packet broke this slot's channel alone. The slot is not
+    /// closed: whoever dispatched decides what the fault costs.
+    ChannelFault {
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        idx: usize,
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        local_id: u32,
+        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
+        remote_id: u32,
+        /// The slot was waiting for the device's answer to its OPEN.
+        #[allow(dead_code)] // read only by split::Reader, to fail the open
+        opening: bool,
+        fault: ChannelFault,
+    },
     Unmatched,
+}
+
+/// What breaks one channel without breaking the connection: the packet
+/// was read whole, so the stream stays in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelFault {
+    /// A WRTE did not fit the channel's receive buffer.
+    RxOverflow,
+    /// A READY the channel cannot take, such as one without its
+    /// delayed-ACK credit.
+    Protocol(ProtocolError),
+}
+
+impl ChannelFault {
+    pub fn error<E>(self) -> Error<E> {
+        match self {
+            Self::RxOverflow => Error::ChannelRxOverflow,
+            Self::Protocol(e) => Error::Protocol(e),
+        }
+    }
 }
 
 /// A device-initiated OPEN waiting for the application's verdict.
@@ -91,15 +135,15 @@ pub(crate) fn clse_closes(arg0: u32, arg1: u32, local_id: u32, remote_id: u32) -
 }
 
 /// `rx_cap` bounds how much unread data a single channel may accumulate;
-/// a WRTE that would push it past the cap fails with
-/// [`Error::ChannelRxOverflow`] instead of growing the buffer.
-pub(crate) fn dispatch_packet<E>(
+/// a WRTE that would push it past the cap is a
+/// [`ChannelFault::RxOverflow`] instead of growing the buffer.
+pub(crate) fn dispatch_packet(
     channels: &mut [Option<ChannelSlot>],
     pkt: &Packet,
     delayed_ack: bool,
     rx_cap: usize,
     watermark: usize,
-) -> Result<DispatchOutcome, Error<E>> {
+) -> DispatchOutcome {
     // The handshake is over, so a device that opens it again, or asks
     // for TLS now, is out of turn. It is dropped like any packet nobody
     // claims, but said in the log, since nothing else will mention it.
@@ -111,14 +155,14 @@ pub(crate) fn dispatch_packet<E>(
             "dropping {:?} from the device after the handshake",
             pkt.command
         );
-        return Ok(DispatchOutcome::Unmatched);
+        return DispatchOutcome::Unmatched;
     }
     if pkt.command == Command::Open {
-        return Ok(DispatchOutcome::IncomingOpen {
+        return DispatchOutcome::IncomingOpen {
             remote_id: pkt.arg0,
             credit: pkt.arg1,
             destination: pkt.data.clone(),
-        });
+        };
     }
     if pkt.command == Command::Close && pkt.arg1 == 0 {
         // The withdrawal may have crossed our READY in flight: the
@@ -130,48 +174,68 @@ pub(crate) fn dispatch_packet<E>(
                 let Some(slot) = slot_opt else { continue };
                 if slot.remote_id == pkt.arg0 {
                     slot.apply_close();
-                    return Ok(DispatchOutcome::SlotClosed { idx });
+                    return DispatchOutcome::SlotClosed { idx };
                 }
             }
         }
-        return Ok(DispatchOutcome::CancelPendingOpen {
+        return DispatchOutcome::CancelPendingOpen {
             remote_id: pkt.arg0,
-        });
+        };
     }
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {
+            // A channel closed for a fault takes nothing more: data that
+            // was still in flight would read as if no gap came before it.
+            Command::Write | Command::Ready
+                if pkt.arg1 == slot.local_id && slot.failed.is_some() =>
+            {
+                return DispatchOutcome::Unmatched;
+            }
             Command::Write if pkt.arg1 == slot.local_id => {
-                return Ok(
-                    match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark)? {
-                        AckDecision::Now {
-                            local_id,
-                            remote_id,
-                            len,
-                        } => DispatchOutcome::AckWrite {
-                            local_id,
-                            remote_id,
-                            len,
-                        },
-                        AckDecision::Hold => DispatchOutcome::DataBuffered,
+                return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
+                    Ok(AckDecision::Now {
+                        local_id,
+                        remote_id,
+                        len,
+                    }) => DispatchOutcome::AckWrite {
+                        idx,
+                        local_id,
+                        remote_id,
+                        len,
                     },
-                );
+                    Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
+                    Err(RxOverflow) => slot.fault(idx, pkt.arg0, ChannelFault::RxOverflow),
+                };
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
-                slot.apply_ready(&pkt.data, delayed_ack)?;
-                return Ok(DispatchOutcome::CreditGranted { idx });
+                let granted = if slot.state == ChannelState::Opening {
+                    slot.accept_open_ready(pkt.arg0, &pkt.data, delayed_ack)
+                } else {
+                    slot.apply_ready(&pkt.data, delayed_ack)
+                };
+                return match granted {
+                    Ok(()) => DispatchOutcome::CreditGranted { idx },
+                    Err(e) => slot.fault(idx, pkt.arg0, ChannelFault::Protocol(e)),
+                };
             }
             Command::Close if pkt.arg1 == slot.local_id => {
                 slot.apply_close();
-                return Ok(DispatchOutcome::SlotClosed { idx });
+                return DispatchOutcome::SlotClosed { idx };
             }
             _ => {}
         }
     }
-    Ok(DispatchOutcome::Unmatched)
+    if pkt.command == Command::Ready && pkt.arg0 != 0 && pkt.arg1 != 0 {
+        return DispatchOutcome::StrayReady {
+            local_id: pkt.arg1,
+            remote_id: pkt.arg0,
+        };
+    }
+    DispatchOutcome::Unmatched
 }
 
-/// Result of [`Channel::select`] / [`Connection::select_channel`].
+/// Result of [`Channel::select`] / [`Session::select_channel`].
 #[derive(Debug)]
 pub enum SelectResult<T> {
     /// The channel produced data — value is the number of bytes read.
@@ -184,8 +248,10 @@ pub enum SelectResult<T> {
 
 /// Opaque handle to an open ADB channel.
 ///
-/// Used with [`Connection::open_channel`], [`read_channel`](Connection::read_channel),
-/// [`write_channel`](Connection::write_channel), [`close_channel`](Connection::close_channel).
+/// Used with [`Session::open_channel`], [`read_channel`](Session::read_channel),
+/// [`write_channel`](Session::write_channel), [`close_channel`](Session::close_channel),
+/// and the same methods on [`Connection`](crate::Connection) and the split
+/// [`Writer`](crate::Writer).
 /// A stale handle from a closed channel never aliases a later reopened
 /// one — it returns [`Error::ChannelClosed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -198,7 +264,7 @@ impl ChannelId {
     /// Build a `ChannelId` from raw `(slot, local_id)`. Intended for
     /// FFI bridges that round-trip a handle through an opaque integer;
     /// ordinary Rust callers should use the `ChannelId` returned by
-    /// [`Connection::open_channel`] directly.
+    /// [`Session::open_channel`] directly.
     pub fn from_raw(slot: usize, local_id: u32) -> Self {
         Self { slot, local_id }
     }
@@ -243,6 +309,9 @@ pub(crate) struct ChannelSlot {
     /// holes adjacent to it — so cancellation churn cannot grow this
     /// past the caller's own peak of concurrent writers.
     pub send_q_gone: BTreeSet<u64>,
+    /// What broke this channel, once [`fail`](Self::fail) closed it for
+    /// that: its calls then fail with this rather than `ChannelClosed`.
+    pub failed: Option<ChannelFault>,
 }
 
 impl ChannelSlot {
@@ -258,6 +327,7 @@ impl ChannelSlot {
             send_q_head: 0,
             send_q_tail: 0,
             send_q_gone: BTreeSet::new(),
+            failed: None,
         }
     }
 
@@ -269,17 +339,46 @@ impl ChannelSlot {
         self.state == ChannelState::Closed
     }
 
+    /// The error a call on this channel fails with once it is closed.
+    pub fn closed_error<E>(&self) -> Error<E> {
+        self.failed
+            .map_or(Error::ChannelClosed, ChannelFault::error)
+    }
+
+    /// Close this channel for `fault`. Nothing is acknowledged after
+    /// it, so the device gets no OKAY for a channel we are closing.
+    #[allow(dead_code)] // used only by split::Reader::run
+    pub fn fail(&mut self, fault: ChannelFault) {
+        self.failed = Some(fault);
+        self.state = ChannelState::Closed;
+        self.unacked = 0;
+    }
+
+    /// `remote_id` comes from the packet: a slot still opening has
+    /// none of its own yet.
+    fn fault(&self, idx: usize, remote_id: u32, fault: ChannelFault) -> DispatchOutcome {
+        DispatchOutcome::ChannelFault {
+            idx,
+            local_id: self.local_id,
+            remote_id,
+            opening: self.state == ChannelState::Opening,
+            fault,
+        }
+    }
+
     pub fn accept_open_ready(
         &mut self,
         remote_id: u32,
         payload: &[u8],
         delayed_ack: bool,
     ) -> Result<(), ProtocolError> {
-        self.remote_id = remote_id;
-        self.state = ChannelState::Open;
+        // Parsed first: a READY the slot cannot take leaves it as it
+        // was, still opening, rather than open with no budget.
         if delayed_ack {
             self.send_budget = parse_ready_credit(payload)? as i64;
         }
+        self.remote_id = remote_id;
+        self.state = ChannelState::Open;
         Ok(())
     }
 
@@ -357,22 +456,64 @@ impl ChannelSlot {
         delayed_ack: bool,
         watermark: usize,
     ) -> Option<(u32, u32, usize)> {
+        let len = self.ack_len(n, self.rx_buf.len(), delayed_ack, watermark)?;
+        self.unacked -= len;
+        Some((self.local_id, self.remote_id, len))
+    }
+
+    /// Whether taking up to `want` buffered bytes now would owe the
+    /// device an OKAY — what [`take_buffered`](Self::take_buffered)
+    /// would answer, without taking anything.
+    #[allow(dead_code)] // used only by split::Shared
+    pub fn take_acks(&self, want: usize, delayed_ack: bool, watermark: usize) -> bool {
+        let n = want.min(self.rx_buf.len());
+        let remaining = self.rx_buf.len() - n;
+        self.ack_len(n, remaining, delayed_ack, watermark).is_some()
+    }
+
+    /// How much taking `n` bytes acknowledges, `remaining` being what
+    /// the buffer holds once they are gone. With delayed ACK, the bytes
+    /// taken; without it, everything held back, once the buffer is
+    /// below `watermark` again.
+    fn ack_len(
+        &self,
+        n: usize,
+        remaining: usize,
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Option<usize> {
         if self.unacked == 0 {
             return None;
         }
         if delayed_ack {
             let len = n.min(self.unacked);
-            if len == 0 {
-                return None;
-            }
-            self.unacked -= len;
-            return Some((self.local_id, self.remote_id, len));
+            return (len > 0).then_some(len);
         }
-        if self.rx_buf.len() >= watermark {
-            return None;
+        (remaining < watermark).then_some(self.unacked)
+    }
+
+    /// Copy buffered bytes into `buf`, and say what to acknowledge for
+    /// taking them. `None` while an open channel has nothing buffered;
+    /// once a closed one is drained, [`Error::ChannelClosed`] or the
+    /// fault that closed it.
+    #[allow(clippy::type_complexity)]
+    pub fn take_buffered<E>(
+        &mut self,
+        buf: &mut [u8],
+        delayed_ack: bool,
+        watermark: usize,
+    ) -> Result<Option<(usize, Option<(u32, u32, usize)>)>, Error<E>> {
+        if self.rx_buf.is_empty() {
+            return if self.is_closed() {
+                Err(self.closed_error())
+            } else {
+                Ok(None)
+            };
         }
-        let len = core::mem::take(&mut self.unacked);
-        Some((self.local_id, self.remote_id, len))
+        let n = buf.len().min(self.rx_buf.len());
+        buf[..n].copy_from_slice(&self.rx_buf[..n]);
+        self.rx_buf.advance(n);
+        Ok(Some((n, self.consume(n, delayed_ack, watermark))))
     }
 
     pub fn push_rx(&mut self, payload: &[u8], cap: usize) -> Result<(), RxOverflow> {
@@ -487,42 +628,33 @@ pub(crate) fn slot_for_mut(
         .filter(|s| s.local_id == ch.local_id)
 }
 
-/// An open ADB channel tied to a [`Connection`].
+/// An open ADB channel tied to a [`Session`].
 ///
 /// Provides [`read`](Self::read), [`write`](Self::write), and
-/// [`close`](Self::close) methods.  Created by [`Connection::open`].
+/// [`close`](Self::close) methods.  Created by [`Session::open`] or
+/// [`Connection::open`](crate::Connection::open).
 ///
-/// Because `Channel` holds a mutable borrow on the connection,
-/// only one `Channel` can be active at a time.  For concurrent access to
+/// Because `Channel` holds a mutable borrow on the session, only one
+/// `Channel` can be active at a time on it.  For concurrent access to
 /// multiple channels, use the [`ChannelId`]-based methods on
-/// [`Connection`] directly ([`open_channel`](Connection::open_channel),
-/// [`read_channel`](Connection::read_channel), etc.).
-pub struct Channel<
-    'a,
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
-    T: Read + Write,
-{
-    pub(crate) conn: &'a mut Connection<T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
+/// [`Connection`](crate::Connection) directly
+/// ([`open_channel`](crate::Connection::open_channel),
+/// [`read_channel`](crate::Connection::read_channel), etc.), or split the
+/// connection and give each task a clone of the
+/// [`Writer`](crate::Writer).
+pub struct Channel<'a, S> {
+    pub(crate) session: &'a mut S,
     pub(crate) id: ChannelId,
 }
 
-impl<'a, T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Channel<'a, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
-where
-    T: Read + Write,
-{
+impl<S: Session> Channel<'_, S> {
     /// Read data from the channel into `buf`.
     ///
     /// Returns the number of bytes read. If data was already buffered
     /// (from a previous WRTE) the call returns immediately. Otherwise it
-    /// blocks until a WRTE arrives for this channel, buffering messages
-    /// for other channels in the meantime.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<<T as ErrorType>::Error>> {
-        self.conn.read_channel(self.id, buf).await
+    /// waits until a WRTE arrives for this channel.
+    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
+        self.session.read_channel(self.id, buf).await
     }
 
     /// Write data to the channel.
@@ -530,8 +662,8 @@ where
     /// Data is split into `max_payload`-sized chunks with appropriate
     /// flow-control (OKAY acknowledgement in legacy mode, credit-based
     /// budgeting in delayed ACK mode).
-    pub async fn write(&mut self, data: &[u8]) -> Result<(), Error<<T as ErrorType>::Error>> {
-        self.conn.write_channel(self.id, data).await
+    pub async fn write(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
+        self.session.write_channel(self.id, data).await
     }
 
     /// Read from the channel, but return early if `interrupt` resolves first.
@@ -541,13 +673,14 @@ where
     /// If `interrupt` wins, the channel state is unchanged and the next
     /// call resumes normally.
     ///
-    /// How quickly `interrupt` can win depends on the transport. Over
-    /// TCP it is raced against the read itself, so a pending read is
-    /// dropped the moment the interrupt is due. A transport that would
-    /// lose data that way — USB, where cancelling a bulk transfer
-    /// discards what the device already wrote into it — has the
-    /// interrupt checked between reads instead, so it takes effect once
-    /// the read in flight has finished. See
+    /// How quickly `interrupt` can win depends on the session. On a
+    /// split [`Writer`](crate::Writer) it is raced against the wait for
+    /// data. On a [`Connection`](crate::Connection) over TCP it is raced against the read
+    /// itself, so a pending read is dropped the moment the interrupt is
+    /// due. A transport that would lose data that way — USB, where
+    /// cancelling a bulk transfer discards what the device already
+    /// wrote into it — has the interrupt checked between reads instead,
+    /// so it takes effect once the read in flight has finished. See
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// ```ignore
@@ -564,18 +697,15 @@ where
         &mut self,
         buf: &mut [u8],
         interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>>
-    where
-        T: crate::transport::ReadCancelSafety,
-    {
-        self.conn.select_channel(self.id, buf, interrupt).await
+    ) -> Result<SelectResult<F::Output>, Error<S::IoError>> {
+        self.session.select_channel(self.id, buf, interrupt).await
     }
 
     /// Close the channel, sending CLSE to the device and freeing the slot.
     ///
     /// Consumes the `Channel`.
-    pub async fn close(self) -> Result<(), Error<<T as ErrorType>::Error>> {
-        self.conn.close_channel(self.id).await
+    pub async fn close(self) -> Result<(), Error<S::IoError>> {
+        self.session.close_channel(self.id).await
     }
 }
 
