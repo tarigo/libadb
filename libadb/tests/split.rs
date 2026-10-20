@@ -948,3 +948,26 @@ async fn split_writer_open_channel_fails_on_a_ready_without_credit() {
         .expect("device never got its CLSE");
 }
 }
+
+// An OPEN the device sent while the connection was still whole waits in
+// its queue; `run` started with nobody listening refuses it at once,
+// rather than when some other packet arrives.
+rt_test! {
+async fn split_run_refuses_an_open_queued_before_it_started() {
+    let (mut conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    conn.open_channel(b"svc:\0").await.unwrap();
+    let (reader, _writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its refusal");
+}
+}
