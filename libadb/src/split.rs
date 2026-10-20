@@ -1151,9 +1151,11 @@ where
         let mut incoming = self.shared.lock_incoming();
         staged.retain(|(_, flag)| !Arc::ptr_eq(flag, &self.cancelled));
         if let Some(pending) = self.pending.take() {
-            // A withdrawn request is dead; anything else goes back.
+            // A withdrawn request is dead; anything else goes back, to
+            // a listener that may already be waiting for one.
             if !self.cancelled.load(Ordering::Relaxed) {
                 incoming.push_front(pending);
+                self.shared.incoming_signal.notify(usize::MAX);
             }
         }
     }

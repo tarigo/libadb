@@ -886,3 +886,36 @@ async fn split_run_hands_device_initiated_open_to_a_listener() {
     rt::join(device).await;
 }
 }
+
+// A request handed back undecided goes to a listener already waiting,
+// rather than sit in the queue until some other OPEN wakes it.
+rt_test! {
+async fn split_listener_gets_a_request_handed_back_undecided() {
+    let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        s.send(CMD_OPEN, 7, 0, b"tcp:1234\0").await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (0, 7));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let listener = writer.listen_incoming();
+    let _driver = rt::spawn(reader.run());
+
+    let first = rt::timeout_ms(5000, listener.accept())
+        .await
+        .expect("the OPEN never reached the listener")
+        .unwrap();
+    let mut waiting = core::pin::pin!(listener.accept());
+    assert!(poll_once(waiting.as_mut()).await.is_pending());
+    drop(first);
+
+    let again = rt::timeout_ms(5000, waiting)
+        .await
+        .expect("the request handed back never reached the waiting listener")
+        .unwrap();
+    assert_eq!(again.destination(), b"tcp:1234\0");
+    again.reject().await.unwrap();
+    rt::join(device).await;
+}
+}
