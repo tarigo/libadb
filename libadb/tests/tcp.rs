@@ -427,6 +427,7 @@ async fn cmd_exec_uses_abb_exec_when_advertised() {
         ch.send_write(b"package:com.example\n").await;
         ch.expect_ack().await;
         ch.send_close().await;
+        ch.expect_close().await;
     })
     .await;
 
@@ -436,7 +437,7 @@ async fn cmd_exec_uses_abb_exec_when_advertised() {
         .unwrap();
     assert_eq!(output, b"package:com.example\n");
 
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 
