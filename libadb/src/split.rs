@@ -238,6 +238,55 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         .await
     }
 
+    /// Take what `ch` has buffered into `buf` and send the OKAY it
+    /// owes: `Ok(None)` while an open channel has nothing buffered.
+    ///
+    /// Bytes that owe an acknowledgement leave the buffer only once the
+    /// write lock is held to send it, so a call dropped while it waits
+    /// for that lock has taken nothing.
+    async fn take_buffered(
+        &self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let watermark = self.config.rx_watermark();
+        {
+            let mut chs = self.lock_channels();
+            let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
+            // Nothing owed back, or nothing to take: no acknowledgement
+            // to send, so no lock to wait for.
+            if slot.unacked == 0 || slot.rx_buf.is_empty() {
+                let taken = slot.take_buffered(buf, self.delayed_ack, watermark)?;
+                return Ok(taken.map(|(n, _)| n));
+            }
+        }
+        let mut wh = self.lock_write().await;
+        let taken = {
+            let mut chs = self.lock_channels();
+            let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
+            slot.take_buffered(buf, self.delayed_ack, watermark)?
+        };
+        let Some((n, ack)) = taken else {
+            return Ok(None);
+        };
+        if let Some((local_id, remote_id, len)) = ack {
+            send_okay_to(
+                &mut *wh,
+                &self.desync,
+                self.delayed_ack,
+                local_id,
+                remote_id,
+                len,
+                self.checksum(),
+            )
+            .await?;
+        }
+        Ok(Some(n))
+    }
+
     async fn send_okay(
         &self,
         local_id: u32,
@@ -701,15 +750,7 @@ where
         self.shared.desync.check()?;
         let delayed_ack = self.shared.delayed_ack;
         let watermark = self.shared.config.rx_watermark();
-        let buffered = {
-            let mut chs = self.shared.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
-            slot.take_buffered(buf, delayed_ack, watermark)?
-        };
-        if let Some((n, ack)) = buffered {
-            if let Some((local_id, remote_id, len)) = ack {
-                self.shared.send_okay(local_id, remote_id, len).await?;
-            }
+        if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
         }
 
@@ -1311,9 +1352,10 @@ where
     /// the next WRTE on `ch`. A channel the device closed fails with
     /// [`Error::ChannelClosed`] once its buffered data is read.
     ///
-    /// Cancellation-safe while it waits: the data stays buffered for
-    /// the next call. Taking bytes may send an acknowledgement, and
-    /// dropping the future during that write desynchronizes the
+    /// Cancellation-safe while it waits — for data, or for the write
+    /// lock an acknowledgement needs: nothing has been taken then, and
+    /// the data stays buffered for the next call. Dropping the future
+    /// while that acknowledgement is written desynchronizes the
     /// connection, as with any cancelled write.
     pub async fn read_channel(
         &self,
@@ -1347,20 +1389,10 @@ where
         let Some(signal) = self.shared.signals.get(ch.slot) else {
             return Err(Error::ChannelClosed);
         };
-        let delayed_ack = self.shared.delayed_ack;
-        let watermark = self.shared.config.rx_watermark();
         let mut interrupt = pin!(interrupt);
         let mut listener: Option<EventListener> = None;
         loop {
-            let taken = {
-                let mut chs = self.shared.lock_channels();
-                let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
-                slot.take_buffered(buf, delayed_ack, watermark)?
-            };
-            if let Some((n, ack)) = taken {
-                if let Some((local_id, remote_id, len)) = ack {
-                    self.shared.send_okay(local_id, remote_id, len).await?;
-                }
+            if let Some(n) = self.shared.take_buffered(ch, buf).await? {
                 return Ok(SelectResult::Data(n));
             }
             self.shared.check_live()?;
@@ -2042,6 +2074,44 @@ mod tests {
         );
         let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
         assert_eq!((cmd, arg0, arg1), (Command::Close, 2, 43));
+    }
+
+    #[test]
+    fn a_read_dropped_waiting_for_the_ack_lock_takes_nothing() {
+        use core::task::{Context, Waker};
+
+        let (_reader, writer, ch, _seen) =
+            crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+        // Five bytes dispatched and not yet acknowledged, as `run`
+        // leaves them under delayed ACK.
+        {
+            let mut chs = writer.shared.lock_channels();
+            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            slot.push_rx(b"hello", usize::MAX).unwrap();
+            slot.unacked = 5;
+        }
+        // Another task is mid-packet, so the read's OKAY has to wait.
+        let wh = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        {
+            let mut read = pin!(writer.read_channel(ch, &mut buf));
+            assert!(read
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending());
+        }
+        {
+            let chs = writer.shared.lock_channels();
+            let slot = chs[ch.slot].as_ref().unwrap();
+            assert_eq!(
+                (slot.rx_buf.len(), slot.unacked),
+                (5, 5),
+                "a read dropped while waiting took the bytes"
+            );
+        }
+        drop(wh);
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello");
     }
 
     #[test]
