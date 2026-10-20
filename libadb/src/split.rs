@@ -27,8 +27,11 @@
 //!   [`IncomingListener`] from [`Writer::listen_incoming`].
 //!
 //! Once the `Reader` is gone — `run` returned or the `Reader` was
-//! dropped — every waiting and later call on the `Writer` fails with
-//! [`Error::Disconnected`] instead of waiting for packets nobody reads.
+//! dropped — every `Writer` call that waits on the device fails with
+//! [`Error::Disconnected`] instead of waiting for packets nobody reads:
+//! opening a channel, reading one, waiting for send credit, accepting
+//! one the device opened. Calls that need no answer — a write the
+//! credit already covers, a close — still reach the transport.
 //!
 //! Available under the `split` feature (implied by every runtime
 //! feature: `tokio`, `smol`, `nusb`, `rusb`). Pulls `std` into the
