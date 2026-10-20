@@ -634,8 +634,8 @@ async fn split_writer_open_channel_closes_an_open_it_gave_up_on() {
 
 // A device may accept a channel, answer and close it before the opener
 // looks again. The opener polls once, so OPEN is out; `run` then takes
-// READY, WRTE and CLSE in one go; only then does the opener look. The
-// channel was opened, so the opener gets it, with its data to read.
+// READY, WRTE and CLSE and runs to its end; only then does the opener
+// look. The channel was opened, so the opener gets it, with its data.
 rt_test! {
 async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -649,9 +649,12 @@ async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
     let (reader, writer) = conn.split().unwrap();
     let mut open = core::pin::pin!(writer.open_channel(b"svc:\0"));
     assert!(poll_once(open.as_mut()).await.is_pending());
-    rt::sleep_ms(100).await;
-    let mut run = core::pin::pin!(reader.run());
-    assert!(poll_once(run.as_mut()).await.is_pending());
+    // `run` ends once the device, having had its OKAY, hangs up: by
+    // then it has taken READY, WRTE and CLSE, however slow the machine.
+    rt::timeout_ms(5000, reader.run())
+        .await
+        .expect("run kept going after the device left")
+        .unwrap_err();
 
     let ch = match poll_once(open.as_mut()).await {
         core::task::Poll::Ready(opened) => opened.expect("the device opened the channel"),
