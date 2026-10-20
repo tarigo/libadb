@@ -158,6 +158,7 @@ async fn cmd_exec_takes_the_abb_path_over_the_writer() {
         ch.send_write(b"package:a\n").await;
         ch.expect_ack().await;
         ch.send_close().await;
+        ch.expect_close().await;
     })
     .await;
     let (reader, mut writer) = conn.split().unwrap();
@@ -166,7 +167,7 @@ async fn cmd_exec_takes_the_abb_path_over_the_writer() {
     let mut rx = [0u8; 256];
     let out = cmd::exec(&mut writer, &["package", "list"], &mut rx).await.unwrap();
     assert_eq!(out, b"package:a\n");
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 

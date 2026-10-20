@@ -80,6 +80,8 @@ pub async fn exec<S: Session>(
             Err(e) => return Err(e),
         }
     }
+    // The device's CLSE only marks the slot closed; ours frees it.
+    let _ = channel.close().await;
     Ok(output)
 }
 

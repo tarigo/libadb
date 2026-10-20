@@ -77,6 +77,7 @@ async fn logcat_dump_collects_until_exit() {
         ch.send_write(&combined).await;
         ch.expect_ack().await;
         ch.send_close().await;
+        ch.expect_close().await;
     })
     .await;
 
@@ -88,7 +89,7 @@ async fn logcat_dump_collects_until_exit() {
     assert_eq!(entries[0].priority, logcat::Priority::Error);
     assert_eq!(entries[0].log_id, logcat::LogId::Crash);
 
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 

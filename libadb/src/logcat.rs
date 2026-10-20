@@ -267,6 +267,8 @@ pub async fn dump<S: Session>(
             Err(e) => return Err(e),
         }
     }
+    // The device's CLSE only marks the slot closed; ours frees it.
+    let _ = logcat.close().await;
     Ok(entries)
 }
 
