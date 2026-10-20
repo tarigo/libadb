@@ -157,12 +157,6 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         self.staged.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Take the oldest queued device-initiated OPEN, releasing the
-    /// queue lock before the caller awaits anything.
-    fn pop_incoming(&self) -> Option<PendingOpen> {
-        self.lock_incoming().pop_front()
-    }
-
     /// Reserve a free slot and send OPEN for `destination` — the start
     /// both openers share. The guard frees the slot unless the opener
     /// disarms it once the device answers.
@@ -309,15 +303,56 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         .await
     }
 
-    /// Wrap a request taken off the queue in its owned holder,
-    /// registering it so a device cancellation can still find it.
+    /// Wrap a request that never reached the queue in its owned
+    /// holder, registering it so a device cancellation can still find
+    /// it.
     fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH, MC, MP, MF>
     where
         WH: Write,
     {
+        self.hold_incoming(pending, &mut self.lock_staged())
+    }
+
+    /// Take the oldest queued device-initiated OPEN into its owned
+    /// holder.
+    fn take_incoming(self: &Arc<Self>) -> Option<SplitIncoming<WH, MC, MP, MF>>
+    where
+        WH: Write,
+    {
+        self.take_incoming_past(0)
+    }
+
+    /// [`take_incoming`](Self::take_incoming), but only while queued
+    /// and staged requests together exceed `cap`.
+    ///
+    /// Popped and registered under the staged-then-incoming locks at
+    /// once, the order `Drop` and the cancel dispatch take them: a
+    /// device withdrawal racing this — `run` handles them while a
+    /// listener accepts from another task — finds the request in one
+    /// place or the other, never in between.
+    fn take_incoming_past(self: &Arc<Self>, cap: usize) -> Option<SplitIncoming<WH, MC, MP, MF>>
+    where
+        WH: Write,
+    {
+        let mut staged = self.lock_staged();
+        let mut incoming = self.lock_incoming();
+        if staged.len() + incoming.len() <= cap {
+            return None;
+        }
+        let pending = incoming.pop_front()?;
+        Some(self.hold_incoming(pending, &mut staged))
+    }
+
+    fn hold_incoming(
+        self: &Arc<Self>,
+        pending: PendingOpen,
+        staged: &mut Vec<(u32, Arc<AtomicBool>)>,
+    ) -> SplitIncoming<WH, MC, MP, MF>
+    where
+        WH: Write,
+    {
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.lock_staged()
-            .push((pending.remote_id, Arc::clone(&cancelled)));
+        staged.push((pending.remote_id, Arc::clone(&cancelled)));
         SplitIncoming {
             shared: Arc::clone(self),
             pending: Some(pending),
@@ -623,21 +658,10 @@ where
     /// (`accept_incoming` needs no barrier — it only reads with the
     /// queue empty.)
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        loop {
-            let excess = {
-                let staged = self.shared.lock_staged();
-                let mut q = self.shared.lock_incoming();
-                if staged.len() + q.len() > MC {
-                    q.pop_front()
-                } else {
-                    None
-                }
-            };
-            let Some(pending) = excess else {
-                return Ok(());
-            };
-            self.shared.stage_incoming(pending).reject().await?;
+        while let Some(excess) = self.shared.take_incoming_past(MC) {
+            excess.reject().await?;
         }
+        Ok(())
     }
 
     async fn await_open_ack(
@@ -727,8 +751,8 @@ where
             if self.shared.listeners.load(Ordering::Acquire) > 0 {
                 continue;
             }
-            while let Some(pending) = self.shared.pop_incoming() {
-                self.shared.stage_incoming(pending).reject().await?;
+            while let Some(refused) = self.shared.take_incoming() {
+                refused.reject().await?;
             }
         }
     }
@@ -830,8 +854,8 @@ where
     ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
-            if let Some(pending) = self.shared.pop_incoming() {
-                return Ok(self.shared.stage_incoming(pending));
+            if let Some(incoming) = self.shared.take_incoming() {
+                return Ok(incoming);
             }
             let pkt = recv_pkt(
                 &mut self.read_half,
@@ -846,8 +870,7 @@ where
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
     /// takes a request that already arrived, if any.
     pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH, MC, MP, MF>> {
-        let pending = self.shared.pop_incoming()?;
-        Some(self.shared.stage_incoming(pending))
+        self.shared.take_incoming()
     }
 
     async fn dispatch(
@@ -1611,8 +1634,8 @@ where
     ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>> {
         let mut listener: Option<EventListener> = None;
         loop {
-            if let Some(pending) = self.shared.pop_incoming() {
-                return Ok(self.shared.stage_incoming(pending));
+            if let Some(incoming) = self.shared.take_incoming() {
+                return Ok(incoming);
             }
             self.shared.check_live()?;
             // Register, then look once more before waiting, as reads do.
