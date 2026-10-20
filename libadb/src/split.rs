@@ -259,9 +259,9 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
-            // Nothing owed back, or nothing to take: no acknowledgement
-            // to send, so no lock to wait for.
-            if slot.unacked == 0 || slot.rx_buf.is_empty() {
+            // Nothing to take, or nothing this take acknowledges: no
+            // OKAY to send, so no lock to wait for.
+            if slot.rx_buf.is_empty() || !slot.take_acks(buf.len(), self.delayed_ack, watermark) {
                 let taken = slot.take_buffered(buf, self.delayed_ack, watermark)?;
                 return Ok(taken.map(|(n, _)| n));
             }
@@ -2228,6 +2228,40 @@ mod tests {
         .unwrap();
         let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
         assert_eq!((cmd, arg0, arg1), (Command::Close, 99, 77));
+    }
+
+    #[test]
+    fn a_read_that_owes_no_ack_does_not_wait_for_the_write_lock() {
+        // Without delayed ACK, a 1 KiB watermark.
+        let config = ConnectionConfig::new()
+            .with_max_payload(1024)
+            .with_initial_ack_bytes(1024);
+        let mut mock = Mock::new();
+        mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
+        let conn = now(Connection::<_>::connect_with_config(
+            SharedMock::new(mock),
+            NoAuth,
+            &[],
+            config,
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        // Well past the watermark, with its acknowledgement held back.
+        {
+            let mut chs = writer.shared.lock_channels();
+            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            slot.push_rx(&[0xEE; 2000], usize::MAX).unwrap();
+            slot.unacked = 1000;
+        }
+
+        // Another task holds the write half; a small read leaves the
+        // buffer past the watermark, so it owes nothing and goes ahead.
+        let _wh = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        assert_eq!(now(writer.read_channel(ch, &mut buf)).unwrap(), 8);
+        let chs = writer.shared.lock_channels();
+        assert_eq!(chs[ch.slot].as_ref().unwrap().unacked, 1000);
     }
 
     #[test]
