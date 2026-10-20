@@ -1,7 +1,7 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
-use libadb::{Connection, ConnectionConfig, Error};
+use libadb::{Connection, ConnectionConfig, Error, ProtocolError};
 
 #[path = "rt/rt.rs"]
 mod rt;
@@ -914,5 +914,37 @@ async fn split_listener_gets_a_request_handed_back_undecided() {
     assert_eq!(again.destination(), b"tcp:1234\0");
     again.reject().await.unwrap();
     rt::join(device).await;
+}
+}
+
+// A READY the opener cannot take — delayed ACK without its credit —
+// fails the open, and the device gets a CLSE for the end it opened.
+rt_test! {
+async fn split_writer_open_channel_fails_on_a_ready_without_credit() {
+    let dev = FakeDevice::new()
+        .banner(DA_BANNER)
+        .max_payload(DA_MAX_PAYLOAD)
+        .delayed_ack(64);
+    let (conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (open.arg0, 300));
+    })
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let err = rt::timeout_ms(5000, writer.open_channel(b"svc:\0"))
+        .await
+        .expect("open hung")
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+        "got {err:?}"
+    );
+    rt::timeout_ms(5000, rt::join(device))
+        .await
+        .expect("device never got its CLSE");
 }
 }

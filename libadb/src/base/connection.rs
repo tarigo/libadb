@@ -472,7 +472,19 @@ where
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id => {
                     let mut slot = ChannelSlot::new(local_id);
-                    slot.accept_open_ready(pkt.arg0, &pkt.data, self.delayed_ack)?;
+                    if let Err(e) = slot.accept_open_ready(pkt.arg0, &pkt.data, self.delayed_ack) {
+                        // The device holds an end it takes for open:
+                        // close it by its id.
+                        let checksum = self.checksum();
+                        send_pkt(
+                            &mut self.transport,
+                            &self.desync,
+                            &Packet::close(local_id, pkt.arg0),
+                            checksum,
+                        )
+                        .await?;
+                        return Err(e.into());
+                    }
                     self.channels[slot_idx] = Some(slot);
                     return Ok(ChannelId {
                         slot: slot_idx,

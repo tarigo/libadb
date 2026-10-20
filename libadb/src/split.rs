@@ -606,11 +606,22 @@ where
             .await?;
             match pkt.command {
                 Command::Ready if pkt.arg1 == ch.local_id => {
-                    {
+                    let accepted = {
                         let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = chs[ch.slot].as_mut() {
-                            slot.accept_open_ready(pkt.arg0, &pkt.data, self.shared.delayed_ack)?;
+                        match chs[ch.slot].as_mut() {
+                            Some(slot) => {
+                                slot.accept_open_ready(pkt.arg0, &pkt.data, self.shared.delayed_ack)
+                            }
+                            None => Ok(()),
                         }
+                    };
+                    if let Err(e) = accepted {
+                        // The device holds an end it takes for open.
+                        let fault = ChannelFault::Protocol(e);
+                        self.shared
+                            .fail_channel(ch.slot, ch.local_id, pkt.arg0, fault)
+                            .await?;
+                        return Err(fault.error());
                     }
                     guard.disarm();
                     return Ok(ch);
@@ -929,15 +940,21 @@ where
                 idx,
                 local_id,
                 remote_id,
+                opening,
                 fault,
-            } => match on_fault {
-                OnFault::FailCall => return Err(fault.error()),
-                OnFault::CloseChannel => {
+            } => {
+                // An opener waits on its slot whoever drives the
+                // connection, and the device holds an end it takes for
+                // open: under either policy both have to hear of it.
+                if opening || matches!(on_fault, OnFault::CloseChannel) {
                     self.shared
                         .fail_channel(idx, local_id, remote_id, fault)
-                        .await?
+                        .await?;
                 }
-            },
+                if matches!(on_fault, OnFault::FailCall) {
+                    return Err(fault.error());
+                }
+            }
             DispatchOutcome::Unmatched => {}
         }
         Ok(())
@@ -1265,10 +1282,13 @@ where
                 match chs[ch.slot].as_ref() {
                     Some(slot) if slot.local_id == ch.local_id => match slot.state {
                         ChannelState::Opening => {}
-                        // A remote id comes only with READY: the channel was
-                        // opened, even if the device has closed it since.
+                        // A remote id comes only with a READY the slot
+                        // took: without one the device refused the OPEN,
+                        // or answered it with a READY that failed the
+                        // slot. With one the channel was opened, even if
+                        // it has been closed since.
                         ChannelState::Closed if slot.remote_id == 0 => {
-                            return Err(Error::ChannelClosed)
+                            return Err(slot.closed_error())
                         }
                         ChannelState::Open | ChannelState::Closed => {
                             guard.disarm();
@@ -1987,6 +2007,41 @@ mod tests {
         );
         let err = now(read).unwrap_err();
         assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+    }
+
+    #[test]
+    fn a_ready_without_credit_fails_a_writer_open_on_a_reader_driven_connection() {
+        use crate::base::error::ProtocolError;
+        use core::task::{Context, Waker};
+
+        // Queued behind the first channel's grant: the device's answer
+        // to the Writer's OPEN (local id 2), without its credit.
+        let (mut reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(
+            64,
+            &[Packet::new(Command::Ready, 43, 2, Vec::new())],
+        );
+        let mut open = pin!(writer.open_channel(b"svc:\0"));
+        assert!(open
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+
+        // The reader-driven call that happens to read the READY gets
+        // the fault, as such calls do ...
+        let mut buf = [0u8; 8];
+        let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+            "reader: got {err:?}"
+        );
+        // ... and the opener hears of it too, instead of waiting on.
+        let err = now(open).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+            "opener: got {err:?}"
+        );
+        let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
+        assert_eq!((cmd, arg0, arg1), (Command::Close, 2, 43));
     }
 
     #[test]

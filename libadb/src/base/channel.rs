@@ -90,6 +90,9 @@ pub(crate) enum DispatchOutcome {
         local_id: u32,
         #[allow(dead_code)] // read only by split::Reader::run, to close the channel
         remote_id: u32,
+        /// The slot was waiting for the device's answer to its OPEN.
+        #[allow(dead_code)] // read only by split::Reader, to fail the open
+        opening: bool,
         fault: ChannelFault,
     },
     Unmatched,
@@ -202,7 +205,7 @@ pub(crate) fn dispatch_packet(
                         len,
                     },
                     Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
-                    Err(RxOverflow) => slot.fault(idx, ChannelFault::RxOverflow),
+                    Err(RxOverflow) => slot.fault(idx, pkt.arg0, ChannelFault::RxOverflow),
                 };
             }
             Command::Ready if pkt.arg1 == slot.local_id => {
@@ -213,7 +216,7 @@ pub(crate) fn dispatch_packet(
                 };
                 return match granted {
                     Ok(()) => DispatchOutcome::CreditGranted { idx },
-                    Err(e) => slot.fault(idx, ChannelFault::Protocol(e)),
+                    Err(e) => slot.fault(idx, pkt.arg0, ChannelFault::Protocol(e)),
                 };
             }
             Command::Close if pkt.arg1 == slot.local_id => {
@@ -351,11 +354,14 @@ impl ChannelSlot {
         self.unacked = 0;
     }
 
-    fn fault(&self, idx: usize, fault: ChannelFault) -> DispatchOutcome {
+    /// `remote_id` comes from the packet: a slot still opening has
+    /// none of its own yet.
+    fn fault(&self, idx: usize, remote_id: u32, fault: ChannelFault) -> DispatchOutcome {
         DispatchOutcome::ChannelFault {
             idx,
             local_id: self.local_id,
-            remote_id: self.remote_id,
+            remote_id,
+            opening: self.state == ChannelState::Opening,
             fault,
         }
     }
@@ -366,11 +372,13 @@ impl ChannelSlot {
         payload: &[u8],
         delayed_ack: bool,
     ) -> Result<(), ProtocolError> {
-        self.remote_id = remote_id;
-        self.state = ChannelState::Open;
+        // Parsed first: a READY the slot cannot take leaves it as it
+        // was, still opening, rather than open with no budget.
         if delayed_ack {
             self.send_budget = parse_ready_credit(payload)? as i64;
         }
+        self.remote_id = remote_id;
+        self.state = ChannelState::Open;
         Ok(())
     }
 
