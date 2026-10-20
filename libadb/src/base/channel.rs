@@ -174,6 +174,13 @@ pub(crate) fn dispatch_packet(
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
         match pkt.command {
+            // A channel closed for a fault takes nothing more: data that
+            // was still in flight would read as if no gap came before it.
+            Command::Write | Command::Ready
+                if pkt.arg1 == slot.local_id && slot.failed.is_some() =>
+            {
+                return DispatchOutcome::Unmatched;
+            }
             Command::Write if pkt.arg1 == slot.local_id => {
                 return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
                     Ok(AckDecision::Now {

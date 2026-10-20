@@ -813,6 +813,9 @@ async fn split_run_closes_only_the_channel_a_packet_broke() {
         for _ in 0..3 {
             s.send(CMD_WRTE, b_dev, b_cli, &[0xEE; CHUNK]).await;
         }
+        // Still in flight when `b` is closed: dropped, not read after
+        // the gap or taken for another overflow.
+        s.send(CMD_WRTE, b_dev, b_cli, b"late").await;
         // The first fits under the watermark and is acknowledged; the
         // third does not fit at all, and `b` is closed for it.
         let (okay, _) = s.expect(CMD_OKAY).await;
