@@ -50,7 +50,7 @@ code talks to. To use the libusb backend, disable defaults and enable
 `rusb` directly:
 
 ```toml
-libadb = { version = "0.6", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
@@ -59,7 +59,7 @@ The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
 
 ```toml
 [dependencies]
-libadb = { version = "0.6", features = ["tokio"] }
+libadb = { version = "0.7", features = ["tokio"] }
 ```
 
 One-shot command over `shell::v2`:
