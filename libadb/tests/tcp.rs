@@ -17,7 +17,7 @@ use fake_device::{
 
 #[path = "common/common.rs"]
 mod common;
-use common::{expect_missing_feature, handshake, shell_v2_encode, SH_EXIT, SH_STDOUT};
+use common::{expect_missing_feature, handshake, poll_once, shell_v2_encode, SH_EXIT, SH_STDOUT};
 
 // ---------------------------------------------------------------------------
 // Tests: connection handshake
@@ -701,5 +701,31 @@ async fn require_feature_works_after_connect_with_raw_banner() {
     expect_missing_feature(conn.require_feature(Feature::TrackApp), Feature::TrackApp);
 
     rt::join(device).await;
+}
+}
+
+// An open given up on before the device answered leaves nothing open on
+// the device: the READY that comes for it later is answered with a CLSE
+// naming the device's id, which adbd needs to find the channel.
+rt_test! {
+async fn a_ready_for_an_abandoned_open_is_answered_with_clse() {
+    let (mut conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
+        let (a, _) = s.expect(CMD_OPEN).await;
+        let (b, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, a.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (a.arg0, 300));
+        s.send(CMD_OKAY, 301, b.arg0, &[]).await;
+    })
+    .await;
+
+    {
+        let mut open = core::pin::pin!(conn.open_channel(b"a:\0"));
+        assert!(poll_once(open.as_mut()).await.is_pending());
+    }
+    rt::within("open b", conn.open_channel(b"b:\0"))
+        .await
+        .unwrap();
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }

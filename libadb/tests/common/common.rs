@@ -99,3 +99,10 @@ pub fn logger_payload(priority: u8, tag: &[u8], message: &[u8]) -> Vec<u8> {
     p.push(0);
     p
 }
+
+/// Poll `f` once and say where it stands.
+pub async fn poll_once<F: core::future::Future>(
+    mut f: core::pin::Pin<&mut F>,
+) -> core::task::Poll<F::Output> {
+    core::future::poll_fn(|cx| core::task::Poll::Ready(f.as_mut().poll(cx))).await
+}

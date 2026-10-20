@@ -206,25 +206,6 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         Ok((ChannelId { slot, local_id }, guard))
     }
 
-    /// Best-effort CLSE for an OPEN given up on before the device
-    /// answered, so its end of the channel is not left half-open.
-    async fn abandon_open(&self, local_id: u32)
-    where
-        WH: Write,
-    {
-        let mut wh = self.lock_write().await;
-        let _ = send_raw(
-            &mut *wh,
-            &self.desync,
-            Command::Close,
-            local_id,
-            0,
-            &[],
-            self.checksum(),
-        )
-        .await;
-    }
-
     /// Close a channel a packet broke on its own: its calls fail with
     /// `fault` from now on, and the device gets its CLSE. A channel
     /// already closed and freed in the meantime is left alone.
@@ -571,24 +552,18 @@ where
     /// unrelated packets that arrive in the meantime).
     ///
     /// **Not cancellation-safe.** Dropping the future after the OPEN
-    /// packet has been sent leaves the device-side channel half-open
-    /// until the connection is closed — async Drop cannot send the
-    /// matching CLSE. If the call returns `Err`, a best-effort CLSE is
-    /// sent before the error propagates.
+    /// packet has been sent gives the channel up before the device
+    /// answers. Should it accept after all, the next call that reads
+    /// the connection answers its READY with CLSE, so the device's end
+    /// does not stay open; the same goes for an `Err` returned before
+    /// the answer.
     pub async fn open_channel(
         &mut self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         let (ch, mut guard) = self.shared.send_open(destination).await?;
-
-        let result = self.await_open_ack(ch, &mut guard).await;
-        if let Err(ref e) = result {
-            if !matches!(e, Error::ChannelClosed) {
-                self.shared.abandon_open(ch.local_id).await;
-            }
-        }
-        result
+        self.await_open_ack(ch, &mut guard).await
     }
 
     /// Refuse queued OPENs past the cap — what a cancelled overflow
@@ -937,6 +912,19 @@ where
                     }
                 }
             }
+            DispatchOutcome::StrayReady {
+                local_id,
+                remote_id,
+            } => {
+                let mut wh = self.shared.lock_write().await;
+                send_pkt(
+                    &mut *wh,
+                    &self.shared.desync,
+                    &Packet::close(local_id, remote_id),
+                    self.shared.checksum(),
+                )
+                .await?;
+            }
             DispatchOutcome::ChannelFault {
                 idx,
                 local_id,
@@ -1249,25 +1237,17 @@ where
     /// a refusal comes back as [`Error::ChannelClosed`].
     ///
     /// **Not cancellation-safe.** Dropping the future after OPEN went
-    /// out frees the slot, and the device's channel stays half-open
-    /// until the connection closes, as with [`Reader::open_channel`].
-    /// If the call returns any other `Err` than the refusal — the
-    /// [`Reader`] gone before the answer, for one — a best-effort CLSE
-    /// is sent before the error propagates.
+    /// out gives the channel up before the device answers. Should it
+    /// accept after all, `run` answers its READY with CLSE, so the
+    /// device's end does not stay open — unless the [`Reader`] is gone
+    /// by then, and with it whatever would read that READY.
     pub async fn open_channel(
         &self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         self.shared.check_live()?;
         let (ch, mut guard) = self.shared.send_open(destination).await?;
-
-        let result = self.await_open_ack(ch, &mut guard).await;
-        if let Err(ref e) = result {
-            if !matches!(e, Error::ChannelClosed) {
-                self.shared.abandon_open(ch.local_id).await;
-            }
-        }
-        result
+        self.await_open_ack(ch, &mut guard).await
     }
 
     /// Wait for [`Reader::run`] to dispatch the device's answer to the
