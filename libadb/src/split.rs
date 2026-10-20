@@ -1383,6 +1383,7 @@ where
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let signal = &self.shared.signals[ch.slot];
         loop {
+            self.shared.desync.check()?;
             let listener = signal.listen();
             {
                 let chs = self.shared.lock_channels();
@@ -1451,13 +1452,15 @@ where
         buf: &mut [u8],
         interrupt: F,
     ) -> Result<SelectResult<F::Output>, Error<<WH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
         let Some(signal) = self.shared.signals.get(ch.slot) else {
             return Err(Error::ChannelClosed);
         };
         let mut interrupt = pin!(interrupt);
         let mut listener: Option<EventListener> = None;
         loop {
+            // Each time round: data that arrived just as another task
+            // desynchronized the connection is not handed out.
+            self.shared.desync.check()?;
             if let Some(n) = self.shared.take_buffered(ch, buf).await? {
                 return Ok(SelectResult::Data(n));
             }
@@ -1677,6 +1680,9 @@ where
     ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>> {
         let mut listener: Option<EventListener> = None;
         loop {
+            // A request taken now could get no verdict out: it would only
+            // go back to the queue.
+            self.shared.desync.check()?;
             if let Some(incoming) = self.shared.take_incoming() {
                 return Ok(incoming);
             }
@@ -2262,6 +2268,31 @@ mod tests {
         assert_eq!(now(writer.read_channel(ch, &mut buf)).unwrap(), 8);
         let chs = writer.shared.lock_channels();
         assert_eq!(chs[ch.slot].as_ref().unwrap().unacked, 1000);
+    }
+
+    #[test]
+    fn a_read_woken_on_a_desynchronized_connection_hands_out_nothing() {
+        use core::task::{Context, Waker};
+
+        // Index 1: the header is out, the payload write hangs.
+        let (_reader, writer, ch) = split_with_channel(Some(1));
+        let mut buf = [0u8; 8];
+        let mut read = pin!(writer.read_channel(ch, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+
+        // Data lands while another task abandons a packet mid-write.
+        {
+            let mut chs = writer.shared.lock_channels();
+            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            slot.push_rx(b"hi", usize::MAX).unwrap();
+        }
+        abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+
+        let err = now(read).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
     }
 
     #[test]
