@@ -729,3 +729,27 @@ async fn a_ready_for_an_abandoned_open_is_answered_with_clse() {
     rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
+
+// A READY the opener cannot take — delayed ACK without its credit —
+// fails the open, and the device gets a CLSE for the end it opened.
+rt_test! {
+async fn open_fails_on_a_ready_without_credit_and_closes_it() {
+    let dev = FakeDevice::new()
+        .banner(b"device::features=delayed_ack".to_vec())
+        .delayed_ack(64);
+    let (mut conn, device) = session(dev, b"host::features=delayed_ack", |mut s| async move {
+        let (open, _) = s.expect(CMD_OPEN).await;
+        s.send(CMD_OKAY, 300, open.arg0, &[]).await;
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (open.arg0, 300));
+    })
+    .await;
+
+    let err = conn.open_channel(b"svc:\0").await.unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+        "got {err:?}"
+    );
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
