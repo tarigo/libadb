@@ -775,6 +775,19 @@ where
     pub async fn run(mut self) -> Result<Infallible, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
+            // Before every receive, the first included, so nothing left
+            // over — from before `run` or by the last packet — waits for
+            // traffic that may never come: owed CLSEs go out, and
+            // requests nobody listens for are refused.
+            let owes = !self.shared.lock_owed().is_empty();
+            if owes {
+                drop(self.shared.lock_write().await?);
+            }
+            if self.shared.listeners.load(Ordering::Acquire) == 0 {
+                while let Some(refused) = self.shared.take_incoming() {
+                    refused.reject().await?;
+                }
+            }
             let pkt = recv_pkt(
                 &mut self.read_half,
                 &mut self.recv_buf,
@@ -782,17 +795,6 @@ where
             )
             .await?;
             self.dispatch(pkt, OnFault::CloseChannel).await?;
-            // Owed CLSEs go out now, not whenever some task next writes.
-            let owes = !self.shared.lock_owed().is_empty();
-            if owes {
-                drop(self.shared.lock_write().await?);
-            }
-            if self.shared.listeners.load(Ordering::Acquire) > 0 {
-                continue;
-            }
-            while let Some(refused) = self.shared.take_incoming() {
-                refused.reject().await?;
-            }
         }
     }
 
