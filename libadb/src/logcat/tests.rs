@@ -460,3 +460,20 @@ fn the_stream_ends_at_the_status_byte_of_a_longer_exit_frame() {
 
     assert_eq!(got.unwrap().len(), 1);
 }
+
+#[test]
+fn the_exit_error_keeps_the_first_kib_of_stderr() {
+    let mut wire = frame(shell_v2::STDERR, b"abc");
+    wire.extend_from_slice(&frame(shell_v2::STDERR, &[b'e'; 2000]));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[1]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 256];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    let Err(Error::Logcat(LogcatError::Exited { code: 1, stderr })) = got else {
+        panic!("got {got:?}");
+    };
+    assert_eq!(stderr.len(), 1024);
+    assert!(stderr.starts_with(b"abceee"));
+}

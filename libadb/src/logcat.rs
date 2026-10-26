@@ -66,7 +66,8 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 /// Wraps an ADB channel running `logcat -B …` and decodes the
 /// `shell_v2` framing + binary log format directly in the caller-owned
 /// buffer — no intermediate heap allocations on the read path (only
-/// the returned [`LogEntry`] itself allocates for `tag` and `message`).
+/// the returned [`LogEntry`] itself allocates for `tag` and `message`,
+/// and the first 1 KiB of whatever logcat writes to stderr is kept).
 pub struct Logcat<'a, 'b, S> {
     channel: Channel<'a, S>,
     buf: &'b mut [u8],
@@ -80,7 +81,10 @@ pub struct Logcat<'a, 'b, S> {
     frame_id: u8,
     frame_left: usize,
     exit_code: Option<u8>,
+    stderr: Vec<u8>,
 }
+
+const STDERR_KEPT: usize = 1024;
 
 impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
@@ -99,6 +103,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             frame_id: 0,
             frame_left: 0,
             exit_code: None,
+            stderr: Vec::new(),
         }
     }
 
@@ -138,7 +143,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// is too long for the buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
-    /// inside the returned [`LogEntry`].
+    /// inside the returned [`LogEntry`], and the stderr text it keeps.
     pub async fn read_entry(&mut self) -> Result<LogEntry, Error<S::IoError>> {
         loop {
             if let Some(entry) = self.take_entry()? {
@@ -146,7 +151,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             }
             match self.exit_code {
                 Some(0) => return Err(Error::ChannelClosed),
-                Some(code) => return Err(LogcatError::Exited { code }.into()),
+                Some(code) => {
+                    let stderr = self.stderr.clone();
+                    return Err(LogcatError::Exited { code, stderr }.into());
+                }
                 None => {}
             }
             if self.frame_left > 0 && self.head < self.tail {
@@ -163,6 +171,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                         shift(self.buf, self.head..self.head + n, self.acc_end);
                     }
                     self.acc_end += n;
+                } else {
+                    let kept = n.min(STDERR_KEPT - self.stderr.len());
+                    self.stderr
+                        .extend_from_slice(&self.buf[self.head..self.head + kept]);
                 }
                 self.head += n;
                 self.frame_left -= n;

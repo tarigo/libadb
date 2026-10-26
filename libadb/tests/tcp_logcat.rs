@@ -281,9 +281,14 @@ async fn logcat_dump_fails_when_logcat_exits_with_an_error() {
     let err = logcat::dump(&mut conn, &["-b", "nosuch"], &mut rx)
         .await
         .unwrap_err();
-    assert!(
-        matches!(err, Error::Logcat(logcat::LogcatError::Exited { code: 1, .. })),
-        "got {err:?}"
+    let Error::Logcat(logcat::LogcatError::Exited { code, stderr }) = &err else {
+        panic!("got {err:?}");
+    };
+    assert_eq!(*code, 1);
+    assert_eq!(stderr, b"logcat: Unknown -b buffer 'nosuch'.\n");
+    assert_eq!(
+        err.to_string(),
+        "logcat exited with status 1: logcat: Unknown -b buffer 'nosuch'."
     );
 
     rt::within("the device waiting for our CLSE", rt::join(device)).await;
