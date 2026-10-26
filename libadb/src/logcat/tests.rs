@@ -327,3 +327,26 @@ fn entries_read_on_when_no_frame_ends_where_an_entry_does() {
 
     assert_eq!(got.unwrap().len(), 100);
 }
+
+#[test]
+fn a_wrte_of_one_entry_frames_is_moved_about_once() {
+    // Streaming logcat flushes every entry, so a burst comes as
+    // one-entry frames packed into big WRTEs.
+    let stdout = entries(1985, HEADER_V4_SIZE);
+    let mut wire = Vec::new();
+    for entry in stdout.chunks(HEADER_V4_SIZE) {
+        wire.extend_from_slice(&frame(shell_v2::STDOUT, entry));
+    }
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = vec![0u8; wire.len() + 64];
+
+    let (got, moved) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 1985);
+    assert!(
+        moved <= 2 * stdout.len() + buf.len(),
+        "moved {moved} bytes for {} bytes of entries",
+        stdout.len()
+    );
+}

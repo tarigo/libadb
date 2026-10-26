@@ -70,6 +70,9 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 pub struct Logcat<'a, 'b, S> {
     channel: Channel<'a, S>,
     buf: &'b mut [u8],
+    // buf[acc_start..acc_end] is stdout not yet parsed into entries and
+    // buf[head..tail] raw input not yet looked at. acc_end <= head, so
+    // stdout moved down to acc_end never overwrites unread input.
     acc_start: usize,
     acc_end: usize,
     head: usize,
@@ -93,7 +96,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         }
     }
 
-    fn compact_raw(&mut self) {
+    fn compact(&mut self) {
         // Accumulator first: where the raw bytes go may overlap where it is now.
         if self.acc_start > 0 {
             shift(self.buf, self.acc_start..self.acc_end, 0);
@@ -110,7 +113,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     async fn fill_raw(&mut self, n: usize) -> Result<(), Error<S::IoError>> {
         while self.tail - self.head < n {
             if self.tail >= self.buf.len() {
-                self.compact_raw();
+                self.compact();
                 if self.tail >= self.buf.len() {
                     return Err(Error::ReceiveBufferFull);
                 }
@@ -122,11 +125,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     }
 
     fn absorb_stdout(&mut self, payload_len: usize) {
-        self.compact_raw();
         let payload_start = self.head + shell_v2::HEADER_SIZE;
         let payload_end = payload_start + payload_len;
-        shift(self.buf, payload_start..payload_end, self.head);
-        self.acc_end = self.head + payload_len;
+        shift(self.buf, payload_start..payload_end, self.acc_end);
+        self.acc_end += payload_len;
         self.head = payload_end;
     }
 
