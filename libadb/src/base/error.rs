@@ -669,6 +669,14 @@ mod tests {
     }
 
     #[test]
+    fn logcat_display_truncated_entry() {
+        assert_eq!(
+            show(&LogcatError::TruncatedEntry),
+            "logcat's output ended in the middle of an entry"
+        );
+    }
+
+    #[test]
     fn error_display_decode_uses_inner_unprefixed() {
         let e: Error<IoStub> = Error::Decode(DecodeError::InvalidProtobuf);
         assert_eq!(show(&e), "invalid protobuf");

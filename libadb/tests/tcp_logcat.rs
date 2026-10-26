@@ -231,6 +231,11 @@ async fn logcat_yields_the_entries_that_arrived_before_a_frame_was_cut() {
     let mut logcat = logcat::open(&mut conn, &[], &mut rx).await.unwrap();
     assert_eq!(logcat.read_entry().await.unwrap().pid, 0);
     assert_eq!(logcat.read_entry().await.unwrap().pid, 1);
+    let err = logcat.read_entry().await.unwrap_err();
+    assert!(
+        matches!(err, Error::Logcat(logcat::LogcatError::ClosedWithoutExit)),
+        "got {err:?}"
+    );
 
     logcat.close().await.unwrap();
     rt::within("the device waiting for our CLSE", rt::join(device)).await;

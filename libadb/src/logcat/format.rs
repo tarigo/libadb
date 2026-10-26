@@ -184,6 +184,9 @@ pub enum LogcatError {
     /// The channel closed before logcat's exit status arrived, so its
     /// output may have been cut short.
     ClosedWithoutExit,
+    /// logcat exited with status 0 in the middle of an entry, so the
+    /// rest of that entry never came.
+    TruncatedEntry,
 }
 
 impl fmt::Display for LogcatError {
@@ -205,6 +208,7 @@ impl fmt::Display for LogcatError {
             Self::ClosedWithoutExit => {
                 f.write_str("logcat's channel closed before its exit status arrived")
             }
+            Self::TruncatedEntry => f.write_str("logcat's output ended in the middle of an entry"),
         }
     }
 }

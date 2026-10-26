@@ -141,8 +141,9 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// decoded.  Once logcat has exited and every entry before that has
     /// been returned, fails with [`Error::ChannelClosed`] if it exited
     /// with status 0 and with [`LogcatError::Exited`] otherwise, and goes
-    /// on doing so.  A channel that closes before logcat's exit status
-    /// arrives fails it the same way with
+    /// on doing so.  A clean exit in the middle of an entry fails with
+    /// [`LogcatError::TruncatedEntry`] instead, and a channel that closes
+    /// before logcat's exit status arrives with
     /// [`LogcatError::ClosedWithoutExit`].  Returns
     /// [`Error::ReceiveBufferFull`] when an entry is too long for the
     /// buffer passed to [`open`].
@@ -158,6 +159,9 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                 return Err(LogcatError::ClosedWithoutExit.into());
             }
             match self.exit_code {
+                Some(0) if self.acc_start < self.acc_end => {
+                    return Err(LogcatError::TruncatedEntry.into())
+                }
                 Some(0) => return Err(Error::ChannelClosed),
                 Some(code) => {
                     let stderr = self.stderr.clone();
@@ -291,11 +295,12 @@ pub async fn open<'a, 'b, S: Session>(
 /// Equivalent to `logcat -B -d <args>` — the `-d` flag causes logcat
 /// to print the current log contents and exit instead of streaming.
 /// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
-/// status, as it does for an unknown buffer, and with
+/// status, as it does for an unknown buffer, with
 /// [`LogcatError::ClosedWithoutExit`] when the stream is cut before its
-/// exit status arrives.  A failure drops the entries read before it; to
-/// keep them, read the stream through [`open`] and
-/// [`Logcat::read_entry`].
+/// exit status arrives, and with [`LogcatError::TruncatedEntry`] when
+/// logcat exits cleanly in the middle of an entry.  A failure drops the
+/// entries read before it; to keep them, read the stream through
+/// [`open`] and [`Logcat::read_entry`].
 ///
 /// `args` and `buf` have the same meaning as in [`open`].
 pub async fn dump<S: Session>(

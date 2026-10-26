@@ -509,3 +509,37 @@ fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
 
     assert!(matches!(got, Err(Error::UnexpectedEof)), "got {got:?}");
 }
+
+#[test]
+fn an_entry_cut_short_by_a_clean_exit_is_reported() {
+    let stdout = entries(2, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::TruncatedEntry))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn a_failed_exit_wins_over_the_entry_it_cut_short() {
+    let stdout = entries(2, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[1]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::Exited { code: 1, .. }))),
+        "got {got:?}"
+    );
+}
