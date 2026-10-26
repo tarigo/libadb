@@ -99,6 +99,9 @@ pub enum ProtocolError {
     InvalidAuthToken(usize),
     /// Shell v2 EXIT frame received with empty payload (expected 1-byte exit code).
     ShortExitPayload,
+    /// Shell v2 frame with an id a device never sends: only stdout,
+    /// stderr and exit frames come from it. Carries the id.
+    UnexpectedShellFrame(u8),
     /// Service destination string contains an embedded NUL byte.
     InvalidDestination,
     /// Received an unknown feature from a device.
@@ -214,6 +217,9 @@ impl fmt::Display for ProtocolError {
                 "AUTH token is {len} bytes, not the 20-byte SHA-1 prehash"
             )),
             Self::ShortExitPayload => f.write_str("shell v2 EXIT frame payload empty"),
+            Self::UnexpectedShellFrame(id) => f.write_fmt(format_args!(
+                "shell v2 frame id {id} is not one a device sends"
+            )),
             Self::InvalidDestination => f.write_str("service destination contains a NUL byte"),
             Self::UnknownFeature => f.write_str("unknown feature"),
             Self::InvalidBannerUtf8 => f.write_str("failed to convert the device banner to UTF-8"),

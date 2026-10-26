@@ -6,6 +6,7 @@ use alloc::{format, vec};
 use core::cell::Cell;
 
 use crate::base::connection::Connection;
+use crate::base::error::ProtocolError;
 use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
 
 std::thread_local! {
@@ -348,5 +349,26 @@ fn a_wrte_of_one_entry_frames_is_moved_about_once() {
         moved <= 2 * stdout.len() + buf.len(),
         "moved {moved} bytes for {} bytes of entries",
         stdout.len()
+    );
+}
+
+#[test]
+fn a_frame_a_device_never_sends_is_refused() {
+    // Only stdout, stderr and exit come from the device; any other id
+    // means the stream has slipped out of step.
+    let mut wire = frame(shell_v2::WINDOW_SIZE_CHANGE, &[0; 8]);
+    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE)));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 256];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(
+        matches!(
+            got,
+            Err(Error::Protocol(ProtocolError::UnexpectedShellFrame(5)))
+        ),
+        "got {got:?}"
     );
 }

@@ -57,7 +57,7 @@
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
-use crate::base::error::Error;
+use crate::base::error::{Error, ProtocolError};
 use crate::base::session::Session;
 use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 
@@ -158,6 +158,9 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                     .try_into()
                     .unwrap();
                 let (id, payload_len) = shell_v2::parse_header(&hdr);
+                if !matches!(id, shell_v2::STDOUT | shell_v2::STDERR | shell_v2::EXIT) {
+                    return Err(ProtocolError::UnexpectedShellFrame(id).into());
+                }
                 let frame_size = shell_v2::HEADER_SIZE + payload_len as usize;
 
                 match self.fill_raw(frame_size).await {
