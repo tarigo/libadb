@@ -271,16 +271,16 @@ pub async fn dump<S: Session>(
     let mut logcat = Logcat::new(channel, buf);
 
     let mut entries = Vec::new();
-    loop {
+    let end = loop {
         match logcat.read_entry().await {
             Ok(entry) => entries.push(entry),
-            Err(Error::ChannelClosed) => break,
-            Err(e) => return Err(e),
+            Err(Error::ChannelClosed) => break Ok(entries),
+            Err(e) => break Err(e),
         }
-    }
+    };
     // The device's CLSE only marks the slot closed; ours frees it.
     let _ = logcat.close().await;
-    Ok(entries)
+    end
 }
 
 /// Open a `logcat` text stream, returning a [`Shell`] wrapper.
