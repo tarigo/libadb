@@ -8,6 +8,7 @@ use core::cell::Cell;
 use crate::base::connection::Connection;
 use crate::base::error::ProtocolError;
 use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
+use crate::base::protocol::Packet;
 
 std::thread_local! {
     /// Bytes `Logcat` has moved within its buffer on this thread, for
@@ -476,4 +477,35 @@ fn the_exit_error_keeps_the_first_kib_of_stderr() {
     };
     assert_eq!(stderr.len(), 1024);
     assert!(stderr.starts_with(b"abceee"));
+}
+
+#[test]
+fn a_channel_that_closes_before_the_exit_status_fails() {
+    let wire = frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE));
+    let mut mock = Mock::new();
+    mock.feed(&cnxn())
+        .feed(&okay(1))
+        .feed(&wrte(1, &wire))
+        .feed(&Packet::close(42, 1));
+    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 1);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::ClosedWithoutExit))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
+    let mut conn = device_sending(&[&frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE))]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(matches!(got, Err(Error::UnexpectedEof)), "got {got:?}");
 }

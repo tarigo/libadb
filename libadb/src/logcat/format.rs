@@ -161,8 +161,8 @@ impl LogEntry {
     }
 }
 
-/// Why a logcat session failed: its output did not parse, or logcat
-/// itself failed.
+/// Why a logcat session failed: its output did not parse or was cut
+/// short, or logcat itself failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogcatError {
@@ -181,6 +181,9 @@ pub enum LogcatError {
         /// the usage text older logcat prints.
         stderr: Vec<u8>,
     },
+    /// The channel closed before logcat's exit status arrived, so its
+    /// output may have been cut short.
+    ClosedWithoutExit,
 }
 
 impl fmt::Display for LogcatError {
@@ -198,6 +201,9 @@ impl fmt::Display for LogcatError {
                     Some(reason) => write!(f, ": {reason}"),
                     None => Ok(()),
                 }
+            }
+            Self::ClosedWithoutExit => {
+                f.write_str("logcat's channel closed before its exit status arrived")
             }
         }
     }

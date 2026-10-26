@@ -82,6 +82,7 @@ pub struct Logcat<'a, 'b, S> {
     frame_left: usize,
     exit_code: Option<u8>,
     stderr: Vec<u8>,
+    closed: bool,
 }
 
 const STDERR_KEPT: usize = 1024;
@@ -104,6 +105,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             frame_left: 0,
             exit_code: None,
             stderr: Vec::new(),
+            closed: false,
         }
     }
 
@@ -139,8 +141,11 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// decoded.  Once logcat has exited and every entry before that has
     /// been returned, fails with [`Error::ChannelClosed`] if it exited
     /// with status 0 and with [`LogcatError::Exited`] otherwise, and goes
-    /// on doing so.  Returns [`Error::ReceiveBufferFull`] when an entry
-    /// is too long for the buffer passed to [`open`].
+    /// on doing so.  A channel that closes before logcat's exit status
+    /// arrives fails it the same way with
+    /// [`LogcatError::ClosedWithoutExit`].  Returns
+    /// [`Error::ReceiveBufferFull`] when an entry is too long for the
+    /// buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`], and the stderr text it keeps.
@@ -148,6 +153,9 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         loop {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
+            }
+            if self.closed {
+                return Err(LogcatError::ClosedWithoutExit.into());
             }
             match self.exit_code {
                 Some(0) => return Err(Error::ChannelClosed),
@@ -200,7 +208,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             }
             match self.fill().await {
                 Ok(()) => {}
-                Err(Error::ChannelClosed) => return self.drain_acc_or_close(),
+                Err(Error::ChannelClosed) => self.closed = true,
                 Err(e) => return Err(e),
             }
         }
@@ -214,10 +222,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         };
         self.acc_start += consumed;
         Ok(Some(entry))
-    }
-
-    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<S::IoError>> {
-        self.take_entry()?.ok_or(Error::ChannelClosed)
     }
 
     /// Close the underlying channel.
@@ -287,9 +291,11 @@ pub async fn open<'a, 'b, S: Session>(
 /// Equivalent to `logcat -B -d <args>` — the `-d` flag causes logcat
 /// to print the current log contents and exit instead of streaming.
 /// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
-/// status, as it does for an unknown buffer.  A failure drops the
-/// entries read before it; to keep them, read the stream through
-/// [`open`] and [`Logcat::read_entry`].
+/// status, as it does for an unknown buffer, and with
+/// [`LogcatError::ClosedWithoutExit`] when the stream is cut before its
+/// exit status arrives.  A failure drops the entries read before it; to
+/// keep them, read the stream through [`open`] and
+/// [`Logcat::read_entry`].
 ///
 /// `args` and `buf` have the same meaning as in [`open`].
 pub async fn dump<S: Session>(

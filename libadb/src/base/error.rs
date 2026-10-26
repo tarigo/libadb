@@ -50,8 +50,8 @@ pub enum Error<E> {
     ///
     /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
     ChannelRxOverflow,
-    /// A logcat session failed: its output did not parse, or logcat
-    /// exited with an error.
+    /// A logcat session failed: its output did not parse or was cut
+    /// short, or logcat exited with an error.
     Logcat(crate::logcat::LogcatError),
     /// Hex-framed protobuf decode error (track-app, app-info).
     Decode(DecodeError),
@@ -657,6 +657,14 @@ mod tests {
         assert_eq!(
             show(&e),
             "logcat exited with status 1: logcat: Unexpected EOF!"
+        );
+    }
+
+    #[test]
+    fn logcat_display_closed_without_exit() {
+        assert_eq!(
+            show(&LogcatError::ClosedWithoutExit),
+            "logcat's channel closed before its exit status arrived"
         );
     }
 
