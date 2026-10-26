@@ -372,3 +372,69 @@ fn a_frame_a_device_never_sends_is_refused() {
         "got {got:?}"
     );
 }
+
+/// Reads `stdout` cut into two frames at `frame_cut`, their wire bytes
+/// cut into two WRTEs at `wrte_cut`, through a `buf_len`-byte buffer.
+fn read_cut(
+    stdout: &[u8],
+    frame_cut: usize,
+    wrte_cut: usize,
+    buf_len: usize,
+) -> Result<Vec<LogEntry>, Error<MockError>> {
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..frame_cut]);
+    wire.extend_from_slice(&frame(shell_v2::STDOUT, &stdout[frame_cut..]));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire[..wrte_cut], &wire[wrte_cut..]]);
+    let mut buf = vec![0u8; buf_len];
+    read_to_end(&mut conn, &mut buf).0
+}
+
+#[test]
+fn a_buffer_four_bytes_longer_than_an_entry_reads_every_cut() {
+    // The worst cut leaves all but the last byte of an entry waiting
+    // while the next frame's header comes in a few bytes at a time.
+    const LEN: usize = 40;
+    let stdout = entries(2, LEN);
+    let mut ran_out = 0;
+    for frame_cut in 1..stdout.len() {
+        for wrte_cut in 1..stdout.len() + 16 {
+            let got = read_cut(&stdout, frame_cut, wrte_cut, LEN + 4);
+            assert_eq!(got.unwrap().len(), 2, "cuts {frame_cut}/{wrte_cut}");
+            match read_cut(&stdout, frame_cut, wrte_cut, LEN + 3) {
+                Ok(got) => assert_eq!(got.len(), 2),
+                Err(Error::ReceiveBufferFull) => ran_out += 1,
+                Err(e) => panic!("cuts {frame_cut}/{wrte_cut}: {e:?}"),
+            }
+        }
+    }
+    assert!(ran_out > 0, "three bytes over an entry never ran out");
+}
+
+#[test]
+fn empty_stdout_and_stderr_frames_between_entries_are_harmless() {
+    let entry = entries(1, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &[]);
+    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entry));
+    wire.extend_from_slice(&frame(shell_v2::STDERR, &[]));
+    wire.extend_from_slice(&frame(shell_v2::STDOUT, &[]));
+    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entry));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 2);
+}
+
+#[test]
+fn an_entry_longer_than_the_buffer_fails_instead_of_waiting() {
+    let mut wire = frame(shell_v2::STDOUT, &entries(1, 200));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(matches!(got, Err(Error::ReceiveBufferFull)), "got {got:?}");
+}

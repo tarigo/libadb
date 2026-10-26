@@ -26,14 +26,16 @@ pub enum Error<E> {
     NoFreeChannels,
     /// Transport closed unexpectedly (EOF during read).
     UnexpectedEof,
-    /// A caller-provided receive buffer is too small to hold the next
-    /// frame and cannot be grown. Returned by [`shell::v2::Shell`] when
-    /// the buffer passed to [`shell::v2::Shell::new`] cannot fit either
-    /// the next inbound frame or any further bytes from the channel
-    /// after compaction.
+    /// A caller-provided receive buffer is too small for what it has to
+    /// hold at once and cannot be grown. Returned by
+    /// [`shell::v2::Shell`] when the buffer passed to
+    /// [`shell::v2::Shell::new`] cannot fit either the next inbound
+    /// frame or any further bytes from the channel after compaction, and
+    /// by [`logcat::Logcat`] when its buffer cannot hold the next entry.
     ///
     /// [`shell::v2::Shell`]: crate::shell::v2::Shell
     /// [`shell::v2::Shell::new`]: crate::shell::v2::Shell::new
+    /// [`logcat::Logcat`]: crate::logcat::Logcat
     ReceiveBufferFull,
     /// A channel buffered more unread data than
     /// [`ConnectionConfig::max_rx_per_channel`] allows.
