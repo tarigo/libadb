@@ -53,7 +53,7 @@
 включите `rusb` напрямую:
 
 ```toml
-libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.8", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 Ядро крейта — `no_std + alloc`; любая рантайм-фича подтягивает `std`.
@@ -62,7 +62,7 @@ libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb
 
 ```toml
 [dependencies]
-libadb = { version = "0.7", features = ["tokio"] }
+libadb = { version = "0.8", features = ["tokio"] }
 ```
 
 Разовая команда через `shell::v2`:
