@@ -161,19 +161,28 @@ impl LogEntry {
     }
 }
 
-/// Logcat binary-parsing error.
+/// Why a logcat session failed: its output did not parse, or logcat
+/// itself failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogcatError {
     /// The `logger_entry` header has an `hdr_size` smaller than the
     /// minimum (24 bytes for v3).
     InvalidHeader,
+    /// logcat exited with a non-zero status, as it does on an unknown
+    /// buffer or option, or when it falls behind the log. A signal that
+    /// ended it shows as 0x80 plus the signal number.
+    Exited {
+        /// logcat's exit status.
+        code: u8,
+    },
 }
 
 impl fmt::Display for LogcatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidHeader => f.write_str("logcat: invalid logger_entry header"),
+            Self::Exited { code } => write!(f, "logcat exited with status {code}"),
         }
     }
 }

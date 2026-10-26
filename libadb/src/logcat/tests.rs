@@ -432,3 +432,31 @@ fn an_entry_longer_than_the_buffer_fails_instead_of_waiting() {
 
     assert!(matches!(got, Err(Error::ReceiveBufferFull)), "got {got:?}");
 }
+
+#[test]
+fn an_exit_frame_without_a_status_is_refused() {
+    let mut wire = frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(
+        matches!(got, Err(Error::Protocol(ProtocolError::ShortExitPayload))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn the_stream_ends_at_the_status_byte_of_a_longer_exit_frame() {
+    // Only the first byte is the status; nothing after it is waited for.
+    let mut wire = frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE));
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0; 100])[..shell_v2::HEADER_SIZE + 1]);
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 1);
+}

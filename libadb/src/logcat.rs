@@ -79,6 +79,7 @@ pub struct Logcat<'a, 'b, S> {
     tail: usize,
     frame_id: u8,
     frame_left: usize,
+    exit_code: Option<u8>,
 }
 
 impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
@@ -97,6 +98,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             tail: 0,
             frame_id: 0,
             frame_left: 0,
+            exit_code: None,
         }
     }
 
@@ -129,10 +131,11 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// Read the next parsed binary log entry.
     ///
     /// Blocks until a complete `logger_entry` has been received and
-    /// decoded.  Returns [`Error::ChannelClosed`] when the logcat
-    /// process exits and all buffered data has been consumed, and
-    /// [`Error::ReceiveBufferFull`] when an entry is too long for the
-    /// buffer passed to [`open`].
+    /// decoded.  Once logcat has exited and every entry before that has
+    /// been returned, fails with [`Error::ChannelClosed`] if it exited
+    /// with status 0 and with [`LogcatError::Exited`] otherwise, and goes
+    /// on doing so.  Returns [`Error::ReceiveBufferFull`] when an entry
+    /// is too long for the buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`].
@@ -141,7 +144,16 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
+            match self.exit_code {
+                Some(0) => return Err(Error::ChannelClosed),
+                Some(code) => return Err(LogcatError::Exited { code }.into()),
+                None => {}
+            }
             if self.frame_left > 0 && self.head < self.tail {
+                if self.frame_id == shell_v2::EXIT {
+                    self.exit_code = Some(self.buf[self.head]);
+                    continue;
+                }
                 let n = self.frame_left.min(self.tail - self.head);
                 if self.frame_id == shell_v2::STDOUT {
                     if self.acc_start == self.acc_end {
@@ -163,8 +175,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                     .unwrap();
                 let (id, len) = shell_v2::parse_header(&hdr);
                 match id {
-                    shell_v2::EXIT => return self.drain_acc_or_close(),
-                    shell_v2::STDOUT | shell_v2::STDERR => {}
+                    shell_v2::EXIT if len == 0 => {
+                        return Err(ProtocolError::ShortExitPayload.into())
+                    }
+                    shell_v2::STDOUT | shell_v2::STDERR | shell_v2::EXIT => {}
                     other => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
                 }
                 self.head += shell_v2::HEADER_SIZE;
@@ -260,6 +274,10 @@ pub async fn open<'a, 'b, S: Session>(
 ///
 /// Equivalent to `logcat -B -d <args>` — the `-d` flag causes logcat
 /// to print the current log contents and exit instead of streaming.
+/// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
+/// status, as it does for an unknown buffer.  A failure drops the
+/// entries read before it; to keep them, read the stream through
+/// [`open`] and [`Logcat::read_entry`].
 ///
 /// `args` and `buf` have the same meaning as in [`open`].
 pub async fn dump<S: Session>(

@@ -50,7 +50,8 @@ pub enum Error<E> {
     ///
     /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
     ChannelRxOverflow,
-    /// Logcat binary entry parsing error.
+    /// A logcat session failed: its output did not parse, or logcat
+    /// exited with an error.
     Logcat(crate::logcat::LogcatError),
     /// Hex-framed protobuf decode error (track-app, app-info).
     Decode(DecodeError),

@@ -269,7 +269,13 @@ let mut logs = writer.clone();
 tokio::spawn(async move {
     let mut rx = vec![0; 64 * 1024];
     let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
-    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    loop {
+        match logcat.read_entry().await {
+            Ok(entry) => { /* … */ }
+            Err(libadb::Error::ChannelClosed) => break, // logcat вышел с кодом 0
+            Err(e) => return Err(e),
+        }
+    }
     Ok::<_, libadb::Error<_>>(())
 });
 
