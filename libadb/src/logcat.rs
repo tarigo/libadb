@@ -80,9 +80,14 @@ pub struct Logcat<'a, 'b, S> {
     tail: usize,
     frame_id: u8,
     frame_left: usize,
-    exit_code: Option<u8>,
+    end: End,
     stderr: Vec<u8>,
-    closed: bool,
+}
+
+enum End {
+    NotYet,
+    Exited(u8),
+    ClosedWithoutExit,
 }
 
 const STDERR_KEPT: usize = 1024;
@@ -103,9 +108,8 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             tail: 0,
             frame_id: 0,
             frame_left: 0,
-            exit_code: None,
+            end: End::NotYet,
             stderr: Vec::new(),
-            closed: false,
         }
     }
 
@@ -155,23 +159,21 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
-            if self.closed {
-                return Err(LogcatError::ClosedWithoutExit.into());
-            }
-            match self.exit_code {
-                Some(0) if self.acc_start < self.acc_end => {
+            match self.end {
+                End::NotYet => {}
+                End::Exited(0) if self.acc_start < self.acc_end => {
                     return Err(LogcatError::TruncatedEntry.into())
                 }
-                Some(0) => return Err(Error::ChannelClosed),
-                Some(code) => {
+                End::Exited(0) => return Err(Error::ChannelClosed),
+                End::Exited(code) => {
                     let stderr = self.stderr.clone();
                     return Err(LogcatError::Exited { code, stderr }.into());
                 }
-                None => {}
+                End::ClosedWithoutExit => return Err(LogcatError::ClosedWithoutExit.into()),
             }
             if self.frame_left > 0 && self.head < self.tail {
                 if self.frame_id == shell_v2::EXIT {
-                    self.exit_code = Some(self.buf[self.head]);
+                    self.end = End::Exited(self.buf[self.head]);
                     continue;
                 }
                 let n = self.frame_left.min(self.tail - self.head);
@@ -212,7 +214,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             }
             match self.fill().await {
                 Ok(()) => {}
-                Err(Error::ChannelClosed) => self.closed = true,
+                Err(Error::ChannelClosed) => self.end = End::ClosedWithoutExit,
                 Err(e) => return Err(e),
             }
         }
