@@ -144,7 +144,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             if self.frame_left > 0 && self.head < self.tail {
                 let n = self.frame_left.min(self.tail - self.head);
                 if self.frame_id == shell_v2::STDOUT {
-                    if self.acc_end < self.head {
+                    if self.acc_start == self.acc_end {
+                        self.acc_start = self.head;
+                        self.acc_end = self.head;
+                    } else if self.acc_end < self.head {
                         shift(self.buf, self.head..self.head + n, self.acc_end);
                     }
                     self.acc_end += n;
@@ -184,10 +187,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             return Ok(None);
         };
         self.acc_start += consumed;
-        if self.acc_start == self.acc_end {
-            self.acc_start = 0;
-            self.acc_end = 0;
-        }
         Ok(Some(entry))
     }
 

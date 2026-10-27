@@ -292,23 +292,21 @@ fn read_to_end(
 }
 
 #[test]
-fn a_frame_of_small_entries_is_moved_about_once() {
+fn a_frame_of_small_entries_is_not_moved() {
     // adbd frames whatever one read() of logcat's stdout returned, so a
-    // burst like `logcat -d` arrives as one frame of many entries.
+    // burst like `logcat -d` arrives as one frame of many entries,
+    // spread over many WRTEs.
     let stdout = entries(2340, HEADER_V4_SIZE);
     let mut wire = frame(shell_v2::STDOUT, &stdout);
     wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
-    let mut conn = device_sending(&[&wire]);
+    let wrtes: Vec<&[u8]> = wire.chunks(1000).collect();
+    let mut conn = device_sending(&wrtes);
     let mut buf = vec![0u8; wire.len() + 64];
 
     let (got, moved) = read_to_end(&mut conn, &mut buf);
 
     assert_eq!(got.unwrap().len(), 2340);
-    assert!(
-        moved <= 2 * stdout.len() + buf.len(),
-        "moved {moved} bytes for {} bytes of entries",
-        stdout.len()
-    );
+    assert_eq!(moved, 0);
 }
 
 #[test]
@@ -330,7 +328,7 @@ fn entries_read_on_when_no_frame_ends_where_an_entry_does() {
 }
 
 #[test]
-fn a_wrte_of_one_entry_frames_is_moved_about_once() {
+fn a_wrte_of_one_entry_frames_is_not_moved() {
     // Streaming logcat flushes every entry, so a burst comes as
     // one-entry frames packed into big WRTEs.
     let stdout = entries(1985, HEADER_V4_SIZE);
@@ -345,11 +343,7 @@ fn a_wrte_of_one_entry_frames_is_moved_about_once() {
     let (got, moved) = read_to_end(&mut conn, &mut buf);
 
     assert_eq!(got.unwrap().len(), 1985);
-    assert!(
-        moved <= 2 * stdout.len() + buf.len(),
-        "moved {moved} bytes for {} bytes of entries",
-        stdout.len()
-    );
+    assert_eq!(moved, 0);
 }
 
 #[test]
