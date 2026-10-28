@@ -1,6 +1,18 @@
+extern crate std;
+
 use super::format::{HEADER_V3_SIZE, HEADER_V4_SIZE};
 use super::*;
 use alloc::{format, vec};
+use core::cell::Cell;
+
+use crate::base::connection::Connection;
+use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
+
+std::thread_local! {
+    /// Bytes `Logcat` has moved within its buffer on this thread, for
+    /// the tests that pin how often a byte is copied.
+    pub(super) static MOVED: Cell<usize> = const { Cell::new(0) };
+}
 
 fn make_v4_entry(
     pid: i32,
@@ -228,5 +240,113 @@ fn destination_buffer_too_small() {
     assert_eq!(
         write_destination(&mut buf, b"logcat -B", &[]),
         Err(crate::base::destination::DestinationError::TooLong)
+    );
+}
+
+fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(shell_v2::HEADER_SIZE + payload.len());
+    f.push(id);
+    f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    f.extend_from_slice(payload);
+    f
+}
+
+/// `n` back-to-back main-buffer entries, each `len` bytes long.
+fn entries(n: usize, len: usize) -> Vec<u8> {
+    let payload = vec![b'x'; len - HEADER_V4_SIZE];
+    let mut out = Vec::with_capacity(n * len);
+    for i in 0..n {
+        out.extend_from_slice(&make_v4_entry(i as i32, 0, 0, 0, 0, 0, &payload));
+    }
+    out
+}
+
+/// A connection whose logcat channel the device feeds `wrtes`, one WRTE each.
+fn device_sending(wrtes: &[&[u8]]) -> Connection<Mock> {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn()).feed(&okay(1));
+    for payload in wrtes {
+        mock.feed(&wrte(1, payload));
+    }
+    now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap()
+}
+
+/// Every entry up to the end of logcat's stream, and the bytes moved
+/// within `buf` to get them.
+fn read_to_end(
+    conn: &mut Connection<Mock>,
+    buf: &mut [u8],
+) -> (Result<Vec<LogEntry>, Error<MockError>>, usize) {
+    let mut logcat = now(open(conn, &[], buf)).unwrap();
+    MOVED.with(|moved| moved.set(0));
+    let mut got = Vec::new();
+    let end = loop {
+        match now(logcat.read_entry()) {
+            Ok(entry) => got.push(entry),
+            Err(Error::ChannelClosed) => break Ok(got),
+            Err(e) => break Err(e),
+        }
+    };
+    (end, MOVED.with(Cell::get))
+}
+
+#[test]
+fn a_frame_of_small_entries_is_moved_about_once() {
+    // adbd frames whatever one read() of logcat's stdout returned, so a
+    // burst like `logcat -d` arrives as one frame of many entries.
+    let stdout = entries(2340, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = vec![0u8; wire.len() + 64];
+
+    let (got, moved) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 2340);
+    assert!(
+        moved <= 2 * stdout.len() + buf.len(),
+        "moved {moved} bytes for {} bytes of entries",
+        stdout.len()
+    );
+}
+
+#[test]
+fn entries_read_on_when_no_frame_ends_where_an_entry_does() {
+    // Each frame stops one byte into the next entry, so part of an
+    // entry is always left waiting while the stream goes on.
+    let stdout = entries(100, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 1]);
+    for piece in stdout[HEADER_V4_SIZE + 1..].chunks(HEADER_V4_SIZE) {
+        wire.extend_from_slice(&frame(shell_v2::STDOUT, piece));
+    }
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 100);
+}
+
+#[test]
+fn a_wrte_of_one_entry_frames_is_moved_about_once() {
+    // Streaming logcat flushes every entry, so a burst comes as
+    // one-entry frames packed into big WRTEs.
+    let stdout = entries(1985, HEADER_V4_SIZE);
+    let mut wire = Vec::new();
+    for entry in stdout.chunks(HEADER_V4_SIZE) {
+        wire.extend_from_slice(&frame(shell_v2::STDOUT, entry));
+    }
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = vec![0u8; wire.len() + 64];
+
+    let (got, moved) = read_to_end(&mut conn, &mut buf);
+
+    assert_eq!(got.unwrap().len(), 1985);
+    assert!(
+        moved <= 2 * stdout.len() + buf.len(),
+        "moved {moved} bytes for {} bytes of entries",
+        stdout.len()
     );
 }

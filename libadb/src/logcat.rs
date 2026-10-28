@@ -67,20 +67,13 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 /// `shell_v2` framing + binary log format directly in the caller-owned
 /// buffer — no intermediate heap allocations on the read path (only
 /// the returned [`LogEntry`] itself allocates for `tag` and `message`).
-///
-/// The buffer is split into two logical regions:
-///
-/// ```text
-/// buf: [accumulated stdout][ gap ][raw channel data][ free ]
-///       0          acc_end        head         tail     len
-/// ```
-///
-/// STDOUT payloads are absorbed into the accumulation zone by shifting
-/// them over the 5-byte `shell_v2` header.  Non-STDOUT frames (stderr,
-/// exit) are skipped in-place.
 pub struct Logcat<'a, 'b, S> {
     channel: Channel<'a, S>,
     buf: &'b mut [u8],
+    // buf[acc_start..acc_end] is stdout not yet parsed into entries and
+    // buf[head..tail] raw input not yet looked at. acc_end <= head, so
+    // stdout moved down to acc_end never overwrites unread input.
+    acc_start: usize,
     acc_end: usize,
     head: usize,
     tail: usize,
@@ -96,15 +89,22 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         Self {
             channel,
             buf,
+            acc_start: 0,
             acc_end: 0,
             head: 0,
             tail: 0,
         }
     }
 
-    fn compact_raw(&mut self) {
+    fn compact(&mut self) {
+        // Accumulator first: where the raw bytes go may overlap where it is now.
+        if self.acc_start > 0 {
+            shift(self.buf, self.acc_start..self.acc_end, 0);
+            self.acc_end -= self.acc_start;
+            self.acc_start = 0;
+        }
         if self.acc_end < self.head {
-            self.buf.copy_within(self.head..self.tail, self.acc_end);
+            shift(self.buf, self.head..self.tail, self.acc_end);
             self.tail -= self.head - self.acc_end;
             self.head = self.acc_end;
         }
@@ -113,7 +113,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     async fn fill_raw(&mut self, n: usize) -> Result<(), Error<S::IoError>> {
         while self.tail - self.head < n {
             if self.tail >= self.buf.len() {
-                self.compact_raw();
+                self.compact();
                 if self.tail >= self.buf.len() {
                     return Err(Error::ReceiveBufferFull);
                 }
@@ -125,11 +125,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     }
 
     fn absorb_stdout(&mut self, payload_len: usize) {
-        self.compact_raw();
         let payload_start = self.head + shell_v2::HEADER_SIZE;
         let payload_end = payload_start + payload_len;
-        self.buf.copy_within(payload_start..payload_end, self.head);
-        self.acc_end = self.head + payload_len;
+        shift(self.buf, payload_start..payload_end, self.acc_end);
+        self.acc_end += payload_len;
         self.head = payload_end;
     }
 
@@ -143,11 +142,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// inside the returned [`LogEntry`].
     pub async fn read_entry(&mut self) -> Result<LogEntry, Error<S::IoError>> {
         loop {
-            if let Some((entry, consumed)) =
-                parse_entry(&self.buf[..self.acc_end]).map_err(Error::Logcat)?
-            {
-                self.buf.copy_within(consumed..self.acc_end, 0);
-                self.acc_end -= consumed;
+            if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
 
@@ -183,21 +178,34 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         }
     }
 
-    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<S::IoError>> {
-        if let Some((entry, consumed)) =
-            parse_entry(&self.buf[..self.acc_end]).map_err(Error::Logcat)?
-        {
-            self.buf.copy_within(consumed..self.acc_end, 0);
-            self.acc_end -= consumed;
-            return Ok(entry);
+    fn take_entry(&mut self) -> Result<Option<LogEntry>, Error<S::IoError>> {
+        let Some((entry, consumed)) =
+            parse_entry(&self.buf[self.acc_start..self.acc_end]).map_err(Error::Logcat)?
+        else {
+            return Ok(None);
+        };
+        self.acc_start += consumed;
+        if self.acc_start == self.acc_end {
+            self.acc_start = 0;
+            self.acc_end = 0;
         }
-        Err(Error::ChannelClosed)
+        Ok(Some(entry))
+    }
+
+    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<S::IoError>> {
+        self.take_entry()?.ok_or(Error::ChannelClosed)
     }
 
     /// Close the underlying channel.
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
     }
+}
+
+fn shift(buf: &mut [u8], from: core::ops::Range<usize>, to: usize) {
+    #[cfg(test)]
+    tests::MOVED.with(|moved| moved.set(moved.get() + from.len()));
+    buf.copy_within(from, to);
 }
 
 fn write_destination(
