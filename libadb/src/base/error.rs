@@ -26,14 +26,16 @@ pub enum Error<E> {
     NoFreeChannels,
     /// Transport closed unexpectedly (EOF during read).
     UnexpectedEof,
-    /// A caller-provided receive buffer is too small to hold the next
-    /// frame and cannot be grown. Returned by [`shell::v2::Shell`] when
-    /// the buffer passed to [`shell::v2::Shell::new`] cannot fit either
-    /// the next inbound frame or any further bytes from the channel
-    /// after compaction.
+    /// A caller-provided receive buffer is too small for what it has to
+    /// hold at once and cannot be grown. Returned by
+    /// [`shell::v2::Shell`] when the buffer passed to
+    /// [`shell::v2::Shell::new`] cannot fit either the next inbound
+    /// frame or any further bytes from the channel after compaction, and
+    /// by [`logcat::Logcat`] when its buffer cannot hold the next entry.
     ///
     /// [`shell::v2::Shell`]: crate::shell::v2::Shell
     /// [`shell::v2::Shell::new`]: crate::shell::v2::Shell::new
+    /// [`logcat::Logcat`]: crate::logcat::Logcat
     ReceiveBufferFull,
     /// A channel buffered more unread data than
     /// [`ConnectionConfig::max_rx_per_channel`] allows.
@@ -99,6 +101,9 @@ pub enum ProtocolError {
     InvalidAuthToken(usize),
     /// Shell v2 EXIT frame received with empty payload (expected 1-byte exit code).
     ShortExitPayload,
+    /// Shell v2 frame with an id a device never sends: only stdout,
+    /// stderr and exit frames come from it. Carries the id.
+    UnexpectedShellFrame(u8),
     /// Service destination string contains an embedded NUL byte.
     InvalidDestination,
     /// Received an unknown feature from a device.
@@ -214,6 +219,9 @@ impl fmt::Display for ProtocolError {
                 "AUTH token is {len} bytes, not the 20-byte SHA-1 prehash"
             )),
             Self::ShortExitPayload => f.write_str("shell v2 EXIT frame payload empty"),
+            Self::UnexpectedShellFrame(id) => f.write_fmt(format_args!(
+                "shell v2 frame id {id} is not one a device sends"
+            )),
             Self::InvalidDestination => f.write_str("service destination contains a NUL byte"),
             Self::UnknownFeature => f.write_str("unknown feature"),
             Self::InvalidBannerUtf8 => f.write_str("failed to convert the device banner to UTF-8"),

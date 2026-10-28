@@ -57,7 +57,7 @@
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
-use crate::base::error::Error;
+use crate::base::error::{Error, ProtocolError};
 use crate::base::session::Session;
 use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 
@@ -77,6 +77,8 @@ pub struct Logcat<'a, 'b, S> {
     acc_end: usize,
     head: usize,
     tail: usize,
+    frame_id: u8,
+    frame_left: usize,
 }
 
 impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
@@ -93,6 +95,8 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             acc_end: 0,
             head: 0,
             tail: 0,
+            frame_id: 0,
+            frame_left: 0,
         }
     }
 
@@ -110,33 +114,25 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         }
     }
 
-    async fn fill_raw(&mut self, n: usize) -> Result<(), Error<S::IoError>> {
-        while self.tail - self.head < n {
-            if self.tail >= self.buf.len() {
-                self.compact();
-                if self.tail >= self.buf.len() {
-                    return Err(Error::ReceiveBufferFull);
-                }
+    async fn fill(&mut self) -> Result<(), Error<S::IoError>> {
+        if self.tail == self.buf.len() {
+            self.compact();
+            if self.tail == self.buf.len() {
+                return Err(Error::ReceiveBufferFull);
             }
-            let read = self.channel.read(&mut self.buf[self.tail..]).await?;
-            self.tail += read;
         }
+        let read = self.channel.read(&mut self.buf[self.tail..]).await?;
+        self.tail += read;
         Ok(())
-    }
-
-    fn absorb_stdout(&mut self, payload_len: usize) {
-        let payload_start = self.head + shell_v2::HEADER_SIZE;
-        let payload_end = payload_start + payload_len;
-        shift(self.buf, payload_start..payload_end, self.acc_end);
-        self.acc_end += payload_len;
-        self.head = payload_end;
     }
 
     /// Read the next parsed binary log entry.
     ///
     /// Blocks until a complete `logger_entry` has been received and
     /// decoded.  Returns [`Error::ChannelClosed`] when the logcat
-    /// process exits and all buffered data has been consumed.
+    /// process exits and all buffered data has been consumed, and
+    /// [`Error::ReceiveBufferFull`] when an entry is too long for the
+    /// buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`].
@@ -145,35 +141,41 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
-
-            loop {
-                match self.fill_raw(shell_v2::HEADER_SIZE).await {
-                    Ok(()) => {}
-                    Err(Error::ChannelClosed) => return self.drain_acc_or_close(),
-                    Err(e) => return Err(e),
+            if self.frame_left > 0 && self.head < self.tail {
+                let n = self.frame_left.min(self.tail - self.head);
+                if self.frame_id == shell_v2::STDOUT {
+                    if self.acc_start == self.acc_end {
+                        self.acc_start = self.head;
+                        self.acc_end = self.head;
+                    } else if self.acc_end < self.head {
+                        shift(self.buf, self.head..self.head + n, self.acc_end);
+                    }
+                    self.acc_end += n;
                 }
-
+                self.head += n;
+                self.frame_left -= n;
+                continue;
+            }
+            if self.frame_left == 0 && self.tail - self.head >= shell_v2::HEADER_SIZE {
                 let hdr: [u8; shell_v2::HEADER_SIZE] = self.buf
                     [self.head..self.head + shell_v2::HEADER_SIZE]
                     .try_into()
                     .unwrap();
-                let (id, payload_len) = shell_v2::parse_header(&hdr);
-                let frame_size = shell_v2::HEADER_SIZE + payload_len as usize;
-
-                match self.fill_raw(frame_size).await {
-                    Ok(()) => {}
-                    Err(Error::ChannelClosed) => return self.drain_acc_or_close(),
-                    Err(e) => return Err(e),
-                }
-
+                let (id, len) = shell_v2::parse_header(&hdr);
                 match id {
-                    shell_v2::STDOUT => {
-                        self.absorb_stdout(payload_len as usize);
-                        break;
-                    }
                     shell_v2::EXIT => return self.drain_acc_or_close(),
-                    _ => self.head += frame_size,
+                    shell_v2::STDOUT | shell_v2::STDERR => {}
+                    other => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
                 }
+                self.head += shell_v2::HEADER_SIZE;
+                self.frame_id = id;
+                self.frame_left = len as usize;
+                continue;
+            }
+            match self.fill().await {
+                Ok(()) => {}
+                Err(Error::ChannelClosed) => return self.drain_acc_or_close(),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -185,10 +187,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             return Ok(None);
         };
         self.acc_start += consumed;
-        if self.acc_start == self.acc_end {
-            self.acc_start = 0;
-            self.acc_end = 0;
-        }
         Ok(Some(entry))
     }
 
@@ -242,8 +240,13 @@ async fn open_shell_channel<'a, S: Session>(
 /// hold spaces or shell metacharacters without being split or executed.
 ///
 /// `buf` is the caller-owned buffer used both for channel IO and for
-/// accumulating binary stdout data.  A few KiB is enough for typical
-/// use; increase for high-throughput streams.
+/// accumulating binary stdout data.  It must be at least 4 bytes longer
+/// than the longest entry, and logcat writes none longer than 5 KiB
+/// (`LOGGER_ENTRY_MAX_LEN`), so 5 KiB + 4 bytes is always enough for the
+/// entries; a larger buffer only means fewer reads.  Opening first
+/// builds the `shell,v2,raw:logcat -B …` destination in it, so very long
+/// `args` need room there too, or this fails with
+/// [`Error::ReceiveBufferFull`].
 pub async fn open<'a, 'b, S: Session>(
     session: &'a mut S,
     args: &[&str],
