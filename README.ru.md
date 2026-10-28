@@ -53,7 +53,7 @@
 включите `rusb` напрямую:
 
 ```toml
-libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.8", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 Ядро крейта — `no_std + alloc`; любая рантайм-фича подтягивает `std`.
@@ -62,7 +62,7 @@ libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb
 
 ```toml
 [dependencies]
-libadb = { version = "0.7", features = ["tokio"] }
+libadb = { version = "0.8", features = ["tokio"] }
 ```
 
 Разовая команда через `shell::v2`:
@@ -269,7 +269,13 @@ let mut logs = writer.clone();
 tokio::spawn(async move {
     let mut rx = vec![0; 64 * 1024];
     let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
-    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    loop {
+        match logcat.read_entry().await {
+            Ok(entry) => { /* … */ }
+            Err(libadb::Error::ChannelClosed) => break, // logcat вышел с кодом 0
+            Err(e) => return Err(e),
+        }
+    }
     Ok::<_, libadb::Error<_>>(())
 });
 

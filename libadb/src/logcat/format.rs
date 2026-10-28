@@ -161,19 +161,44 @@ impl LogEntry {
     }
 }
 
-/// Logcat binary-parsing error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a logcat session failed: its output did not parse, or logcat
+/// itself failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogcatError {
     /// The `logger_entry` header has an `hdr_size` smaller than the
     /// minimum (24 bytes for v3).
     InvalidHeader,
+    /// logcat exited with a non-zero status, as it does on an unknown
+    /// buffer or option, or when it falls behind the log. A signal that
+    /// ended it shows as 0x80 plus the signal number.
+    Exited {
+        /// logcat's exit status.
+        code: u8,
+        /// What logcat wrote to stderr, up to its first 1 KiB. The error's
+        /// `Display` shows only the line that gives the reason, the first
+        /// that is not a warning, and leaves out what follows it, such as
+        /// the usage text older logcat prints.
+        stderr: Vec<u8>,
+    },
 }
 
 impl fmt::Display for LogcatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidHeader => f.write_str("logcat: invalid logger_entry header"),
+            Self::Exited { code, stderr } => {
+                write!(f, "logcat exited with status {code}")?;
+                let said = String::from_utf8_lossy(stderr);
+                let reason = said
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with("WARNING:"));
+                match reason {
+                    Some(reason) => write!(f, ": {reason}"),
+                    None => Ok(()),
+                }
+            }
         }
     }
 }

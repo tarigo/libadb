@@ -236,3 +236,92 @@ async fn logcat_yields_the_entries_that_arrived_before_a_frame_was_cut() {
     rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
+
+rt_test! {
+async fn logcat_dump_frees_the_slot_when_it_fails() {
+    let mut bad = logger_entry(1, 1, 0, 0, 0, 0, b"x");
+    bad[2..4].copy_from_slice(&4u16.to_le_bytes());
+    let wire = shell_v2_encode(SH_STDOUT, &bad);
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
+        let mut ch = s.accept_open(b"shell,v2,raw:logcat -B -d\0").await;
+        ch.send_write(&wire).await;
+        ch.expect_ack().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 1024];
+    let err = logcat::dump(&mut conn, &[], &mut rx).await.unwrap_err();
+    assert!(
+        matches!(err, Error::Logcat(logcat::LogcatError::InvalidHeader)),
+        "got {err:?}"
+    );
+
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
+
+rt_test! {
+async fn logcat_dump_fails_when_logcat_exits_with_an_error() {
+    let mut wire = shell_v2_encode(SH_STDERR, b"logcat: Unknown -b buffer 'nosuch'.\n");
+    wire.extend_from_slice(&shell_v2_encode(SH_EXIT, &[1]));
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
+        let mut ch = s
+            .accept_open(b"shell,v2,raw:logcat -B -d -b nosuch\0")
+            .await;
+        ch.send_write(&wire).await;
+        ch.expect_ack().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 1024];
+    let err = logcat::dump(&mut conn, &["-b", "nosuch"], &mut rx)
+        .await
+        .unwrap_err();
+    let Error::Logcat(logcat::LogcatError::Exited { code, stderr }) = &err else {
+        panic!("got {err:?}");
+    };
+    assert_eq!(*code, 1);
+    assert_eq!(stderr, b"logcat: Unknown -b buffer 'nosuch'.\n");
+    assert_eq!(
+        err.to_string(),
+        "logcat exited with status 1: logcat: Unknown -b buffer 'nosuch'."
+    );
+
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
+
+rt_test! {
+async fn logcat_yields_its_entries_before_the_status_it_failed_with() {
+    let mut wire = shell_v2_encode(SH_STDOUT, &hundred_byte_entries(2));
+    wire.extend_from_slice(&shell_v2_encode(SH_STDERR, b"logcat: Unexpected EOF!\n"));
+    wire.extend_from_slice(&shell_v2_encode(SH_EXIT, &[1]));
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
+        let mut ch = s.accept_open(b"shell,v2,raw:logcat -B\0").await;
+        ch.send_write(&wire).await;
+        ch.expect_ack().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 1024];
+    let mut logcat = logcat::open(&mut conn, &[], &mut rx).await.unwrap();
+    assert_eq!(logcat.read_entry().await.unwrap().pid, 0);
+    assert_eq!(logcat.read_entry().await.unwrap().pid, 1);
+    for _ in 0..2 {
+        let err = logcat.read_entry().await.unwrap_err();
+        assert!(
+            matches!(err, Error::Logcat(logcat::LogcatError::Exited { code: 1, .. })),
+            "got {err:?}"
+        );
+    }
+
+    logcat.close().await.unwrap();
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}

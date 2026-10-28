@@ -50,7 +50,7 @@ code talks to. To use the libusb backend, disable defaults and enable
 `rusb` directly:
 
 ```toml
-libadb = { version = "0.7", default-features = false, features = ["tokio", "rusb"] }
+libadb = { version = "0.8", default-features = false, features = ["tokio", "rusb"] }
 ```
 
 The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
@@ -59,7 +59,7 @@ The core crate is `no_std + alloc`; any runtime feature pulls in `std`.
 
 ```toml
 [dependencies]
-libadb = { version = "0.7", features = ["tokio"] }
+libadb = { version = "0.8", features = ["tokio"] }
 ```
 
 One-shot command over `shell::v2`:
@@ -264,7 +264,13 @@ let mut logs = writer.clone();
 tokio::spawn(async move {
     let mut rx = vec![0; 64 * 1024];
     let mut logcat = logcat::open(&mut logs, &[], &mut rx).await?;
-    while let Ok(entry) = logcat.read_entry().await { /* … */ }
+    loop {
+        match logcat.read_entry().await {
+            Ok(entry) => { /* … */ }
+            Err(libadb::Error::ChannelClosed) => break, // logcat exited with 0
+            Err(e) => return Err(e),
+        }
+    }
     Ok::<_, libadb::Error<_>>(())
 });
 

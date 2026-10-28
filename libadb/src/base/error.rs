@@ -50,7 +50,8 @@ pub enum Error<E> {
     ///
     /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
     ChannelRxOverflow,
-    /// Logcat binary entry parsing error.
+    /// A logcat session failed: its output did not parse, or logcat
+    /// exited with an error.
     Logcat(crate::logcat::LogcatError),
     /// Hex-framed protobuf decode error (track-app, app-info).
     Decode(DecodeError),
@@ -640,6 +641,23 @@ mod tests {
     fn error_display_logcat_uses_inner_unprefixed() {
         let e: Error<IoStub> = Error::Logcat(LogcatError::InvalidHeader);
         assert_eq!(show(&e), "logcat: invalid logger_entry header");
+    }
+
+    #[test]
+    fn logcat_display_exited_shows_only_the_line_with_the_reason() {
+        // logcat warns before its reason and may explain after it.
+        let stderr = b"WARNING: -T 0 invalid, setting to 1\n\
+                       logcat: Unexpected EOF!\n\
+                       \n\
+                       If you have enabled significant logging, look into using the -G option.\n";
+        let e = LogcatError::Exited {
+            code: 1,
+            stderr: stderr.to_vec(),
+        };
+        assert_eq!(
+            show(&e),
+            "logcat exited with status 1: logcat: Unexpected EOF!"
+        );
     }
 
     #[test]

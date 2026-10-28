@@ -66,7 +66,8 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 /// Wraps an ADB channel running `logcat -B …` and decodes the
 /// `shell_v2` framing + binary log format directly in the caller-owned
 /// buffer — no intermediate heap allocations on the read path (only
-/// the returned [`LogEntry`] itself allocates for `tag` and `message`).
+/// the returned [`LogEntry`] itself allocates for `tag` and `message`,
+/// and the first 1 KiB of whatever logcat writes to stderr is kept).
 pub struct Logcat<'a, 'b, S> {
     channel: Channel<'a, S>,
     buf: &'b mut [u8],
@@ -79,7 +80,11 @@ pub struct Logcat<'a, 'b, S> {
     tail: usize,
     frame_id: u8,
     frame_left: usize,
+    exit_code: Option<u8>,
+    stderr: Vec<u8>,
 }
+
+const STDERR_KEPT: usize = 1024;
 
 impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
@@ -97,6 +102,8 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             tail: 0,
             frame_id: 0,
             frame_left: 0,
+            exit_code: None,
+            stderr: Vec::new(),
         }
     }
 
@@ -129,19 +136,32 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// Read the next parsed binary log entry.
     ///
     /// Blocks until a complete `logger_entry` has been received and
-    /// decoded.  Returns [`Error::ChannelClosed`] when the logcat
-    /// process exits and all buffered data has been consumed, and
-    /// [`Error::ReceiveBufferFull`] when an entry is too long for the
-    /// buffer passed to [`open`].
+    /// decoded.  Once logcat has exited and every entry before that has
+    /// been returned, fails with [`Error::ChannelClosed`] if it exited
+    /// with status 0 and with [`LogcatError::Exited`] otherwise, and goes
+    /// on doing so.  Returns [`Error::ReceiveBufferFull`] when an entry
+    /// is too long for the buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
-    /// inside the returned [`LogEntry`].
+    /// inside the returned [`LogEntry`], and the stderr text it keeps.
     pub async fn read_entry(&mut self) -> Result<LogEntry, Error<S::IoError>> {
         loop {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
+            match self.exit_code {
+                Some(0) => return Err(Error::ChannelClosed),
+                Some(code) => {
+                    let stderr = self.stderr.clone();
+                    return Err(LogcatError::Exited { code, stderr }.into());
+                }
+                None => {}
+            }
             if self.frame_left > 0 && self.head < self.tail {
+                if self.frame_id == shell_v2::EXIT {
+                    self.exit_code = Some(self.buf[self.head]);
+                    continue;
+                }
                 let n = self.frame_left.min(self.tail - self.head);
                 if self.frame_id == shell_v2::STDOUT {
                     if self.acc_start == self.acc_end {
@@ -151,6 +171,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                         shift(self.buf, self.head..self.head + n, self.acc_end);
                     }
                     self.acc_end += n;
+                } else {
+                    let kept = n.min(STDERR_KEPT - self.stderr.len());
+                    self.stderr
+                        .extend_from_slice(&self.buf[self.head..self.head + kept]);
                 }
                 self.head += n;
                 self.frame_left -= n;
@@ -163,8 +187,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                     .unwrap();
                 let (id, len) = shell_v2::parse_header(&hdr);
                 match id {
-                    shell_v2::EXIT => return self.drain_acc_or_close(),
-                    shell_v2::STDOUT | shell_v2::STDERR => {}
+                    shell_v2::EXIT if len == 0 => {
+                        return Err(ProtocolError::ShortExitPayload.into())
+                    }
+                    shell_v2::STDOUT | shell_v2::STDERR | shell_v2::EXIT => {}
                     other => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
                 }
                 self.head += shell_v2::HEADER_SIZE;
@@ -260,6 +286,10 @@ pub async fn open<'a, 'b, S: Session>(
 ///
 /// Equivalent to `logcat -B -d <args>` — the `-d` flag causes logcat
 /// to print the current log contents and exit instead of streaming.
+/// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
+/// status, as it does for an unknown buffer.  A failure drops the
+/// entries read before it; to keep them, read the stream through
+/// [`open`] and [`Logcat::read_entry`].
 ///
 /// `args` and `buf` have the same meaning as in [`open`].
 pub async fn dump<S: Session>(
@@ -271,16 +301,16 @@ pub async fn dump<S: Session>(
     let mut logcat = Logcat::new(channel, buf);
 
     let mut entries = Vec::new();
-    loop {
+    let end = loop {
         match logcat.read_entry().await {
             Ok(entry) => entries.push(entry),
-            Err(Error::ChannelClosed) => break,
-            Err(e) => return Err(e),
+            Err(Error::ChannelClosed) => break Ok(entries),
+            Err(e) => break Err(e),
         }
-    }
+    };
     // The device's CLSE only marks the slot closed; ours frees it.
     let _ = logcat.close().await;
-    Ok(entries)
+    end
 }
 
 /// Open a `logcat` text stream, returning a [`Shell`] wrapper.
