@@ -167,7 +167,9 @@ impl LogEntry {
 #[non_exhaustive]
 pub enum LogcatError {
     /// The `logger_entry` header has an `hdr_size` smaller than the
-    /// minimum (24 bytes for v3).
+    /// minimum (24 bytes for v3), or adds up to an entry longer than
+    /// the 5 KiB logcat ever writes. Text output, such as `-g` prints,
+    /// fails this way.
     InvalidHeader,
     /// logcat exited with a non-zero status, as it does on an unknown
     /// buffer or option, or when it falls behind the log. A signal that
@@ -217,6 +219,7 @@ impl core::error::Error for LogcatError {}
 
 pub(super) const HEADER_V3_SIZE: usize = 24;
 pub(super) const HEADER_V4_SIZE: usize = 28;
+pub(super) const LOGGER_ENTRY_MAX_LEN: usize = 5 * 1024;
 
 /// Try to parse one binary `logger_entry` from `buf`.
 ///
@@ -236,11 +239,10 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
     let payload_len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
     let hdr_size = u16::from_le_bytes([buf[2], buf[3]]) as usize;
 
-    if hdr_size < HEADER_V3_SIZE {
+    let total = hdr_size + payload_len;
+    if hdr_size < HEADER_V3_SIZE || total > LOGGER_ENTRY_MAX_LEN {
         return Err(LogcatError::InvalidHeader);
     }
-
-    let total = hdr_size + payload_len;
     if buf.len() < total {
         return Ok(None);
     }
