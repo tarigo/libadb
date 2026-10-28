@@ -161,13 +161,15 @@ impl LogEntry {
     }
 }
 
-/// Why a logcat session failed: its output did not parse, or logcat
-/// itself failed.
+/// Why a logcat session failed: its output did not parse or was cut
+/// short, or logcat itself failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogcatError {
     /// The `logger_entry` header has an `hdr_size` smaller than the
-    /// minimum (24 bytes for v3).
+    /// minimum (24 bytes for v3), or adds up to an entry longer than
+    /// the 5 KiB logcat ever writes. Text output, such as `-g` prints,
+    /// fails this way.
     InvalidHeader,
     /// logcat exited with a non-zero status, as it does on an unknown
     /// buffer or option, or when it falls behind the log. A signal that
@@ -181,6 +183,12 @@ pub enum LogcatError {
         /// the usage text older logcat prints.
         stderr: Vec<u8>,
     },
+    /// The channel closed before logcat's exit status arrived, so its
+    /// output may have been cut short.
+    ClosedWithoutExit,
+    /// logcat exited with status 0 in the middle of an entry, so the
+    /// rest of that entry never came.
+    TruncatedEntry,
 }
 
 impl fmt::Display for LogcatError {
@@ -199,6 +207,10 @@ impl fmt::Display for LogcatError {
                     None => Ok(()),
                 }
             }
+            Self::ClosedWithoutExit => {
+                f.write_str("logcat's channel closed before its exit status arrived")
+            }
+            Self::TruncatedEntry => f.write_str("logcat's output ended in the middle of an entry"),
         }
     }
 }
@@ -207,6 +219,7 @@ impl core::error::Error for LogcatError {}
 
 pub(super) const HEADER_V3_SIZE: usize = 24;
 pub(super) const HEADER_V4_SIZE: usize = 28;
+pub(super) const LOGGER_ENTRY_MAX_LEN: usize = 5 * 1024;
 
 /// Try to parse one binary `logger_entry` from `buf`.
 ///
@@ -226,11 +239,10 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
     let payload_len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
     let hdr_size = u16::from_le_bytes([buf[2], buf[3]]) as usize;
 
-    if hdr_size < HEADER_V3_SIZE {
+    let total = hdr_size + payload_len;
+    if hdr_size < HEADER_V3_SIZE || total > LOGGER_ENTRY_MAX_LEN {
         return Err(LogcatError::InvalidHeader);
     }
-
-    let total = hdr_size + payload_len;
     if buf.len() < total {
         return Ok(None);
     }

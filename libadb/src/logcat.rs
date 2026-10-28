@@ -80,8 +80,14 @@ pub struct Logcat<'a, 'b, S> {
     tail: usize,
     frame_id: u8,
     frame_left: usize,
-    exit_code: Option<u8>,
+    end: End,
     stderr: Vec<u8>,
+}
+
+enum End {
+    NotYet,
+    Exited(u8),
+    ClosedWithoutExit,
 }
 
 const STDERR_KEPT: usize = 1024;
@@ -102,7 +108,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             tail: 0,
             frame_id: 0,
             frame_left: 0,
-            exit_code: None,
+            end: End::NotYet,
             stderr: Vec::new(),
         }
     }
@@ -139,8 +145,12 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// decoded.  Once logcat has exited and every entry before that has
     /// been returned, fails with [`Error::ChannelClosed`] if it exited
     /// with status 0 and with [`LogcatError::Exited`] otherwise, and goes
-    /// on doing so.  Returns [`Error::ReceiveBufferFull`] when an entry
-    /// is too long for the buffer passed to [`open`].
+    /// on doing so.  A clean exit in the middle of an entry fails with
+    /// [`LogcatError::TruncatedEntry`] instead, and a channel that closes
+    /// before logcat's exit status arrives with
+    /// [`LogcatError::ClosedWithoutExit`].  Returns
+    /// [`Error::ReceiveBufferFull`] when an entry is too long for the
+    /// buffer passed to [`open`].
     ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`], and the stderr text it keeps.
@@ -149,17 +159,21 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             if let Some(entry) = self.take_entry()? {
                 return Ok(entry);
             }
-            match self.exit_code {
-                Some(0) => return Err(Error::ChannelClosed),
-                Some(code) => {
+            match self.end {
+                End::NotYet => {}
+                End::Exited(0) if self.acc_start < self.acc_end => {
+                    return Err(LogcatError::TruncatedEntry.into())
+                }
+                End::Exited(0) => return Err(Error::ChannelClosed),
+                End::Exited(code) => {
                     let stderr = self.stderr.clone();
                     return Err(LogcatError::Exited { code, stderr }.into());
                 }
-                None => {}
+                End::ClosedWithoutExit => return Err(LogcatError::ClosedWithoutExit.into()),
             }
             if self.frame_left > 0 && self.head < self.tail {
                 if self.frame_id == shell_v2::EXIT {
-                    self.exit_code = Some(self.buf[self.head]);
+                    self.end = End::Exited(self.buf[self.head]);
                     continue;
                 }
                 let n = self.frame_left.min(self.tail - self.head);
@@ -200,7 +214,7 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             }
             match self.fill().await {
                 Ok(()) => {}
-                Err(Error::ChannelClosed) => return self.drain_acc_or_close(),
+                Err(Error::ChannelClosed) => self.end = End::ClosedWithoutExit,
                 Err(e) => return Err(e),
             }
         }
@@ -214,10 +228,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
         };
         self.acc_start += consumed;
         Ok(Some(entry))
-    }
-
-    fn drain_acc_or_close(&mut self) -> Result<LogEntry, Error<S::IoError>> {
-        self.take_entry()?.ok_or(Error::ChannelClosed)
     }
 
     /// Close the underlying channel.
@@ -287,7 +297,10 @@ pub async fn open<'a, 'b, S: Session>(
 /// Equivalent to `logcat -B -d <args>` — the `-d` flag causes logcat
 /// to print the current log contents and exit instead of streaming.
 /// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
-/// status, as it does for an unknown buffer.  A failure drops the
+/// status, as it does for an unknown buffer, with
+/// [`LogcatError::ClosedWithoutExit`] when the stream is cut before its
+/// exit status arrives, and with [`LogcatError::TruncatedEntry`] when
+/// logcat exits cleanly in the middle of an entry.  A failure drops the
 /// entries read before it; to keep them, read the stream through
 /// [`open`] and [`Logcat::read_entry`].
 ///

@@ -1,6 +1,6 @@
 extern crate std;
 
-use super::format::{HEADER_V3_SIZE, HEADER_V4_SIZE};
+use super::format::{HEADER_V3_SIZE, HEADER_V4_SIZE, LOGGER_ENTRY_MAX_LEN};
 use super::*;
 use alloc::{format, vec};
 use core::cell::Cell;
@@ -8,6 +8,7 @@ use core::cell::Cell;
 use crate::base::connection::Connection;
 use crate::base::error::ProtocolError;
 use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
+use crate::base::protocol::Packet;
 
 std::thread_local! {
     /// Bytes `Logcat` has moved within its buffer on this thread, for
@@ -71,6 +72,16 @@ fn parse_invalid_header_size() {
     buf[0..2].copy_from_slice(&10u16.to_le_bytes());
     buf[2..4].copy_from_slice(&4u16.to_le_bytes());
     assert_eq!(parse_entry(&buf), Err(LogcatError::InvalidHeader));
+}
+
+#[test]
+fn parse_header_over_logger_entry_max_len() {
+    let payload = vec![b'x'; LOGGER_ENTRY_MAX_LEN - HEADER_V4_SIZE];
+    let mut data = make_v4_entry(1, 1, 0, 0, 0, 0, &payload);
+    assert_eq!(parse_entry(&data).unwrap().unwrap().1, LOGGER_ENTRY_MAX_LEN);
+
+    data[0..2].copy_from_slice(&(payload.len() as u16 + 1).to_le_bytes());
+    assert_eq!(parse_entry(&data), Err(LogcatError::InvalidHeader));
 }
 
 #[test]
@@ -476,4 +487,87 @@ fn the_exit_error_keeps_the_first_kib_of_stderr() {
     };
     assert_eq!(stderr.len(), 1024);
     assert!(stderr.starts_with(b"abceee"));
+}
+
+#[test]
+fn a_channel_that_closes_before_the_exit_status_fails() {
+    let wire = frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE));
+    let mut mock = Mock::new();
+    mock.feed(&cnxn())
+        .feed(&okay(1))
+        .feed(&wrte(1, &wire))
+        .feed(&Packet::close(42, 1));
+    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 1);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::ClosedWithoutExit))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
+    let mut conn = device_sending(&[&frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE))]);
+    let mut buf = [0u8; 128];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(matches!(got, Err(Error::UnexpectedEof)), "got {got:?}");
+}
+
+#[test]
+fn an_entry_cut_short_by_a_clean_exit_is_reported() {
+    let stdout = entries(2, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::TruncatedEntry))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn a_failed_exit_wins_over_the_entry_it_cut_short() {
+    let stdout = entries(2, HEADER_V4_SIZE);
+    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[1]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 128];
+    let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+
+    assert_eq!(now(logcat.read_entry()).unwrap().pid, 0);
+    let got = now(logcat.read_entry());
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::Exited { code: 1, .. }))),
+        "got {got:?}"
+    );
+}
+
+#[test]
+fn text_in_place_of_entries_is_refused() {
+    // `-g` makes logcat print its buffer sizes as text, then exit 0.
+    let text = b"main: ring buffer is 256 KiB (12 KiB consumed, 12 KiB readable), \
+                 max entry is 5120 B, max payload is 4068 B\n";
+    let mut wire = frame(shell_v2::STDOUT, text);
+    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut conn = device_sending(&[&wire]);
+    let mut buf = [0u8; 256];
+
+    let (got, _) = read_to_end(&mut conn, &mut buf);
+
+    assert!(
+        matches!(got, Err(Error::Logcat(LogcatError::InvalidHeader))),
+        "got {got:?}"
+    );
 }

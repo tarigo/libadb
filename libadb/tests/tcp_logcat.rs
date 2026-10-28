@@ -231,6 +231,11 @@ async fn logcat_yields_the_entries_that_arrived_before_a_frame_was_cut() {
     let mut logcat = logcat::open(&mut conn, &[], &mut rx).await.unwrap();
     assert_eq!(logcat.read_entry().await.unwrap().pid, 0);
     assert_eq!(logcat.read_entry().await.unwrap().pid, 1);
+    let err = logcat.read_entry().await.unwrap_err();
+    assert!(
+        matches!(err, Error::Logcat(logcat::LogcatError::ClosedWithoutExit)),
+        "got {err:?}"
+    );
 
     logcat.close().await.unwrap();
     rt::within("the device waiting for our CLSE", rt::join(device)).await;
@@ -322,6 +327,60 @@ async fn logcat_yields_its_entries_before_the_status_it_failed_with() {
     }
 
     logcat.close().await.unwrap();
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
+
+rt_test! {
+async fn logcat_fails_a_stream_that_closes_without_an_exit_status() {
+    let wire = shell_v2_encode(SH_STDOUT, &hundred_byte_entries(2));
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
+        let mut ch = s.accept_open(b"shell,v2,raw:logcat -B\0").await;
+        ch.send_write(&wire).await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 1024];
+    let mut logcat = logcat::open(&mut conn, &[], &mut rx).await.unwrap();
+    assert_eq!(logcat.read_entry().await.unwrap().pid, 0);
+    assert_eq!(logcat.read_entry().await.unwrap().pid, 1);
+    for _ in 0..2 {
+        let err = logcat.read_entry().await.unwrap_err();
+        assert!(
+            matches!(err, Error::Logcat(logcat::LogcatError::ClosedWithoutExit)),
+            "got {err:?}"
+        );
+    }
+
+    logcat.close().await.unwrap();
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
+}
+}
+
+rt_test! {
+async fn logcat_dump_fails_when_the_stream_closes_without_an_exit_status() {
+    let wire = shell_v2_encode(SH_STDOUT, &hundred_byte_entries(2));
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
+        let mut ch = s.accept_open(b"shell,v2,raw:logcat -B -d\0").await;
+        ch.send_write(&wire).await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 1024];
+    let err = logcat::dump(&mut conn, &[], &mut rx).await.unwrap_err();
+    assert!(
+        matches!(err, Error::Logcat(logcat::LogcatError::ClosedWithoutExit)),
+        "got {err:?}"
+    );
+
     rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
