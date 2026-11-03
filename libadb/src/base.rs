@@ -50,13 +50,16 @@
 //!   OPEN carries;
 //! * `recv_buf` — the receive buffer `sync` and `track_app` parse their
 //!   replies from;
-//! * `protobuf` — the protobuf reading `track-app` needs.
+//! * `protobuf` — the protobuf reading `track-app` needs;
+//! * `decimal` — a `u32` in ASCII decimal without `core::fmt`, for the
+//!   numbers `sync` and `shell::v2` send as text.
 
 pub mod auth;
 pub mod channel;
 pub(crate) mod channel_table;
 pub mod connection;
 
+pub(crate) mod decimal;
 pub(crate) mod destination;
 pub mod device_banner;
 pub(crate) mod ids;

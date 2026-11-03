@@ -28,6 +28,7 @@ use core::fmt;
 use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
+use crate::base::decimal::format_u32;
 use crate::base::destination::{self as dest, DestinationError};
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
@@ -210,31 +211,15 @@ impl WindowSize {
     /// assert_eq!(size.encode().as_bytes(), b"24x80,0x0\0");
     /// ```
     pub fn encode(&self) -> EncodedWindowSize {
-        // Private, so nothing but this format ever lands in the buffer.
-        struct Fill<'a>(&'a mut EncodedWindowSize);
-
-        impl fmt::Write for Fill<'_> {
-            fn write_str(&mut self, s: &str) -> fmt::Result {
-                let out = &mut *self.0;
-                let end = out.len + s.len();
-                out.bytes
-                    .get_mut(out.len..end)
-                    .ok_or(fmt::Error)?
-                    .copy_from_slice(s.as_bytes());
-                out.len = end;
-                Ok(())
-            }
-        }
-
         let mut out = EncodedWindowSize {
             bytes: [0; EncodedWindowSize::MAX_LEN],
             len: 0,
         };
-        fmt::write(
-            &mut Fill(&mut out),
-            format_args!("{}x{},0x0\0", self.rows, self.cols),
-        )
-        .expect("two u16s and the rest fit MAX_LEN");
+        let mut digits = [0; 10];
+        out.push(format_u32(self.rows.into(), &mut digits));
+        out.push(b"x");
+        out.push(format_u32(self.cols.into(), &mut digits));
+        out.push(b",0x0\0");
         out
     }
 }
@@ -254,6 +239,14 @@ impl EncodedWindowSize {
     /// The payload, NUL included.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
+    }
+
+    /// Append `part`. Only [`WindowSize::encode`] calls it, and what it
+    /// appends never comes to more than `MAX_LEN`.
+    fn push(&mut self, part: &[u8]) {
+        let end = self.len + part.len();
+        self.bytes[self.len..end].copy_from_slice(part);
+        self.len = end;
     }
 }
 

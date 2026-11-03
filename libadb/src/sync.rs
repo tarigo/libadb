@@ -63,6 +63,7 @@ pub use format::*;
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
+use crate::base::decimal::format_u32;
 use crate::base::protocol::features::Feature;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;

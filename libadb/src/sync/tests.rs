@@ -80,30 +80,6 @@ fn flags_combine_with_or() {
 }
 
 #[test]
-fn format_u32_zero() {
-    let mut buf = [0u8; 10];
-    assert_eq!(format_u32(0, &mut buf), b"0");
-}
-
-#[test]
-fn format_u32_typical_mode() {
-    let mut buf = [0u8; 10];
-    assert_eq!(format_u32(33188, &mut buf), b"33188");
-}
-
-#[test]
-fn format_u32_max() {
-    let mut buf = [0u8; 10];
-    assert_eq!(format_u32(u32::MAX, &mut buf), b"4294967295");
-}
-
-#[test]
-fn format_u32_single_digit() {
-    let mut buf = [0u8; 10];
-    assert_eq!(format_u32(7, &mut buf), b"7");
-}
-
-#[test]
 fn a_data_length_past_any_buffer_is_receive_buffer_full() {
     use crate::base::mock::{now, one_slot, wrte};
 
