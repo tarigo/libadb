@@ -1,8 +1,7 @@
 use super::super::error::ProtocolError;
 use super::super::ids::{ChannelIds, RemoteId};
-use super::{
-    command::AuthKind, constant::MAX_PAYLOAD, Checksumable, Command, Message, MESSAGE_SIZE,
-};
+use super::checksum::payload_checksum;
+use super::{command::AuthKind, constant::MAX_PAYLOAD, Command, Message, MESSAGE_SIZE};
 use bytes::{Buf, Bytes, BytesMut};
 
 #[cfg(test)]
@@ -30,26 +29,6 @@ pub struct Packet {
     pub arg1: u32,
     /// Payload, empty for commands that carry none.
     pub data: Bytes,
-}
-
-impl Checksumable for Bytes {
-    type Checksum = u32;
-
-    fn calculate_checksum(&self) -> u32 {
-        let mut sum = 0u32;
-        for &b in self.as_ref() {
-            sum = sum.wrapping_add(b as u32);
-        }
-        sum
-    }
-}
-
-impl Checksumable for Packet {
-    type Checksum = u32;
-
-    fn calculate_checksum(&self) -> u32 {
-        self.data.calculate_checksum()
-    }
 }
 
 impl Packet {
@@ -128,7 +107,7 @@ impl Packet {
         let packet_buf = buf.split_to(total_len).freeze();
         let data = packet_buf.slice(MESSAGE_SIZE..);
 
-        if message.data_check != 0 && data.calculate_checksum() != message.data_check {
+        if message.data_check != 0 && payload_checksum(&data) != message.data_check {
             return Err(ProtocolError::InvalidChecksum);
         }
 

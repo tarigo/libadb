@@ -1,11 +1,6 @@
 use super::constant::ADB_VERSION_SKIP_CHECKSUM;
 
-pub trait Checksumable {
-    type Checksum;
-
-    fn calculate_checksum(&self) -> Self::Checksum;
-}
-
+/// The `data_check` of `payload`: its bytes summed, wrapping.
 pub(crate) fn payload_checksum(payload: &[u8]) -> u32 {
     let mut sum = 0u32;
     for &b in payload {

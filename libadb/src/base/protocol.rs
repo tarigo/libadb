@@ -6,9 +6,8 @@ pub mod message;
 mod packet;
 
 // Only the types are public: their modules also hold implementation
-// details — `Checksumable`, the header codec — that are not API.
+// details — the payload sum, the header codec — that are not API.
 pub use checksum::Checksum;
-pub(crate) use checksum::Checksumable;
 pub use command::Command;
 pub(crate) use message::Message;
 pub(crate) use message::MESSAGE_SIZE;
