@@ -99,11 +99,33 @@ pub(crate) fn parse_header(buf: &[u8; HEADER_SIZE]) -> (Result<FrameId, u8>, u32
     (FrameId::try_from(buf[0]), length)
 }
 
-pub(crate) fn encode_window_size(rows: u16, cols: u16) -> [u8; 8] {
-    let mut buf = [0u8; 8];
-    buf[0..2].copy_from_slice(&rows.to_le_bytes());
-    buf[2..4].copy_from_slice(&cols.to_le_bytes());
-    buf
+/// A terminal's size in character cells: what a
+/// [`WindowSizeChange`](FrameId::WindowSizeChange) frame tells the
+/// device's PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct WindowSize {
+    /// Height, in rows.
+    pub rows: u16,
+    /// Width, in columns.
+    pub cols: u16,
+}
+
+impl WindowSize {
+    /// The frame's 8-byte payload: `rows` and then `cols`, each
+    /// little-endian, followed by four zero bytes.
+    ///
+    /// ```
+    /// use libadb::shell::v2::WindowSize;
+    ///
+    /// let size = WindowSize { rows: 24, cols: 80 };
+    /// assert_eq!(size.encode(), [24, 0, 80, 0, 0, 0, 0, 0]);
+    /// ```
+    pub fn encode(&self) -> [u8; 8] {
+        let mut buf = [0u8; 8];
+        buf[0..2].copy_from_slice(&self.rows.to_le_bytes());
+        buf[2..4].copy_from_slice(&self.cols.to_le_bytes());
+        buf
+    }
 }
 
 /// A decoded shell_v2 frame produced by [`Shell::read_frame`] /
@@ -246,10 +268,11 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
         }
     }
 
-    /// Send a `WINDOW_SIZE_CHANGE` frame.
-    pub async fn set_window_size(&mut self, rows: u16, cols: u16) -> Result<(), Error<S::IoError>> {
-        let payload = encode_window_size(rows, cols);
-        self.send_frame(FrameId::WindowSizeChange, &payload).await
+    /// Send a `WINDOW_SIZE_CHANGE` frame telling the device's PTY its
+    /// new `size`.
+    pub async fn set_window_size(&mut self, size: WindowSize) -> Result<(), Error<S::IoError>> {
+        self.send_frame(FrameId::WindowSizeChange, &size.encode())
+            .await
     }
 
     /// Read the next decoded frame, blocking until one is available.
@@ -414,7 +437,7 @@ pub async fn open<'a, 'b, S: Session>(
 ///   to start a login shell.
 /// * `term` — value for the `TERM` environment variable on the device
 ///   (e.g. `"xterm-256color"`). Pass an empty string to omit it.
-/// * `window_size` — if `Some((rows, cols))`, a
+/// * `window_size` — if `Some`, a
 ///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
 ///   right after the channel opens so the device PTY has
 ///   the correct dimensions from the start.
@@ -429,15 +452,15 @@ pub async fn open_interactive<'a, 'b, S: Session>(
     session: &'a mut S,
     command: &str,
     term: &str,
-    window_size: Option<(u16, u16)>,
+    window_size: Option<WindowSize>,
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
     session.require_feature(Feature::ShellV2)?;
     let dest = build_shell_v2_destination(true, term, command)?;
     let channel = session.open(dest.as_bytes()).await?;
     let mut shell = Shell::new(channel, rx);
-    if let Some((rows, cols)) = window_size {
-        shell.set_window_size(rows, cols).await?;
+    if let Some(size) = window_size {
+        shell.set_window_size(size).await?;
     }
     Ok(shell)
 }

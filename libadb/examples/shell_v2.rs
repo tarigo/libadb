@@ -40,7 +40,7 @@ use std::mem::MaybeUninit;
 use std::{env, process};
 
 use libadb::channel::SelectResult;
-use libadb::shell::v2::{self as shell_v2, Frame};
+use libadb::shell::v2::{self as shell_v2, Frame, WindowSize};
 #[cfg(not(feature = "tls"))]
 use libadb::transport::any::AnyTransport;
 use libadb::transport::any::{self};
@@ -104,14 +104,17 @@ impl Drop for RawMode {
     }
 }
 
-fn get_terminal_size() -> (u16, u16) {
+fn get_terminal_size() -> WindowSize {
     unsafe {
         let mut ws = MaybeUninit::<libc::winsize>::uninit();
         if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) == 0 {
             let ws = ws.assume_init();
-            (ws.ws_row, ws.ws_col)
+            WindowSize {
+                rows: ws.ws_row,
+                cols: ws.ws_col,
+            }
         } else {
-            (24, 80)
+            WindowSize { rows: 24, cols: 80 }
         }
     }
 }
@@ -305,9 +308,8 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
                     shell.close_stdin().await.map_err(|e| format!("{e}"))?;
                 }
                 Event::Resize => {
-                    let (rows, cols) = get_terminal_size();
                     shell
-                        .set_window_size(rows, cols)
+                        .set_window_size(get_terminal_size())
                         .await
                         .map_err(|e| format!("{e}"))?;
                 }

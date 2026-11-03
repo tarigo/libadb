@@ -4,7 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::decoder::make_frame;
-use super::{encode_window_size, parse_header, Frame, FrameDecoder, FrameId, HEADER_SIZE};
+use super::{parse_header, Frame, FrameDecoder, FrameId, WindowSize, HEADER_SIZE};
 
 fn write_header(rx: &mut [u8], offset: usize, id: FrameId, length: u32) {
     rx[offset] = id.into();
@@ -58,19 +58,23 @@ fn parse_header_keeps_an_unknown_id_byte() {
 }
 
 #[test]
-fn encode_window_size_packs_rows_then_cols_and_pads_with_zeros() {
-    let bytes = encode_window_size(24, 80);
+fn a_window_size_packs_rows_then_cols_and_pads_with_zeros() {
+    let bytes = WindowSize { rows: 24, cols: 80 }.encode();
     assert_eq!(bytes, [24, 0, 80, 0, 0, 0, 0, 0]);
 }
 
 #[test]
-fn encode_window_size_handles_zero_dimensions() {
-    assert_eq!(encode_window_size(0, 0), [0; 8]);
+fn a_window_size_of_zero_encodes_as_zeros() {
+    assert_eq!(WindowSize::default().encode(), [0; 8]);
 }
 
 #[test]
-fn encode_window_size_preserves_full_u16_range() {
-    let bytes = encode_window_size(u16::MAX, u16::MAX);
+fn a_window_size_keeps_the_full_u16_range() {
+    let bytes = WindowSize {
+        rows: u16::MAX,
+        cols: u16::MAX,
+    }
+    .encode();
     assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
 }
 
