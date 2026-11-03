@@ -33,7 +33,11 @@
 //!
 //! For events / stats / security buffers the payload is raw binary
 //! event data — [`LogEntry::tag`] will be empty and
-//! [`LogEntry::message`] will contain the entire payload.
+//! [`LogEntry::message`] will contain the entire payload.  A buffer
+//! libadb does not know, [`LogId::Unknown`], is left raw the same way.
+//!
+//! `lid` follows Android 9's numbering; see [`LogId`] for how
+//! Android 7.0–8.1 differ.
 //!
 //! # Examples
 //!

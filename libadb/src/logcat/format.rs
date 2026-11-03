@@ -70,20 +70,32 @@ impl fmt::Display for Priority {
 /// Android log buffer identifier.
 ///
 /// Matches the `log_id` values in AOSP
-/// (`system/logging/liblog/include/android/log.h`).
+/// (`system/logging/liblog/include/android/log.h`) as of Android 9.
+/// Android 7.0–8.1 had no stats buffer and numbered security 5 and
+/// kernel 6, so from those releases security entries come out as
+/// [`Stats`](Self::Stats) and kernel entries as
+/// [`Security`](Self::Security), with their payload left raw.
 ///
 /// `LogId::from` turns a buffer number into its id, and `u32::from`
 /// gives the number back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LogId {
+    /// Buffer 0.
     Main,
+    /// Buffer 1.
     Radio,
+    /// Buffer 2.
     Events,
+    /// Buffer 3.
     System,
+    /// Buffer 4.
     Crash,
+    /// Buffer 5.
     Stats,
+    /// Buffer 6.
     Security,
+    /// Buffer 7.
     Kernel,
     /// A buffer this version of libadb does not know, such as one a
     /// newer Android added. Compare `u32::from(id)` rather than this
@@ -199,11 +211,12 @@ pub struct LogEntry {
     pub log_id: LogId,
     /// Log priority (meaningful for main/system/radio/crash/kernel).
     pub priority: Priority,
-    /// Log tag.  Empty for events/stats/security and unknown buffers.
+    /// Log tag.  Empty for events/stats/security buffers and those
+    /// libadb does not know.
     pub tag: Vec<u8>,
     /// Log message body.  May or may not be valid UTF-8.
-    /// For events/stats/security and unknown buffers this contains the
-    /// entire raw payload.
+    /// For events/stats/security buffers and those libadb does not know
+    /// this contains the entire raw payload.
     pub message: Vec<u8>,
 }
 
