@@ -149,6 +149,19 @@ fn an_unknown_buffer_keeps_its_number() {
 }
 
 #[test]
+fn an_unknown_buffers_payload_is_left_raw() {
+    // The buffer may be binary like events, where reading it as text
+    // would take its first byte for a priority and drop a trailing 0.
+    let payload = b"\x04Tag\0msg\0";
+    let data = make_v4_entry(1, 1, 0, 0, 8, 0, payload);
+
+    let (entry, _) = parse_entry(&data).unwrap().unwrap();
+    assert_eq!(entry.priority, Priority::Unknown);
+    assert!(entry.tag.is_empty());
+    assert_eq!(entry.message, payload);
+}
+
+#[test]
 fn parse_empty_payload() {
     let data = make_v4_entry(1, 1, 0, 0, 0, 0, &[]);
     let (entry, _) = parse_entry(&data).unwrap().unwrap();

@@ -146,7 +146,9 @@ impl fmt::Display for LogId {
 /// the payload uses a binary event format — [`tag`](Self::tag) will be
 /// empty and [`message`](Self::message) will contain the entire raw
 /// payload.  [`priority`](Self::priority) is not meaningful for those
-/// buffers.
+/// buffers.  An entry from a buffer libadb does not know,
+/// [`LogId::Unknown`], is left raw the same way, since its format is
+/// unknown too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
     /// Process ID that generated the entry.
@@ -163,11 +165,11 @@ pub struct LogEntry {
     pub log_id: LogId,
     /// Log priority (meaningful for main/system/radio/crash/kernel).
     pub priority: Priority,
-    /// Log tag.  Empty for events/stats/security buffers.
+    /// Log tag.  Empty for events/stats/security and unknown buffers.
     pub tag: Vec<u8>,
     /// Log message body.  May or may not be valid UTF-8.
-    /// For events/stats/security buffers this contains the entire raw
-    /// binary payload.
+    /// For events/stats/security and unknown buffers this contains the
+    /// entire raw payload.
     pub message: Vec<u8>,
 }
 
@@ -286,7 +288,10 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
 
     let (priority, tag, message) = if payload.is_empty() {
         (Priority::Unknown, Vec::new(), Vec::new())
-    } else if matches!(log_id, LogId::Events | LogId::Stats | LogId::Security) {
+    } else if matches!(
+        log_id,
+        LogId::Events | LogId::Stats | LogId::Security | LogId::Unknown(_)
+    ) {
         (Priority::Unknown, Vec::new(), payload.to_vec())
     } else {
         let priority = Priority::from_u8(payload[0]);
