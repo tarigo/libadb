@@ -24,7 +24,7 @@ pub mod store;
 #[cfg(test)]
 mod tests;
 
-pub use pubkey::encode_public_key;
+pub use pubkey::{encode_public_key, KeyName};
 pub use record::{decode_key_record, encode_key_record};
 
 // The public API speaks these crates' types, so a caller names the
@@ -80,9 +80,10 @@ impl AdbKey {
     /// `OsRng`, on a microcontroller a hardware TRNG. Generation takes
     /// seconds on a desktop and minutes on a small microcontroller, so
     /// persist the result rather than repeating it.
-    pub fn generate<R: CryptoRngCore + ?Sized>(rng: &mut R, name: &str) -> Result<Self, KeyError> {
-        // The name is cheap to reject; the key that follows is not.
-        pubkey::validate_name(name)?;
+    pub fn generate<R: CryptoRngCore + ?Sized>(
+        rng: &mut R,
+        name: KeyName<'_>,
+    ) -> Result<Self, KeyError> {
         let key = RsaPrivateKey::new(rng, MODULUS_BITS).map_err(KeyError::Rsa)?;
         Self::from_private_key(key, rng, name)
     }
@@ -91,7 +92,7 @@ impl AdbKey {
     pub fn from_pkcs8_pem<R: CryptoRngCore + ?Sized>(
         pem: &str,
         rng: &mut R,
-        name: &str,
+        name: KeyName<'_>,
     ) -> Result<Self, KeyError> {
         let key = RsaPrivateKey::from_pkcs8_pem(pem).map_err(KeyError::Pkcs8)?;
         Self::from_private_key(key, rng, name)
@@ -102,7 +103,7 @@ impl AdbKey {
     pub fn from_pkcs1_pem<R: CryptoRngCore + ?Sized>(
         pem: &str,
         rng: &mut R,
-        name: &str,
+        name: KeyName<'_>,
     ) -> Result<Self, KeyError> {
         let key = RsaPrivateKey::from_pkcs1_pem(pem).map_err(KeyError::Pkcs1)?;
         Self::from_private_key(key, rng, name)
@@ -112,7 +113,7 @@ impl AdbKey {
     pub fn from_pkcs8_der<R: CryptoRngCore + ?Sized>(
         der: &[u8],
         rng: &mut R,
-        name: &str,
+        name: KeyName<'_>,
     ) -> Result<Self, KeyError> {
         let key = RsaPrivateKey::from_pkcs8_der(der).map_err(KeyError::Pkcs8)?;
         Self::from_private_key(key, rng, name)
@@ -151,7 +152,7 @@ impl AdbKey {
     fn from_private_key<R: CryptoRngCore + ?Sized>(
         key: RsaPrivateKey,
         rng: &mut R,
-        name: &str,
+        name: KeyName<'_>,
     ) -> Result<Self, KeyError> {
         let mut public_key_wire = encode_public_key(&key.to_public_key(), name)?;
         public_key_wire.push(b'\0');
@@ -211,10 +212,12 @@ impl Authenticator for AdbKey {
 #[non_exhaustive]
 pub enum KeyError {
     /// The key name contains a NUL, CR or LF, which would corrupt the
-    /// public-key line or the AUTH payload carrying it.
+    /// public-key line or the AUTH payload carrying it. Reported by
+    /// [`KeyName::new`].
     InvalidName,
     /// The key name is so long that the public-key line would not fit
     /// the AUTH packet that carries it. Carries the length offered.
+    /// Reported by [`KeyName::new`].
     NameTooLong(usize),
     /// The modulus is not 2048 bits, which the fixed-size ADB
     /// public-key struct cannot express. Carries the actual size.

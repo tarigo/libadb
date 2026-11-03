@@ -13,10 +13,11 @@ use std::io::ErrorKind;
 
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::store::{self, StoreError};
+use libadb::keys::{KeyError, KeyName};
 
 #[path = "test_key/test_key.rs"]
 mod test_key;
-use test_key::{NAME, PKCS1_PEM, PKCS8_PEM};
+use test_key::{name, PKCS1_PEM, PKCS8_PEM};
 
 /// The store writes what `adb keygen` writes, under the same names.
 const PRIVATE: &str = "adbkey";
@@ -31,7 +32,7 @@ fn load_parses_an_existing_pkcs8_adbkey_and_derives_the_public_key() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
 
-    let key = store::load(dir.path(), &mut OsRng, NAME).unwrap();
+    let key = store::load(dir.path(), &mut OsRng, name()).unwrap();
 
     assert!(
         key.public_key_wire().ends_with(b" unit@test\0"),
@@ -47,12 +48,12 @@ fn load_parses_an_existing_pkcs8_adbkey_and_derives_the_public_key() {
 fn load_accepts_a_legacy_pkcs1_adbkey() {
     let pkcs8_dir = tempfile::tempdir().unwrap();
     fs::write(pkcs8_dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
-    let expected = store::load(pkcs8_dir.path(), &mut OsRng, NAME).unwrap();
+    let expected = store::load(pkcs8_dir.path(), &mut OsRng, name()).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), PKCS1_PEM).unwrap();
 
-    let key = store::load(dir.path(), &mut OsRng, NAME).unwrap();
+    let key = store::load(dir.path(), &mut OsRng, name()).unwrap();
 
     assert_eq!(
         key.public_key_wire(),
@@ -65,7 +66,7 @@ fn load_accepts_a_legacy_pkcs1_adbkey() {
 fn load_reports_a_missing_adbkey_as_io_not_found() {
     let dir = tempfile::tempdir().unwrap();
 
-    let err = store::load(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(&err, StoreError::Io { source, .. } if source.kind() == ErrorKind::NotFound),
@@ -80,8 +81,8 @@ fn a_store_error_says_which_file_it_is_about_and_keeps_the_cause() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), b"this is not a key").unwrap();
 
-    let malformed = store::load(dir.path(), &mut OsRng, NAME).unwrap_err();
-    let missing = store::load(tempfile::tempdir().unwrap().path(), &mut OsRng, NAME).unwrap_err();
+    let malformed = store::load(dir.path(), &mut OsRng, name()).unwrap_err();
+    let missing = store::load(tempfile::tempdir().unwrap().path(), &mut OsRng, name()).unwrap_err();
 
     let shown = malformed.to_string();
     assert!(shown.contains("adbkey"), "the file is named: {shown}");
@@ -103,33 +104,13 @@ fn a_store_error_says_which_file_it_is_about_and_keeps_the_cause() {
 }
 
 #[test]
-fn a_name_the_format_rejects_is_not_reported_as_a_broken_file() {
-    // Nothing on disk is at fault here, so nothing on disk should be
-    // blamed — least of all with advice to delete it.
-    let dir = tempfile::tempdir().unwrap();
-
-    let generating = store::load_or_generate(dir.path(), &mut OsRng, "unit@test\n").unwrap_err();
-
-    // And with a perfectly good key already on disk, where blaming the
-    // file would be worse still: deleting it cannot fix the name.
-    fs::write(dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
-    let loading = store::load(dir.path(), &mut OsRng, "unit@test\n").unwrap_err();
-    let reusing = store::load_or_generate(dir.path(), &mut OsRng, "unit@test\n").unwrap_err();
-
-    for err in [&generating, &loading, &reusing] {
-        assert!(
-            matches!(err, StoreError::Key(_)),
-            "expected Key, got {err:?}"
-        );
-        assert!(
-            !err.to_string().contains("remove it"),
-            "the message must not send the user after a file: {err}"
-        );
-    }
-    assert_eq!(
-        fs::read_to_string(dir.path().join(PRIVATE)).unwrap(),
-        PKCS8_PEM,
-        "and the key is still there"
+fn a_name_the_format_rejects_never_reaches_the_store() {
+    // Nothing on disk could be at fault for the name, so it is refused
+    // before there is a call that might blame a file for it.
+    let err = KeyName::new("unit@test\n").unwrap_err();
+    assert!(
+        matches!(err, KeyError::InvalidName),
+        "expected InvalidName, got {err:?}"
     );
 }
 
@@ -138,7 +119,7 @@ fn a_corrupt_adbkey_fails_to_load_as_malformed() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), b"this is not a key").unwrap();
 
-    let err = store::load(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(err, StoreError::Malformed { .. }),
@@ -160,7 +141,7 @@ fn first_run_creates_the_dir_generates_and_persists_a_reloadable_key() {
     let parent = tempfile::tempdir().unwrap();
     let dir = parent.path().join("nested").join(".android");
 
-    let key = store::load_or_generate(&dir, &mut OsRng, NAME).unwrap();
+    let key = store::load_or_generate(&dir, &mut OsRng, name()).unwrap();
 
     let pub_file = fs::read(dir.join(PUBLIC)).unwrap();
     assert_eq!(
@@ -169,7 +150,7 @@ fn first_run_creates_the_dir_generates_and_persists_a_reloadable_key() {
         "adbkey.pub holds the wire blob without its NUL, as adb writes it"
     );
 
-    let reloaded = store::load(&dir, &mut OsRng, NAME).unwrap();
+    let reloaded = store::load(&dir, &mut OsRng, name()).unwrap();
     assert_eq!(
         reloaded.public_key_wire(),
         key.public_key_wire(),
@@ -210,7 +191,7 @@ fn a_key_directory_that_cannot_be_created_is_reported_by_name() {
         return; // running as root, where the mode bits mean nothing
     }
 
-    let err = store::load_or_generate(&dir, &mut OsRng, NAME).unwrap_err();
+    let err = store::load_or_generate(&dir, &mut OsRng, name()).unwrap_err();
 
     let StoreError::Io { path, .. } = &err else {
         panic!("expected Io, got {err:?}");
@@ -235,7 +216,7 @@ fn concurrent_first_runs_converge_on_one_key() {
         .map(|_| {
             let dir = path.clone();
             std::thread::spawn(move || {
-                store::load_or_generate(&dir, &mut OsRng, NAME)
+                store::load_or_generate(&dir, &mut OsRng, name())
                     .unwrap()
                     .public_key_wire()
                     .to_vec()
@@ -244,7 +225,7 @@ fn concurrent_first_runs_converge_on_one_key() {
         .collect();
     let keys: Vec<_> = racers.into_iter().map(|r| r.join().unwrap()).collect();
 
-    let winner = store::load(&path, &mut OsRng, NAME).unwrap();
+    let winner = store::load(&path, &mut OsRng, name()).unwrap();
     for key in &keys {
         assert_eq!(
             key,
@@ -268,9 +249,9 @@ fn load_or_generate_reuses_an_existing_key_and_rewrites_nothing() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
     fs::write(dir.path().join(PUBLIC), b"sentinel not-a-key").unwrap();
-    let expected = store::load(dir.path(), &mut OsRng, NAME).unwrap();
+    let expected = store::load(dir.path(), &mut OsRng, name()).unwrap();
 
-    let key = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap();
+    let key = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap();
 
     assert_eq!(
         key.public_key_wire(),
@@ -294,7 +275,7 @@ fn load_or_generate_restores_a_missing_pub_file_beside_an_existing_key() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
 
-    let key = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap();
+    let key = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap();
 
     assert_eq!(
         fs::read(dir.path().join(PUBLIC)).unwrap(),
@@ -315,7 +296,7 @@ fn an_adbkey_that_cannot_be_read_is_reported_rather_than_replaced() {
     // that is not "no key here yet".
     fs::create_dir(dir.path().join(PRIVATE)).unwrap();
 
-    let err = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(&err, StoreError::Io { source, .. } if source.kind() != ErrorKind::NotFound),
@@ -340,7 +321,7 @@ fn an_unreadable_adbkey_survives_load_or_generate() {
         return; // running as root, where the mode bits mean nothing
     }
 
-    let err = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(&err, StoreError::Io { source, .. } if source.kind() != ErrorKind::NotFound),
@@ -360,7 +341,7 @@ fn a_binary_adbkey_is_the_file_s_fault_not_the_filesystem_s() {
     // Valid DER, say, where PEM belongs: not text, so not a key file.
     fs::write(dir.path().join(PRIVATE), [0x30, 0x82, 0xFF, 0xFE]).unwrap();
 
-    let err = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(err, StoreError::NotAKeyFile { .. }),
@@ -380,7 +361,7 @@ fn a_key_left_without_its_public_file_gets_one_on_the_next_run() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), PKCS8_PEM).unwrap();
 
-    let key = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap();
+    let key = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap();
 
     assert_eq!(
         fs::read(dir.path().join(PUBLIC)).unwrap(),
@@ -394,7 +375,7 @@ fn a_corrupt_adbkey_is_never_overwritten_by_load_or_generate() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(PRIVATE), b"this is not a key").unwrap();
 
-    let err = store::load_or_generate(dir.path(), &mut OsRng, NAME).unwrap_err();
+    let err = store::load_or_generate(dir.path(), &mut OsRng, name()).unwrap_err();
 
     assert!(
         matches!(err, StoreError::Malformed { .. }),

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::zeroize::Zeroizing;
-use libadb::keys::{store, KeyError};
+use libadb::keys::{store, KeyName};
 
 use crate::error::{self, AdbStatus};
 
@@ -80,6 +80,12 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         }
     };
 
+    // A name the format cannot carry came in through this call.
+    let name = match KeyName::new(name) {
+        Ok(n) => n,
+        Err(e) => return error::fail_invalid_arg(e),
+    };
+
     let key = match store::load_or_generate(dir, &mut OsRng, name) {
         Ok(k) => k,
         // Unusable key material on disk is the same class of failure
@@ -87,11 +93,7 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         Err(e @ (store::StoreError::Malformed { .. } | store::StoreError::NotAKeyFile { .. })) => {
             return error::fail_auth(e)
         }
-        // A name the format cannot carry came in through this call.
-        Err(e @ store::StoreError::Key(KeyError::InvalidName | KeyError::NameTooLong(_))) => {
-            return error::fail_invalid_arg(e)
-        }
-        // Anything else the key operation itself could not do.
+        // What the key operation itself could not do.
         Err(e @ store::StoreError::Key(_)) => return error::fail_internal(e),
         // Matched by name, not by wildcard: a variant added upstream
         // should fail this build rather than acquire an ABI status by

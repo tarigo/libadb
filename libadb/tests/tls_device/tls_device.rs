@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{cert, AdbKey};
+use libadb::keys::{cert, AdbKey, KeyName};
 use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use libadb::tls::rustls::{DistinguishedName, ServerConfig};
@@ -30,7 +30,7 @@ pub fn accept(listener: &TcpListener) -> TcpStream {
 
 /// The host's key: the one a USB prompt would have approved.
 pub fn host_key() -> AdbKey {
-    AdbKey::from_pkcs8_pem(test_key::PKCS8_PEM, &mut OsRng, test_key::NAME).unwrap()
+    AdbKey::from_pkcs8_pem(test_key::PKCS8_PEM, &mut OsRng, test_key::name()).unwrap()
 }
 
 /// The profile the host connects and pairs with, carrying [`host_key`].
@@ -55,7 +55,7 @@ pub enum KeyPolicy {
 /// A device certificate, freshly minted. Wireless debugging does the
 /// same: the pairing server generates one per run.
 pub fn device_identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
-    let key = AdbKey::generate(&mut OsRng, "device@fake").unwrap();
+    let key = AdbKey::generate(&mut OsRng, KeyName::new("device@fake").unwrap()).unwrap();
     let der = cert::build(&key, &mut OsRng).unwrap();
     let pkcs8 = key.to_pkcs8_der().unwrap();
     (

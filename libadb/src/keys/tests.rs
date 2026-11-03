@@ -85,6 +85,11 @@ wr8dHY5E2V9xkr/mw3+Z63N0tLsqEB1xtVZx3gg2ysrcbamgWS19
 
 const TEST_NAME: &str = "unit@test";
 
+/// [`TEST_NAME`] as the key constructors take it.
+fn test_name() -> KeyName<'static> {
+    KeyName::new(TEST_NAME).unwrap()
+}
+
 /// Seeded stand-in for the CSPRNG a caller supplies; blinding needs
 /// entropy but no test depends on which.
 fn test_rng() -> ChaCha8Rng {
@@ -99,13 +104,13 @@ fn test_public_key() -> RsaPublicKey {
 
 /// Encoder output, base64-decoded back to the raw 524-byte struct.
 fn decoded_blob_of(key: &RsaPublicKey) -> Vec<u8> {
-    let out = encode_public_key(key, "").unwrap();
+    let out = encode_public_key(key, KeyName::default()).unwrap();
     Base64::decode_vec(core::str::from_utf8(&out).unwrap()).unwrap()
 }
 
 /// The same, for the fixture key and its name.
 fn decoded_blob() -> Vec<u8> {
-    let out = encode_public_key(&test_public_key(), TEST_NAME).unwrap();
+    let out = encode_public_key(&test_public_key(), test_name()).unwrap();
     let space = out
         .iter()
         .position(|&b| b == b' ')
@@ -119,7 +124,7 @@ fn decoded_blob() -> Vec<u8> {
 
 #[test]
 fn encode_output_is_base64_blob_then_space_then_name() {
-    let out = encode_public_key(&test_public_key(), TEST_NAME).unwrap();
+    let out = encode_public_key(&test_public_key(), test_name()).unwrap();
     let space = out
         .iter()
         .position(|&b| b == b' ')
@@ -217,7 +222,7 @@ fn a_key_that_is_not_2048_bits_is_rejected() {
     // size is under test, and `new_unchecked` skips primality anyway.
     let n = (BigUint::from(1u32) << 1023usize) + BigUint::from(1u32);
     let key = RsaPublicKey::new_unchecked(n, BigUint::from(65537u32));
-    let err = encode_public_key(&key, TEST_NAME).unwrap_err();
+    let err = encode_public_key(&key, test_name()).unwrap_err();
     assert!(
         matches!(err, KeyError::UnsupportedModulus(1024)),
         "expected UnsupportedModulus(1024), got {err:?}"
@@ -227,7 +232,7 @@ fn a_key_that_is_not_2048_bits_is_rejected() {
 #[test]
 fn an_exponent_wider_than_u32_is_rejected() {
     let key = RsaPublicKey::new_unchecked(test_public_key().n().clone(), BigUint::from(1u64 << 33));
-    let err = encode_public_key(&key, TEST_NAME).unwrap_err();
+    let err = encode_public_key(&key, test_name()).unwrap_err();
     assert!(
         matches!(err, KeyError::UnsupportedExponent),
         "expected UnsupportedExponent, got {err:?}"
@@ -237,7 +242,7 @@ fn an_exponent_wider_than_u32_is_rejected() {
 #[test]
 fn a_nul_cr_or_lf_in_the_name_never_reaches_the_output() {
     for name in ["unit\0test", "unit\rtest", "unit\ntest"] {
-        let err = encode_public_key(&test_public_key(), name).unwrap_err();
+        let err = KeyName::new(name).unwrap_err();
         assert!(
             matches!(err, KeyError::InvalidName),
             "name {name:?} must be rejected, got {err:?}"
@@ -251,19 +256,20 @@ fn a_name_too_long_for_one_auth_packet_is_rejected() {
     // builds a key that signs perfectly and then fails only at first
     // connect, on the one exchange that carries the public key.
     let key = test_public_key();
-    let blob = encode_public_key(&key, "").unwrap().len();
+    let blob = encode_public_key(&key, KeyName::default()).unwrap().len();
     // What is left for the name once the blob, its space and the
     // wire form's NUL are paid for.
     let longest = crate::base::protocol::command::MAX_PAYLOAD as usize - blob - 2;
 
-    let fits = encode_public_key(&key, &"x".repeat(longest)).unwrap();
+    let name = "x".repeat(longest);
+    let fits = encode_public_key(&key, KeyName::new(&name).unwrap()).unwrap();
     assert_eq!(
         fits.len() + 1,
         crate::base::protocol::command::MAX_PAYLOAD as usize,
         "the longest accepted name fills the packet exactly"
     );
 
-    let err = encode_public_key(&key, &"x".repeat(longest + 1)).unwrap_err();
+    let err = KeyName::new(&"x".repeat(longest + 1)).unwrap_err();
     assert!(
         matches!(err, KeyError::NameTooLong(len) if len == longest + 1),
         "expected NameTooLong, got {err:?}"
@@ -272,14 +278,14 @@ fn a_name_too_long_for_one_auth_packet_is_rejected() {
 
 #[test]
 fn an_empty_name_yields_a_bare_blob_without_trailing_space() {
-    let out = encode_public_key(&test_public_key(), "").unwrap();
+    let out = encode_public_key(&test_public_key(), KeyName::default()).unwrap();
     assert_eq!(out.len(), 700, "just the base64 token");
     assert!(!out.contains(&b' '));
 }
 
 #[test]
 fn encoding_matches_the_reference_adb_keygen_output() {
-    let out = encode_public_key(&test_public_key(), TEST_NAME).unwrap();
+    let out = encode_public_key(&test_public_key(), test_name()).unwrap();
     let mut expected = Vec::from(GOLDEN_PUB_B64.as_bytes());
     expected.extend_from_slice(b" unit@test");
     assert_eq!(
@@ -294,9 +300,9 @@ fn encoding_matches_the_reference_adb_keygen_output() {
 
 #[test]
 fn from_pkcs8_pem_caches_a_nul_terminated_wire_key() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
-    let mut expected = encode_public_key(&test_public_key(), TEST_NAME).unwrap();
+    let mut expected = encode_public_key(&test_public_key(), test_name()).unwrap();
     expected.push(b'\0');
     assert_eq!(key.public_key_wire(), expected);
     assert_eq!(
@@ -313,16 +319,16 @@ fn from_pkcs8_pem_caches_a_nul_terminated_wire_key() {
 
 #[test]
 fn from_pkcs8_der_agrees_with_from_pkcs8_pem() {
-    let from_pem = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let from_pem = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let der = from_pem.to_pkcs8_der().unwrap();
 
-    let from_der = AdbKey::from_pkcs8_der(der.as_bytes(), &mut test_rng(), TEST_NAME).unwrap();
+    let from_der = AdbKey::from_pkcs8_der(der.as_bytes(), &mut test_rng(), test_name()).unwrap();
     assert_eq!(from_der.public_key_wire(), from_pem.public_key_wire());
 }
 
 #[test]
 fn sign_produces_a_signature_the_rsa_crate_verifies() {
-    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let token = [0x5au8; 20];
 
     let signature = now(key.sign(&token)).unwrap();
@@ -335,7 +341,7 @@ fn sign_produces_a_signature_the_rsa_crate_verifies() {
 
 #[test]
 fn sign_rejects_a_token_that_is_not_a_sha1_prehash() {
-    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
     let err = now(key.sign(b"tooshort")).unwrap_err();
 
@@ -347,7 +353,7 @@ fn sign_rejects_a_token_that_is_not_a_sha1_prehash() {
 
 #[test]
 fn to_pkcs8_pem_round_trips_to_the_same_wire_key() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
     let pem = key.to_pkcs8_pem().unwrap();
 
@@ -355,17 +361,17 @@ fn to_pkcs8_pem_round_trips_to_the_same_wire_key() {
         pem.starts_with("-----BEGIN PRIVATE KEY-----"),
         "adb keygen writes PKCS#8, and so must we"
     );
-    let reloaded = AdbKey::from_pkcs8_pem(&pem, &mut test_rng(), TEST_NAME).unwrap();
+    let reloaded = AdbKey::from_pkcs8_pem(&pem, &mut test_rng(), test_name()).unwrap();
     assert_eq!(reloaded.public_key_wire(), key.public_key_wire());
 }
 
 #[test]
 fn to_pkcs8_der_round_trips_to_the_same_wire_key() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
     let der = key.to_pkcs8_der().unwrap();
 
-    let reloaded = AdbKey::from_pkcs8_der(der.as_bytes(), &mut test_rng(), TEST_NAME).unwrap();
+    let reloaded = AdbKey::from_pkcs8_der(der.as_bytes(), &mut test_rng(), test_name()).unwrap();
     assert_eq!(reloaded.public_key_wire(), key.public_key_wire());
 }
 
@@ -374,7 +380,7 @@ fn a_malformed_pkcs8_key_is_rejected() {
     let err = AdbKey::from_pkcs8_pem(
         "-----BEGIN PRIVATE KEY-----\nnope\n",
         &mut test_rng(),
-        TEST_NAME,
+        test_name(),
     )
     .unwrap_err();
     assert!(
@@ -385,7 +391,7 @@ fn a_malformed_pkcs8_key_is_rejected() {
 
 #[test]
 fn debug_shows_the_public_key_and_never_the_private_one() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
     let shown = format!("{key:?}");
 
@@ -444,7 +450,7 @@ fn key_error_display_names_each_failure() {
 
 #[test]
 fn a_key_record_round_trips_through_encode_and_decode() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let der = key.to_pkcs8_der().unwrap();
 
     let record = encode_key_record(der.as_bytes()).unwrap();
@@ -458,7 +464,7 @@ fn a_key_record_round_trips_through_encode_and_decode() {
         AdbKey::from_pkcs8_der(
             decode_key_record(&record).unwrap(),
             &mut test_rng(),
-            TEST_NAME
+            test_name()
         )
         .unwrap()
         .public_key_wire(),
@@ -556,7 +562,7 @@ fn the_record_header_is_the_one_already_written_to_flash() {
 fn generate_yields_a_2048_bit_key_with_e_65537_that_signs_and_encodes() {
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
-    let mut key = AdbKey::generate(&mut rng, TEST_NAME).unwrap();
+    let mut key = AdbKey::generate(&mut rng, test_name()).unwrap();
 
     let public = key.private_key().to_public_key();
     assert_eq!(public.n().bits(), 2048);
@@ -586,7 +592,7 @@ fn an_even_modulus_is_rejected_rather_than_given_a_meaningless_n0inv() {
     let even = test_public_key().n() - BigUint::from(1u32);
     let key = RsaPublicKey::new_unchecked(even, BigUint::from(65537u32));
 
-    let err = encode_public_key(&key, TEST_NAME).unwrap_err();
+    let err = encode_public_key(&key, test_name()).unwrap_err();
 
     assert!(
         matches!(err, KeyError::EvenModulus),
@@ -600,7 +606,7 @@ fn a_degenerate_exponent_is_rejected() {
     // exponents are not RSA exponents at all.
     for e in [0u32, 1, 2, 4, 65536] {
         let key = RsaPublicKey::new_unchecked(test_public_key().n().clone(), BigUint::from(e));
-        let err = encode_public_key(&key, TEST_NAME).unwrap_err();
+        let err = encode_public_key(&key, test_name()).unwrap_err();
         assert!(
             matches!(err, KeyError::UnsupportedExponent),
             "exponent {e} must be rejected, got {err:?}"
@@ -628,37 +634,23 @@ fn the_smallest_exponent_adb_uses_is_accepted() {
     assert_eq!(&blob[520..524], &3u32.to_le_bytes());
 }
 
-/// A CSPRNG that fails the test if it is drawn from at all.
-struct UnusedRng;
-
-impl RngCore for UnusedRng {
-    fn next_u32(&mut self) -> u32 {
-        panic!("the RNG was drawn from before the cheap checks ran")
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.next_u32() as u64
-    }
-    fn fill_bytes(&mut self, _dest: &mut [u8]) {
-        let _ = self.next_u32();
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-
-impl rsa::rand_core::CryptoRng for UnusedRng {}
-
 #[test]
-fn generate_checks_the_name_before_spending_minutes_on_a_key() {
-    // On a microcontroller the generation is the expensive part and
-    // the rejected key is unrecoverable, so the name goes first.
-    let err = AdbKey::generate(&mut UnusedRng, "unit@test\n").unwrap_err();
+fn a_name_converts_from_a_str_with_the_same_checks() {
+    let name: KeyName<'_> = TEST_NAME.try_into().unwrap();
+    assert_eq!(name, test_name());
+    assert_eq!(TEST_NAME, name.as_str());
 
+    let err = KeyName::try_from("unit@test\n").unwrap_err();
     assert!(
         matches!(err, KeyError::InvalidName),
         "expected InvalidName, got {err:?}"
     );
+}
+
+#[test]
+fn no_name_is_the_empty_one() {
+    assert_eq!(KeyName::default().as_str(), "");
+    assert_eq!(KeyName::new("").unwrap(), KeyName::default());
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +659,7 @@ fn generate_checks_the_name_before_spending_minutes_on_a_key() {
 
 #[test]
 fn a_borrowed_key_authenticates_as_the_key_itself() {
-    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let expected = key.public_key_wire().to_vec();
     let token = [0x5au8; 20];
 
@@ -697,7 +689,7 @@ fn a_borrowed_key_authenticates_as_the_key_itself() {
 
 #[test]
 fn the_public_key_line_is_the_wire_key_without_its_terminator() {
-    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
     let line = key.public_key_line();
 
@@ -708,7 +700,7 @@ fn the_public_key_line_is_the_wire_key_without_its_terminator() {
     assert!(!line.contains(&0), "a key file carries no NUL");
     assert_eq!(
         line,
-        encode_public_key(&test_public_key(), TEST_NAME).unwrap()
+        encode_public_key(&test_public_key(), test_name()).unwrap()
     );
 }
 
@@ -720,9 +712,9 @@ fn the_public_key_line_is_the_wire_key_without_its_terminator() {
 fn from_pkcs1_pem_loads_the_same_key_as_pkcs8() {
     // What `adb` wrote before it moved to PKCS#8, and what
     // `openssl genrsa -traditional` still writes.
-    let pkcs8 = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let pkcs8 = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
-    let pkcs1 = AdbKey::from_pkcs1_pem(TEST_KEY_PKCS1_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let pkcs1 = AdbKey::from_pkcs1_pem(TEST_KEY_PKCS1_PEM, &mut test_rng(), test_name()).unwrap();
 
     assert_eq!(
         pkcs1.public_key_wire(),
@@ -736,7 +728,7 @@ fn a_malformed_pkcs1_key_is_rejected() {
     let err = AdbKey::from_pkcs1_pem(
         "-----BEGIN RSA PRIVATE KEY-----\nnope\n",
         &mut test_rng(),
-        TEST_NAME,
+        test_name(),
     )
     .unwrap_err();
 
@@ -756,7 +748,7 @@ fn signing_draws_on_the_blinding_generator() {
     // output: what it does leave is a consumed stretch of the key's own
     // generator. Losing that means the private-key operation went out
     // unmasked over an input the peer chose.
-    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let before = key.blinding.get_word_pos();
 
     now(key.sign(&[0x11u8; 20])).unwrap();
@@ -770,7 +762,7 @@ fn signing_draws_on_the_blinding_generator() {
 
 #[test]
 fn a_refused_token_spends_no_randomness() {
-    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+    let mut key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
     let before = key.blinding.get_word_pos();
 
     now(key.sign(b"tooshort")).unwrap_err();
@@ -870,7 +862,7 @@ mod cert {
 
     #[test]
     fn the_certificate_is_byte_for_byte_what_another_library_builds() {
-        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
 
         let der = cert::build_at(&key, &mut test_rng(), fixed_start()).unwrap();
 
@@ -878,7 +870,7 @@ mod cert {
     }
 
     fn built() -> Certificate {
-        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
         let der = cert::build_at(&key, &mut test_rng(), fixed_start()).unwrap();
         Certificate::from_der(&der).unwrap()
     }
@@ -887,7 +879,7 @@ mod cert {
     fn the_certificate_carries_the_key_a_device_already_trusts() {
         // This is the whole point of the certificate: adbd compares the
         // public key inside it against the keys a USB prompt approved.
-        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
         let expected = key
             .private_key()
             .to_public_key()
@@ -954,7 +946,7 @@ mod cert {
         // `x509-cert` encodes times from 1970 to 9999 only, and outside
         // that reports a bare encoding error, which points at the wrong
         // thing: nothing is wrong with the key or the encoder.
-        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
         let before_1970 = UNIX_EPOCH - Duration::from_secs(1);
         // Early enough in 9999 to start there, too late to last ten years.
         let late_9999 = UNIX_EPOCH + Duration::from_secs(253_370_764_800);
@@ -973,7 +965,7 @@ mod cert {
         // The signature is deterministic, so blinding leaves no trace in
         // the output. What it leaves is a consumed stretch of the RNG:
         // losing that means the private-key operation went out unmasked.
-        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), TEST_NAME).unwrap();
+        let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
         let mut rng = test_rng();
         let before = rng.get_word_pos();
 

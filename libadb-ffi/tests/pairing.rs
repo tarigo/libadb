@@ -8,7 +8,7 @@ use std::ptr;
 use std::sync::LazyLock;
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::AdbKey;
+use libadb::keys::{AdbKey, KeyName};
 
 #[path = "pairing_device/pairing_device.rs"]
 mod pairing_device;
@@ -24,7 +24,7 @@ struct HostKey {
 
 /// One host key per test binary: generating it is the slow part.
 static HOST: LazyLock<HostKey> = LazyLock::new(|| {
-    let key = AdbKey::generate(&mut OsRng, "unit@test").unwrap();
+    let key = AdbKey::generate(&mut OsRng, KeyName::new("unit@test").unwrap()).unwrap();
     HostKey {
         pem: CString::new(key.to_pkcs8_pem().unwrap().as_str()).unwrap(),
         public: String::from_utf8(key.public_key_line().to_vec()).unwrap(),
@@ -182,7 +182,7 @@ fn a_name_ending_in_a_space_is_stored_as_given() {
 #[test]
 fn a_public_key_that_is_not_the_private_key_s_is_refused_before_connecting() {
     let addr = closed_port();
-    let other = AdbKey::generate(&mut OsRng, "other@test").unwrap();
+    let other = AdbKey::generate(&mut OsRng, KeyName::new("other@test").unwrap()).unwrap();
     let other = String::from_utf8(other.public_key_line().to_vec()).unwrap();
 
     // `Connect` here would mean the call reached the socket first.

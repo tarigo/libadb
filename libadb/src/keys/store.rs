@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use rsa::rand_core::CryptoRngCore;
 use zeroize::Zeroizing;
 
-use super::{AdbKey, KeyError};
+use super::{AdbKey, KeyError, KeyName};
 
 /// Private key file, as named by `adb keygen`.
 const PRIVATE_KEY_FILE: &str = "adbkey";
@@ -52,8 +52,7 @@ pub enum StoreError {
         path: PathBuf,
     },
     /// Making or encoding the key failed. Nothing on disk is at fault,
-    /// so nothing on disk needs fixing — the name or the generator
-    /// does.
+    /// so nothing on disk needs fixing.
     Key(KeyError),
 }
 
@@ -93,12 +92,8 @@ impl core::error::Error for StoreError {
 pub fn load<R: CryptoRngCore + ?Sized>(
     dir: &Path,
     rng: &mut R,
-    name: &str,
+    name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
-    // A name the format cannot carry is the caller's mistake, not the
-    // file's: check it before any file is blamed for it.
-    crate::keys::pubkey::validate_name(name).map_err(StoreError::Key)?;
-
     let path = dir.join(PRIVATE_KEY_FILE);
     // The file is the private key in the clear; the buffer goes the
     // same way as everything else that has held it.
@@ -131,10 +126,8 @@ pub fn load<R: CryptoRngCore + ?Sized>(
 pub fn load_or_generate<R: CryptoRngCore + ?Sized>(
     dir: &Path,
     rng: &mut R,
-    name: &str,
+    name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
-    crate::keys::pubkey::validate_name(name).map_err(StoreError::Key)?;
-
     let path = dir.join(PRIVATE_KEY_FILE);
     // Opened, not read: whether the contents parse is `load`'s to say,
     // only "nothing here" may lead to generating, and a probe has no
@@ -149,7 +142,7 @@ pub fn load_or_generate<R: CryptoRngCore + ?Sized>(
 fn parse<R: CryptoRngCore + ?Sized>(
     pem: &str,
     rng: &mut R,
-    name: &str,
+    name: KeyName<'_>,
 ) -> Result<AdbKey, KeyError> {
     // adb wrote PKCS#1 for years, and such a key is exactly the
     // identity worth reusing.
@@ -163,7 +156,7 @@ fn parse<R: CryptoRngCore + ?Sized>(
 fn generate_into<R: CryptoRngCore + ?Sized>(
     dir: &Path,
     rng: &mut R,
-    name: &str,
+    name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
     create_dir(dir)?;
     let key = AdbKey::generate(rng, name).map_err(StoreError::Key)?;
@@ -192,7 +185,7 @@ fn write_public_key(path: &Path, key: &AdbKey) -> Result<(), StoreError> {
 fn adopt<R: CryptoRngCore + ?Sized>(
     dir: &Path,
     rng: &mut R,
-    name: &str,
+    name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
     let key = load(dir, rng, name)?;
     ensure_public_key(dir, &key)?;

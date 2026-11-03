@@ -1951,7 +1951,8 @@ async fn real_device_key() -> AdbKey {
     let home = std::env::var("HOME").expect("HOME");
     let dir = std::path::PathBuf::from(home).join(".android");
     // Load, never generate: a fresh key is one no device has seen.
-    libadb::keys::store::load(&dir, &mut OsRng, "libadb@test")
+    let name = libadb::keys::KeyName::new("libadb@test").unwrap();
+    libadb::keys::store::load(&dir, &mut OsRng, name)
         .expect("~/.android/adbkey, the key a USB prompt approved")
 }
 

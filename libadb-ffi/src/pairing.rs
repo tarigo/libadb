@@ -5,7 +5,7 @@ use alloc::format;
 use core::ffi::{c_char, CStr};
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{AdbKey, KeyError};
+use libadb::keys::{AdbKey, KeyName};
 use libadb::pairing::pair;
 use libadb::transport::runtime::{Inline, Runtime};
 use libadb::transport::tls::MaybeTls;
@@ -115,11 +115,12 @@ pub unsafe extern "C" fn adb_pair(
     // goes, since a name may end in anything but CR or LF.
     let pub_key = pub_key.trim_end_matches(['\r', '\n']);
     let (blob, name) = pub_key.split_once(' ').unwrap_or((pub_key, ""));
+    let name = match KeyName::new(name) {
+        Ok(n) => n,
+        Err(e) => return error::fail_invalid_arg(e),
+    };
     let key = match AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, name) {
         Ok(k) => k,
-        Err(e @ (KeyError::InvalidName | KeyError::NameTooLong(_))) => {
-            return error::fail_invalid_arg(e)
-        }
         Err(e) => return error::fail_auth(format!("parse private key: {e}")),
     };
     let line = key.public_key_line();

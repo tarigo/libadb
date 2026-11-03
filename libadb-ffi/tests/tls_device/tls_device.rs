@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 
 use libadb::keys::rsa::pkcs8::EncodePublicKey as _;
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{cert, AdbKey};
+use libadb::keys::{cert, AdbKey, KeyName};
 use libadb::tls::rustls;
 use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
 use libadb::tls::rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -44,7 +44,7 @@ pub struct HostKey {
 
 impl HostKey {
     fn generate() -> Self {
-        let key = AdbKey::generate(&mut OsRng, "unit@test").unwrap();
+        let key = AdbKey::generate(&mut OsRng, KeyName::new("unit@test").unwrap()).unwrap();
         let pem = CString::new(key.to_pkcs8_pem().unwrap().as_str()).unwrap();
         let public = CString::new(key.public_key_line()).unwrap();
         let spki = key
@@ -88,7 +88,7 @@ pub struct Report {
 fn device_identity() -> &'static (CertificateDer<'static>, PrivateKeyDer<'static>) {
     static IDENTITY: OnceLock<(CertificateDer<'static>, PrivateKeyDer<'static>)> = OnceLock::new();
     IDENTITY.get_or_init(|| {
-        let key = AdbKey::generate(&mut OsRng, "device@fake").unwrap();
+        let key = AdbKey::generate(&mut OsRng, KeyName::new("device@fake").unwrap()).unwrap();
         let der = cert::build(&key, &mut OsRng).unwrap();
         let pkcs8 = key.to_pkcs8_der().unwrap();
         (

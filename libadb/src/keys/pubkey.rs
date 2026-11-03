@@ -20,8 +20,61 @@ const ENCODED_SIZE: usize = 4 + 4 + MODULUS_SIZE + MODULUS_SIZE + 4;
 /// that follows it.
 const PREFIX_LEN: usize = ENCODED_SIZE.div_ceil(3) * 4 + 1;
 
+/// The name a public key carries after its blob — `user@host` in the
+/// `adbkey.pub` line `adb keygen` writes — checked once, where it
+/// enters.
+///
+/// The line is a single line, NUL-terminated on the wire, and has to
+/// fit the one AUTH packet that carries it. A name with a NUL, CR or
+/// LF in it, or too long for that packet, is refused here rather than
+/// by whatever builds the line later. The default is no name at all:
+/// the line ends with the blob.
+///
+/// ```
+/// use libadb::keys::{KeyError, KeyName};
+///
+/// assert_eq!(KeyName::new("user@host").unwrap().as_str(), "user@host");
+/// assert!(matches!(KeyName::new("user\nhost"), Err(KeyError::InvalidName)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct KeyName<'a>(&'a str);
+
+impl<'a> KeyName<'a> {
+    /// Check `name` against what the public-key line can carry.
+    ///
+    /// # Errors
+    ///
+    /// - [`KeyError::InvalidName`] for a NUL, CR or LF in `name`;
+    /// - [`KeyError::NameTooLong`] when the line would not fit one AUTH
+    ///   packet.
+    pub fn new(name: &'a str) -> Result<Self, KeyError> {
+        if name.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
+            return Err(KeyError::InvalidName);
+        }
+        // A name past this point would only fail at first connect, on
+        // the one exchange that carries the public key.
+        if name.len() > MAX_PAYLOAD as usize - PREFIX_LEN - 1 {
+            return Err(KeyError::NameTooLong(name.len()));
+        }
+        Ok(Self(name))
+    }
+
+    /// The name as it was given.
+    pub fn as_str(&self) -> &'a str {
+        self.0
+    }
+}
+
+impl<'a> TryFrom<&'a str> for KeyName<'a> {
+    type Error = KeyError;
+
+    fn try_from(name: &'a str) -> Result<Self, KeyError> {
+        Self::new(name)
+    }
+}
+
 /// Encode a public key as the `adbkey.pub` line: base64 of the
-/// mincrypt struct, then `" <name>"` when `name` is non-empty.
+/// mincrypt struct, then `" <name>"` when `name` is not empty.
 ///
 /// No trailing NUL and no newline — the AUTH payload appends the NUL
 /// (see [`AdbKey::public_key_wire`]), key files append their own
@@ -37,33 +90,17 @@ const PREFIX_LEN: usize = ENCODED_SIZE.div_ceil(3) * 4 + 1;
 /// can only reject, or, for `e = 1`, something anyone can forge
 /// signatures against.
 ///
-/// `name` is bounded too: the blob travels in a single AUTH packet.
+/// `name` fits the line already: [`KeyName::new`] made sure of that.
 ///
 /// [`AdbKey::public_key_wire`]: super::AdbKey::public_key_wire
-pub fn encode_public_key(key: &RsaPublicKey, name: &str) -> Result<Vec<u8>, KeyError> {
-    validate_name(name)?;
-
+pub fn encode_public_key(key: &RsaPublicKey, name: KeyName<'_>) -> Result<Vec<u8>, KeyError> {
     let blob = mincrypt_struct(key)?;
     let mut out = Base64::encode_string(&blob).into_bytes();
-    if !name.is_empty() {
+    if !name.0.is_empty() {
         out.push(b' ');
-        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(name.0.as_bytes());
     }
     Ok(out)
-}
-
-/// Reject a name the format cannot carry: the blob is a single line,
-/// terminated by a NUL on the wire, and it has to fit one AUTH packet.
-pub(super) fn validate_name(name: &str) -> Result<(), KeyError> {
-    if name.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
-        return Err(KeyError::InvalidName);
-    }
-    // A name past this point would only fail at first connect, on the
-    // one exchange that carries the public key.
-    if name.len() > MAX_PAYLOAD as usize - PREFIX_LEN - 1 {
-        return Err(KeyError::NameTooLong(name.len()));
-    }
-    Ok(())
 }
 
 /// Build the 524-byte struct adbd reads: word count, Montgomery

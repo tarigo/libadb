@@ -100,7 +100,7 @@ println!("{}", core::str::from_utf8(&out.stdout)?);
 С фичей `host-keys` крейт ещё и сам находит и пишет эти файлы:
 
 ```rust,ignore
-use libadb::keys::store;
+use libadb::keys::{store, KeyName};
 
 // `rng` — любой `CryptoRngCore`: `OsRng` на хосте, аппаратный TRNG на
 // микроконтроллере. При загрузке из него читают один раз — засеять
@@ -109,7 +109,7 @@ use libadb::keys::store;
 // И там и там заимствование заканчивается вместе с конструктором.
 // Переиспользовать ~/.android/adbkey либо создать его — устройство
 // один раз спросит подтверждение, ровно как и для adb.
-let auth = store::load_or_generate(&dir, &mut rng, "user@host")?;
+let auth = store::load_or_generate(&dir, &mut rng, KeyName::new("user@host")?)?;
 ```
 
 Каталог всегда передаётся параметром: библиотека не читает окружение и

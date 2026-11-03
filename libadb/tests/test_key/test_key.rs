@@ -6,6 +6,11 @@
 
 pub const NAME: &str = "unit@test";
 
+/// [`NAME`] as the key constructors take it.
+pub fn name() -> libadb::keys::KeyName<'static> {
+    libadb::keys::KeyName::new(NAME).unwrap()
+}
+
 /// What `adb keygen` writes today.
 pub const PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCfJ471H4SpiWaP

@@ -16,14 +16,14 @@ use std::path::PathBuf;
 use std::{env, error, fs};
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{store, AdbKey};
+use libadb::keys::{store, AdbKey, KeyName};
 
 /// Load the key the standard adb client uses, generating one if the
 /// user has never run `adb` — the device asks to confirm it once.
 pub fn load_or_generate() -> Result<AdbKey, Box<dyn error::Error>> {
     let home = env::var("HOME").map_err(|_| "HOME is not set; cannot locate ~/.android")?;
     let dir = PathBuf::from(home).join(".android");
-    let key = store::load_or_generate(&dir, &mut OsRng, &name())?;
+    let key = store::load_or_generate(&dir, &mut OsRng, KeyName::new(&name())?)?;
     Ok(key)
 }
 

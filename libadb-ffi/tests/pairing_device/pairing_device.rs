@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::{cert, AdbKey};
+use libadb::keys::{cert, AdbKey, KeyName};
 use libadb::pairing::{Role, Spake2};
 use libadb::tls::rustls;
 use libadb::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
@@ -105,7 +105,7 @@ impl ClientCertVerifier for AcceptAnyClient {
 fn device_identity() -> &'static (CertificateDer<'static>, PrivateKeyDer<'static>) {
     static IDENTITY: OnceLock<(CertificateDer<'static>, PrivateKeyDer<'static>)> = OnceLock::new();
     IDENTITY.get_or_init(|| {
-        let key = AdbKey::generate(&mut OsRng, "device@fake").unwrap();
+        let key = AdbKey::generate(&mut OsRng, KeyName::new("device@fake").unwrap()).unwrap();
         let der = cert::build(&key, &mut OsRng).unwrap();
         let pkcs8 = key.to_pkcs8_der().unwrap();
         (

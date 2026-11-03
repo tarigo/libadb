@@ -33,7 +33,7 @@ mod common;
 
 #[path = "test_key/test_key.rs"]
 mod test_key;
-use test_key::{NAME, PKCS8_PEM};
+use test_key::{name, PKCS8_PEM};
 
 /// Rebuild the public key from an `AUTH(RSAPUBLICKEY)` payload the way
 /// adbd does, checking every field of the struct on the way: a device
@@ -76,7 +76,7 @@ fn public_key_from_wire(payload: &[u8]) -> RsaPublicKey {
 rt_test! {
 async fn a_real_key_completes_the_pubkey_handshake_with_a_verifiable_signature() {
     let mut rng = ChaCha8Rng::seed_from_u64(1);
-    let key = AdbKey::from_pkcs8_pem(PKCS8_PEM, &mut rng, NAME).unwrap();
+    let key = AdbKey::from_pkcs8_pem(PKCS8_PEM, &mut rng, name()).unwrap();
     // adbd issues 20-byte SHA-1 prehashes; a real signer insists on it.
     let first_token = [0x11u8; 20];
     let dev = FakeDevice::new().auth(AuthPolicy::RequirePublicKey {

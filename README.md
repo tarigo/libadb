@@ -96,7 +96,7 @@ own, with no `adb` installation involved. With `host-keys` the crate
 also finds and writes those files for you:
 
 ```rust,ignore
-use libadb::keys::store;
+use libadb::keys::{store, KeyName};
 
 // `rng` is any `CryptoRngCore` — `OsRng` on a host, a hardware TRNG on
 // a microcontroller. Loading draws from it once, to seed the generator
@@ -105,7 +105,7 @@ use libadb::keys::store;
 // Either way the borrow ends when the constructor returns.
 // Reuse ~/.android/adbkey, or create it — the device asks the user to
 // confirm a new key once, exactly as it does for adb itself.
-let auth = store::load_or_generate(&dir, &mut rng, "user@host")?;
+let auth = store::load_or_generate(&dir, &mut rng, KeyName::new("user@host")?)?;
 ```
 
 The directory is always a parameter: the library reads no environment

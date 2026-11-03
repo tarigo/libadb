@@ -7,7 +7,7 @@ use core::future::Future;
 
 use libadb::base::auth::Authenticator;
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::keys::AdbKey;
+use libadb::keys::{AdbKey, KeyName};
 #[cfg(feature = "tls")]
 use libadb::tls::{TlsClientConfig, TlsIdentity};
 
@@ -24,7 +24,7 @@ impl FfiAuthenticator {
         // every other: the token comes from whatever is on the other
         // end of the wire. The name only feeds the public blob it
         // derives, which the caller's own blob replaces below.
-        let key = AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, "")
+        let key = AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, KeyName::default())
             .map_err(|e| format!("parse private key: {e}"))?;
         Ok(Self {
             key,
