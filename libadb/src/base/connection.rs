@@ -28,7 +28,9 @@ use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::Packet;
 use super::slot::{ChannelSlot, PendingAck};
-use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
+use super::wire::{
+    recv_pkt, recv_pkt_or, send_okay_to, send_open, send_pkt, send_raw, DesyncFlag, Received,
+};
 use crate::error::Error;
 
 /// ADB connection over an async transport.
@@ -241,15 +243,17 @@ where
         // finds no channel and is answered with CLSE. Nothing takes the
         // slot meanwhile, since dispatch only touches slots in use.
         let ch = self.table.allocate()?;
-        let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
-        let pkt = Packet::new(
-            Command::Open,
-            ch.local.raw(),
-            open_arg1,
-            destination.to_vec(),
-        );
+        let credit = self.negotiated.advertised_credit().unwrap_or(0);
         let checksum = self.negotiated.checksum();
-        send_pkt(&mut self.transport, &self.desync, &pkt, checksum).await?;
+        send_open(
+            &mut self.transport,
+            &self.desync,
+            ch.local,
+            credit,
+            destination,
+            checksum,
+        )
+        .await?;
 
         self.await_open_ack(ch).await
     }

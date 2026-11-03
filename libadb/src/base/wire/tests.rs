@@ -95,10 +95,12 @@ fn wire_packet(payload_len: usize) -> Vec<u8> {
     buf.to_vec()
 }
 
-/// Records the size of every `write` it is handed.
+/// Records the size of every `write` it is handed, and the bytes of all
+/// of them in order.
 #[derive(Default)]
 struct WriteLog {
     writes: Vec<usize>,
+    bytes: Vec<u8>,
 }
 
 impl embedded_io::ErrorType for WriteLog {
@@ -108,6 +110,7 @@ impl embedded_io::ErrorType for WriteLog {
 impl Write for WriteLog {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, MockErr> {
         self.writes.push(buf.len());
+        self.bytes.extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -178,6 +181,29 @@ fn an_empty_packet_is_a_single_header_write() {
     .unwrap();
 
     assert_eq!(t.writes, std::vec![MESSAGE_SIZE]);
+}
+
+#[test]
+fn an_open_sent_from_its_borrowed_destination_is_the_packet_it_stands_for() {
+    let mut t = WriteLog::default();
+    let destination = b"shell:ls\0";
+
+    block_on(send_open(
+        &mut t,
+        &DesyncFlag::new(),
+        7.into(),
+        4096,
+        destination,
+        Checksum::Compute,
+    ))
+    .unwrap();
+
+    let mut expected = BytesMut::new();
+    Packet::new(Command::Open, 7, 4096, &destination[..])
+        .encode(&mut expected, Checksum::Compute)
+        .unwrap();
+    assert_eq!(t.bytes, expected[..]);
+    assert_eq!(t.writes, std::vec![MESSAGE_SIZE, destination.len()]);
 }
 
 #[test]

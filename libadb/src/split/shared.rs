@@ -19,10 +19,9 @@ use crate::base::channel_table::ChannelTable;
 use crate::base::ids::{ChannelIds, RemoteId};
 use crate::base::incoming::{IncomingQueue, PendingOpen};
 use crate::base::negotiated::Negotiated;
-use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::slot::{ChannelFault, PendingAck};
-use crate::base::wire::{send_okay_to, send_pkt, DesyncFlag};
+use crate::base::wire::{send_okay_to, send_open, send_pkt, DesyncFlag};
 use crate::error::Error;
 
 #[cfg(doc)]
@@ -146,16 +145,18 @@ impl<WH> Shared<WH> {
         };
         let guard = SlotGuard::new(Arc::clone(self), ch);
 
-        let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
-        let pkt = Packet::new(
-            Command::Open,
-            ch.local.raw(),
-            open_arg1,
-            destination.to_vec(),
-        );
+        let credit = self.negotiated.advertised_credit().unwrap_or(0);
         {
             let mut wh = self.lock_write().await?;
-            send_pkt(&mut *wh, &self.desync, &pkt, self.negotiated.checksum()).await?;
+            send_open(
+                &mut *wh,
+                &self.desync,
+                ch.local,
+                credit,
+                destination,
+                self.negotiated.checksum(),
+            )
+            .await?;
         }
         Ok((ch, guard))
     }

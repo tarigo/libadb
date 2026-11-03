@@ -10,7 +10,7 @@ use core::task::Poll;
 use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
 
-use super::ids::ChannelIds;
+use super::ids::{ChannelIds, LocalId};
 use super::negotiated::AckMode;
 use super::protocol::command::Command;
 use super::protocol::constant::MAX_PAYLOAD;
@@ -264,6 +264,22 @@ pub(crate) async fn send_raw<T: Write>(
         checksum,
     )?;
     send_frame(t, desync, &header, payload).await
+}
+
+/// [`send_pkt`] for OPEN from our end `local` to `destination`, which
+/// is borrowed rather than copied into a [`Packet`]. `credit` is the
+/// receive credit `arg1` advertises: zero without delayed ACK.
+pub(crate) async fn send_open<T: Write>(
+    t: &mut T,
+    desync: &DesyncFlag,
+    local: LocalId,
+    credit: u32,
+    destination: &[u8],
+    checksum: Checksum,
+) -> Result<(), Error<T::Error>> {
+    desync.check()?;
+    let header = encode_header(Command::Open, local.raw(), credit, destination, checksum)?;
+    send_frame(t, desync, &header, destination).await
 }
 
 /// Put an encoded header and its payload on the wire, raising `desync`
