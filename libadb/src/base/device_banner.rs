@@ -9,11 +9,49 @@ use bytes::Bytes;
 use super::protocol::features::Feature;
 use crate::error::ProtocolError;
 
+/// The connection state a peer names first in its banner, read by
+/// [`DeviceBanner::state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeviceState {
+    /// `device`: a booted system.
+    Device,
+    /// `recovery`: the recovery image.
+    Recovery,
+    /// `sideload`: recovery waiting for `adb sideload`.
+    Sideload,
+    /// `rescue`: the rescue mode of recovery.
+    Rescue,
+    /// `bootloader`: the bootloader.
+    Bootloader,
+    /// `host`: another ADB host rather than a device.
+    Host,
+    /// A state this version of libadb does not name. Compare
+    /// [`DeviceBanner::state_str`] rather than matching this variant: a
+    /// later libadb may name the state.
+    Other,
+}
+
+impl DeviceState {
+    fn named(state: &str) -> Self {
+        match state {
+            "device" => Self::Device,
+            "recovery" => Self::Recovery,
+            "sideload" => Self::Sideload,
+            "rescue" => Self::Rescue,
+            "bootloader" => Self::Bootloader,
+            "host" => Self::Host,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Parsed CNXN identity banner: `<state>:<serial>:<prop>=<value>;...`.
 ///
-/// `state` is the peer's connection state — `device` for a booted
-/// system, but also `recovery`, `sideload`, `rescue`, `bootloader`,
-/// or `host`. `serial` is usually empty (modern adbd leaves it blank).
+/// `state` is the peer's connection state, a [`DeviceState`] — `device`
+/// for a booted system, but also `recovery`, `sideload`, `rescue`,
+/// `bootloader`, or `host`. `serial` is usually empty (modern adbd
+/// leaves it blank).
 #[derive(Debug, Clone)]
 pub struct DeviceBanner {
     raw: Bytes,
@@ -97,9 +135,17 @@ impl DeviceBanner {
         })
     }
 
-    /// Connection state advertised by the peer: `device`, `recovery`,
-    /// `sideload`, `rescue`, `bootloader`, ...
-    pub fn state(&self) -> &str {
+    /// Connection state advertised by the peer; one libadb does not
+    /// name is [`DeviceState::Other`], and
+    /// [`state_str`](Self::state_str) still has its text.
+    pub fn state(&self) -> DeviceState {
+        DeviceState::named(self.state_str())
+    }
+
+    /// Connection state as the banner spells it: `device`, `recovery`,
+    /// `sideload`, `rescue`, `bootloader`, `host`, or whatever else a
+    /// peer sends.
+    pub fn state_str(&self) -> &str {
         self.str_at(&self.state)
     }
 

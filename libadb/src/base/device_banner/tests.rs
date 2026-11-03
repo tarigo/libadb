@@ -2,7 +2,10 @@ use bytes::Bytes;
 
 use crate::error::ProtocolError;
 
-use super::super::{device_banner::DeviceBanner, protocol::features::Feature};
+use super::super::{
+    device_banner::{DeviceBanner, DeviceState},
+    protocol::features::Feature,
+};
 
 /// A property cap no banner below reaches unless it tests the cap.
 const ROOM: usize = 8;
@@ -89,30 +92,55 @@ fn returns_invalid_prefix_when_colons_are_missing() {
 fn exposes_state_and_empty_serial() {
     let banner = banner("device::features=shell_v2");
 
-    assert_eq!(banner.state(), "device");
+    assert_eq!(banner.state(), DeviceState::Device);
+    assert_eq!(banner.state_str(), "device");
     assert_eq!(banner.serial(), "");
 }
 
 #[test]
 fn accepts_non_device_states() {
     let recovery = banner("recovery::features=shell_v2");
-    assert_eq!(recovery.state(), "recovery");
+    assert_eq!(recovery.state(), DeviceState::Recovery);
     assert!(recovery.has_feature(&Feature::ShellV2));
 
     let sideload = banner("sideload::");
-    assert_eq!(sideload.state(), "sideload");
+    assert_eq!(sideload.state(), DeviceState::Sideload);
     assert!(sideload.features().is_empty());
 
     let host = banner("host::ro.product.name=panther;features=shell_v2");
-    assert_eq!(host.state(), "host");
+    assert_eq!(host.state(), DeviceState::Host);
     assert_eq!(host.product_name(), Some("panther"));
+}
+
+#[test]
+fn names_every_documented_state() {
+    for (text, state) in [
+        ("device", DeviceState::Device),
+        ("recovery", DeviceState::Recovery),
+        ("sideload", DeviceState::Sideload),
+        ("rescue", DeviceState::Rescue),
+        ("bootloader", DeviceState::Bootloader),
+        ("host", DeviceState::Host),
+    ] {
+        let raw = alloc::format!("{text}::");
+        let parsed = DeviceBanner::from_bytes(Bytes::from(raw.into_bytes()), ROOM).unwrap();
+        assert_eq!(parsed.state(), state, "{text}");
+    }
+}
+
+#[test]
+fn an_unnamed_state_is_other_and_keeps_its_text() {
+    let banner = banner("offline::");
+
+    assert_eq!(banner.state(), DeviceState::Other);
+    assert_eq!(banner.state_str(), "offline");
 }
 
 #[test]
 fn parses_nonempty_serial_field() {
     let banner = banner("device:0123456789ABCDEF:ro.product.name=panther");
 
-    assert_eq!(banner.state(), "device");
+    assert_eq!(banner.state(), DeviceState::Device);
     assert_eq!(banner.serial(), "0123456789ABCDEF");
     assert_eq!(banner.product_name(), Some("panther"));
 }
