@@ -11,8 +11,19 @@ pub(crate) fn encode_channel_id(ch: ChannelId) -> u64 {
     ((ch.local_id() as u64) << 32) | (ch.slot() as u32 as u64)
 }
 
-fn decode_channel_id(id: u64) -> ChannelId {
-    ChannelId::from_raw((id & 0xFFFF_FFFF) as u32 as usize, (id >> 32) as u32)
+/// The channel `id` names on `conn`. A slot outside the channel table
+/// is one no call hands out, so it is refused as an argument rather
+/// than cast into another slot or reported as a closed channel.
+fn decode_channel_id(conn: &adb_connection_t, id: u64) -> Result<ChannelId, AdbStatus> {
+    let slot = usize::try_from(id & 0xFFFF_FFFF)
+        .ok()
+        .filter(|&slot| slot < conn.writer.config().max_channels());
+    let Some(slot) = slot else {
+        return Err(error::fail_invalid_arg(
+            "channel id names no slot of this connection",
+        ));
+    };
+    Ok(ChannelId::from_raw(slot, (id >> 32) as u32))
 }
 
 /// Open a new channel to `destination`.
@@ -23,7 +34,9 @@ fn decode_channel_id(id: u64) -> ChannelId {
 /// wire local_id) usable with the other `adb_*_channel` functions
 /// until it is closed. A channel ID from a closed channel is stale:
 /// calls against it fail with [`AdbStatus::ChannelClosed`] even if
-/// the slot has since been reused for a new channel.
+/// the slot has since been reused for a new channel. One whose slot
+/// lies outside the connection's channel table, which no call returns,
+/// is [`AdbStatus::InvalidArg`].
 ///
 /// # Safety
 /// `conn` must be a valid handle. `destination` must be NULL or point
@@ -85,8 +98,11 @@ pub unsafe extern "C" fn adb_read_channel(
     let conn = unsafe { &*conn };
     // SAFETY: non-null, as `buf_len` is not zero, and writable for it per `# Safety`.
     let slice = unsafe { slice::from_mut_ptr(buf, buf_len) };
+    let ch = match decode_channel_id(conn, id) {
+        Ok(ch) => ch,
+        Err(status) => return status,
+    };
     let mut g = conn.lock_reader();
-    let ch = decode_channel_id(id);
     // The reader hands back Ok(0) for a zero-length WRTE; the C
     // contract above forbids returning it.
     let n = loop {
@@ -125,7 +141,10 @@ pub unsafe extern "C" fn adb_write_channel(
     let conn = unsafe { &*conn };
     // SAFETY: readable for `buf_len` bytes when non-null, per `# Safety`.
     let slice = unsafe { slice::from_ptr(buf, buf_len) };
-    let ch = decode_channel_id(id);
+    let ch = match decode_channel_id(conn, id) {
+        Ok(ch) => ch,
+        Err(status) => return status,
+    };
     ffi_try!(conn.writer.write_channel(ch, slice));
     AdbStatus::Ok
 }
@@ -143,7 +162,10 @@ pub unsafe extern "C" fn adb_close_channel(conn: *mut adb_connection_t, id: u64)
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let conn = unsafe { &*conn };
-    let ch = decode_channel_id(id);
+    let ch = match decode_channel_id(conn, id) {
+        Ok(ch) => ch,
+        Err(status) => return status,
+    };
     ffi_try!(conn.writer.close_channel(ch));
     AdbStatus::Ok
 }

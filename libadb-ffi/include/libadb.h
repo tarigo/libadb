@@ -351,7 +351,9 @@ adb_status_t adb_connection_features(
 /*
  * Open a channel to `destination` (e.g. "shell:ls", "tcp:8080", "sync:").
  * `destination` need not be null-terminated; `destination_len` bytes are
- * sent verbatim. *out_id receives the channel ID on success.
+ * sent verbatim. *out_id receives the channel ID on success. An ID whose
+ * table slot no call could have returned makes the channel calls fail
+ * with ADB_ERR_INVALID_ARG.
  */
 adb_status_t adb_open_channel(
     adb_connection_t *conn,
