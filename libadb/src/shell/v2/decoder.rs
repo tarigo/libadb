@@ -1,3 +1,6 @@
+//! [`FrameDecoder`]: shell v2 frames cut out of a caller's buffer, with
+//! no channel and no IO, and turned into [`Frame`]s.
+
 use alloc::vec::Vec;
 
 use crate::error::ProtocolError;
@@ -32,6 +35,7 @@ pub struct FrameDecoder {
 }
 
 impl FrameDecoder {
+    /// A decoder over an empty buffer, with no frame part-delivered.
     pub fn new() -> Self {
         Self::default()
     }
