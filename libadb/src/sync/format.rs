@@ -98,7 +98,6 @@ pub(super) fn i64_at(buf: &[u8], off: usize) -> i64 {
     i64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
 }
 
-#[doc(hidden)]
 pub(super) fn format_u32(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
     if n == 0 {
         out[9] = b'0';
