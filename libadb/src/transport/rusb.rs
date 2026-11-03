@@ -279,6 +279,20 @@ impl core::fmt::Display for UsbConnectError {
     }
 }
 
+impl core::error::Error for UsbConnectError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Context(e)
+            | Self::Enumerate(e)
+            | Self::Open(e)
+            | Self::Descriptor(e)
+            | Self::SerialRead(e)
+            | Self::Claim(e) => Some(e),
+            Self::NotFound | Self::NoAdbInterface | Self::NoBulkEndpoints => None,
+        }
+    }
+}
+
 /// The `rusb` backend: libusb, blocking bulk transfers.
 ///
 /// Zero-sized marker for [`UsbBackend`](crate::transport::UsbBackend);
@@ -423,6 +437,19 @@ mod tests {
     use crate::transport::runtime::Inline;
     use crate::transport::rusb::Rusb;
     use crate::transport::UsbBackend;
+
+    #[test]
+    fn a_connect_error_leads_to_the_libusb_error_behind_it() {
+        use crate::transport::rusb::UsbConnectError;
+        use core::error::Error as _;
+        let err = UsbConnectError::Claim(rusb::Error::Busy);
+        let source = err.source().expect("the libusb error is the source");
+        assert_eq!(
+            alloc::format!("{source}"),
+            alloc::format!("{}", rusb::Error::Busy)
+        );
+        assert!(UsbConnectError::NotFound.source().is_none());
+    }
 
     #[test]
     fn the_backend_serves_every_runtime() {

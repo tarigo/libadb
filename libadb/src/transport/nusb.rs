@@ -173,6 +173,15 @@ impl core::fmt::Display for UsbConnectError {
     }
 }
 
+impl core::error::Error for UsbConnectError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Enumerate(e) | Self::Open(e) | Self::Claim(e) => Some(e),
+            Self::NotFound | Self::NoAdbInterface | Self::NoBulkEndpoints => None,
+        }
+    }
+}
+
 /// The `nusb` backend: pure-Rust, async bulk transfers.
 ///
 /// Zero-sized marker for [`UsbBackend`](crate::transport::UsbBackend);
@@ -250,5 +259,14 @@ mod tests {
             alloc::format!("{source}"),
             alloc::format!("{}", nusb::transfer::TransferError::Cancelled)
         );
+    }
+
+    #[test]
+    fn a_connect_error_leads_to_the_io_error_behind_it() {
+        use core::error::Error as _;
+        let err = UsbConnectError::Claim(std::io::Error::other("busy"));
+        let source = err.source().expect("the io error is the source");
+        assert_eq!(alloc::format!("{source}"), "busy");
+        assert!(UsbConnectError::NotFound.source().is_none());
     }
 }
