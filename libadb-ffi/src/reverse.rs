@@ -45,8 +45,11 @@ pub unsafe extern "C" fn adb_reverse_forward(
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let mut g = unsafe { &*conn }.lock_reader();
     let bound = ffi_try!(reverse::establish(&mut *g, device, host));
+    let bound = bound
+        .map(|port| alloc::format!("{port}"))
+        .unwrap_or_default();
     // SAFETY: `data` and `out_data_len` are NULL or writable as sized, per `# Safety`.
-    unsafe { copy_out(&bound, data, data_cap, out_data_len) };
+    unsafe { copy_out(bound.as_bytes(), data, data_cap, out_data_len) };
     AdbStatus::Ok
 }
 

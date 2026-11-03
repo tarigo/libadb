@@ -79,13 +79,15 @@ impl<E> From<ReverseError> for Error<E> {
 /// connection to a channel opened toward the host with `host_spec` as
 /// its destination.
 ///
-/// Returns the service's data bytes: for `tcp:` device specs this is
-/// the bound port in decimal (useful with `tcp:0`), empty otherwise.
+/// Returns the port the device bound for a `tcp:` device spec — the
+/// one it picked, for `tcp:0` — and `None` for any other spec, which
+/// adbd answers with no port. A port that is not a decimal `u16` is
+/// [`ReverseError::UnexpectedReply`].
 pub async fn establish<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
     host_spec: &str,
-) -> Result<Vec<u8>, Error<C::IoError>> {
+) -> Result<Option<u16>, Error<C::IoError>> {
     check_specs(&[device_spec, host_spec])?;
     let mut dest = Vec::with_capacity(18 + device_spec.len() + host_spec.len());
     dest.extend_from_slice(b"reverse:forward:");
@@ -94,7 +96,8 @@ pub async fn establish<C: ServiceChannel>(
     dest.extend_from_slice(host_spec.as_bytes());
     dest.push(0);
     let reply = exchange(conn, &dest).await?;
-    parse_status(&reply).map_err(Error::Reverse)
+    let data = parse_status(&reply).map_err(Error::Reverse)?;
+    parse_port(&data).map_err(Error::Reverse)
 }
 
 /// Remove the rule listening on `device_spec`.
@@ -190,6 +193,24 @@ fn parse_status(reply: &[u8]) -> Result<Vec<u8>, ReverseError> {
     }
 }
 
+/// The port in a successful `forward` reply: decimal digits, or nothing
+/// for a spec that binds no port.
+fn parse_port(data: &[u8]) -> Result<Option<u16>, ReverseError> {
+    if data.is_empty() {
+        return Ok(None);
+    }
+    // Byte-wise first, as in `hex4_block`: `u16::from_str` would also
+    // take a leading `+`.
+    if !data.iter().all(u8::is_ascii_digit) {
+        return Err(ReverseError::UnexpectedReply);
+    }
+    core::str::from_utf8(data)
+        .ok()
+        .and_then(|digits| digits.parse().ok())
+        .map(Some)
+        .ok_or(ReverseError::UnexpectedReply)
+}
+
 /// `FAIL`'s payload: the device's message, verbatim when the length
 /// prefix itself is mangled.
 fn fail_message(rest: &[u8]) -> ReverseError {
@@ -278,5 +299,23 @@ mod tests {
             parse_status(b"OKAY+0011").unwrap_err(),
             ReverseError::UnexpectedReply
         );
+    }
+
+    #[test]
+    fn a_bound_port_parses_as_decimal() {
+        assert_eq!(parse_port(b"6100"), Ok(Some(6100)));
+        assert_eq!(parse_port(b"65535"), Ok(Some(65535)));
+        assert_eq!(parse_port(b""), Ok(None), "a spec that binds no port");
+    }
+
+    #[test]
+    fn a_port_that_is_not_one_is_an_unexpected_reply() {
+        for data in [&b"65536"[..], b"+80", b"-1", b"61 00", b"port", b"\xff"] {
+            assert_eq!(
+                parse_port(data),
+                Err(ReverseError::UnexpectedReply),
+                "{data:?}"
+            );
+        }
     }
 }

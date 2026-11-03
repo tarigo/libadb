@@ -339,8 +339,8 @@ async fn reverse_establish_runs_over_the_writer() {
     let (reader, mut writer) = conn.split().unwrap();
     let _driver = rt::spawn(reader.run());
 
-    let data = reverse::establish(&mut writer, "tcp:0", "tcp:6200").await.unwrap();
-    assert_eq!(data, b"38547");
+    let port = reverse::establish(&mut writer, "tcp:0", "tcp:6200").await.unwrap();
+    assert_eq!(port, Some(38547));
     rt::join(device).await;
 }
 }

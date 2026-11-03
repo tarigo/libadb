@@ -53,13 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let host_spec = format!("tcp:{local_port}");
     let assigned = libadb::reverse::establish(&mut conn, &device_spec, &host_spec).await?;
-    if assigned.is_empty() {
-        println!("[*] rule established: {device_spec} -> 127.0.0.1:{local_port}");
-    } else {
-        println!(
-            "[*] rule established: device port {} -> 127.0.0.1:{local_port}",
-            String::from_utf8_lossy(&assigned)
-        );
+    match assigned {
+        Some(port) => {
+            println!("[*] rule established: device port {port} -> 127.0.0.1:{local_port}")
+        }
+        None => println!("[*] rule established: {device_spec} -> 127.0.0.1:{local_port}"),
     }
 
     // The rule's OPENs carry the host spec as their NUL-terminated

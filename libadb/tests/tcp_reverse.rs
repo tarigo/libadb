@@ -18,7 +18,7 @@ use fake_device::{session, FakeDevice};
 mod common;
 
 rt_test! {
-async fn establish_returns_the_service_data() {
+async fn establish_returns_the_bound_port() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"reverse:forward:tcp:0;tcp:6200\0").await;
         ch.send_write(b"OKAY000538547").await;
@@ -28,8 +28,8 @@ async fn establish_returns_the_service_data() {
     })
     .await;
 
-    let data = reverse::establish(&mut conn, "tcp:0", "tcp:6200").await.unwrap();
-    assert_eq!(data, b"38547", "the bound port comes back as text");
+    let port = reverse::establish(&mut conn, "tcp:0", "tcp:6200").await.unwrap();
+    assert_eq!(port, Some(38547));
 
     rt::join(device).await;
 }
