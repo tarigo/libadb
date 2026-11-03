@@ -3,6 +3,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use core::future::Future;
 
 use super::error::{Error, ProtocolError, RxOverflow};
+use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::protocol::command::Command;
 use super::protocol::Packet;
 use super::session::Session;
@@ -23,11 +24,7 @@ pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
 
 /// Whether an inbound WRTE is acknowledged now or once it is read.
 pub(crate) enum AckDecision {
-    Now {
-        local_id: u32,
-        remote_id: u32,
-        len: usize,
-    },
+    Now { ids: ChannelIds, len: usize },
     Hold,
 }
 
@@ -36,8 +33,7 @@ pub(crate) enum DispatchOutcome {
     AckWrite {
         #[allow(dead_code)] // read only by split::Reader, to wake readers
         idx: usize,
-        local_id: u32,
-        remote_id: u32,
+        ids: ChannelIds,
         len: usize,
     },
     /// An OKAY refilled the slot's send budget: one writer can proceed.
@@ -62,7 +58,7 @@ pub(crate) enum DispatchOutcome {
     ///
     /// [`accept_incoming`]: super::connection::Connection::accept_incoming
     IncomingOpen {
-        remote_id: u32,
+        remote: RemoteId,
         /// The device's receive credit from OPEN `arg1`; our send
         /// budget once accepted, meaningful only with delayed ack.
         credit: u32,
@@ -71,15 +67,14 @@ pub(crate) enum DispatchOutcome {
     /// The device gave up on an OPEN it had sent — a CLSE that names
     /// no local id. Drop the matching pending entry if still queued.
     CancelPendingOpen {
-        remote_id: u32,
+        remote: RemoteId,
     },
     /// A READY for no channel of ours: the device accepted an OPEN its
     /// opener gave up on before the answer. Answer CLSE with both ids —
     /// adbd ignores one that does not name its own — or the device's
     /// end stays open.
     StrayReady {
-        local_id: u32,
-        remote_id: u32,
+        ids: ChannelIds,
     },
     /// A packet broke this slot's channel alone. The slot is not
     /// closed: whoever dispatched decides what the fault costs.
@@ -87,9 +82,7 @@ pub(crate) enum DispatchOutcome {
         #[allow(dead_code)] // read only by split::Reader::run, to close the channel
         idx: usize,
         #[allow(dead_code)] // read only by split::Reader::run, to close the channel
-        local_id: u32,
-        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
-        remote_id: u32,
+        ids: ChannelIds,
         /// The slot was waiting for the device's answer to its OPEN.
         #[allow(dead_code)] // read only by split::Reader, to fail the open
         opening: bool,
@@ -121,17 +114,9 @@ impl ChannelFault {
 /// A device-initiated OPEN waiting for the application's verdict.
 #[derive(Debug)]
 pub(crate) struct PendingOpen {
-    pub remote_id: u32,
+    pub remote: RemoteId,
     pub credit: u32,
     pub destination: Bytes,
-}
-
-/// Does a CLSE with these args close the channel `(local_id,
-/// remote_id)`? The ordinary form names our id in `arg1`; a
-/// zero-`arg1` withdrawal whose OPEN we already accepted — it crossed
-/// our READY in flight — names the device's id in `arg0`.
-pub(crate) fn clse_closes(arg0: u32, arg1: u32, local_id: u32, remote_id: u32) -> bool {
-    arg1 == local_id || (arg1 == 0 && arg0 == remote_id)
 }
 
 /// `rx_cap` bounds how much unread data a single channel may accumulate;
@@ -159,7 +144,7 @@ pub(crate) fn dispatch_packet(
     }
     if pkt.command == Command::Open {
         return DispatchOutcome::IncomingOpen {
-            remote_id: pkt.arg0,
+            remote: RemoteId::from(pkt.arg0),
             credit: pkt.arg1,
             destination: pkt.data.clone(),
         };
@@ -169,57 +154,49 @@ pub(crate) fn dispatch_packet(
         // request is then no longer queued but an accepted slot, and
         // has to close like any remote CLSE — the cancel handlers only
         // reach requests still awaiting a verdict.
+        let remote = RemoteId::from(pkt.arg0);
         if pkt.arg0 != 0 {
             for (idx, slot_opt) in channels.iter_mut().enumerate() {
                 let Some(slot) = slot_opt else { continue };
-                if slot.remote_id == pkt.arg0 {
+                if slot.remote_id == remote {
                     slot.apply_close();
                     return DispatchOutcome::SlotClosed { idx };
                 }
             }
         }
-        return DispatchOutcome::CancelPendingOpen {
-            remote_id: pkt.arg0,
-        };
+        return DispatchOutcome::CancelPendingOpen { remote };
     }
+    let remote = RemoteId::from(pkt.arg0);
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
+        let ours = pkt.arg1 == slot.local_id.raw();
         match pkt.command {
             // A channel closed for a fault takes nothing more: data that
             // was still in flight would read as if no gap came before it.
-            Command::Write | Command::Ready
-                if pkt.arg1 == slot.local_id && slot.failed.is_some() =>
-            {
+            Command::Write | Command::Ready if ours && slot.failed.is_some() => {
                 return DispatchOutcome::Unmatched;
             }
-            Command::Write if pkt.arg1 == slot.local_id => {
+            Command::Write if ours => {
                 return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
-                    Ok(AckDecision::Now {
-                        local_id,
-                        remote_id,
-                        len,
-                    }) => DispatchOutcome::AckWrite {
-                        idx,
-                        local_id,
-                        remote_id,
-                        len,
-                    },
+                    Ok(AckDecision::Now { ids, len }) => {
+                        DispatchOutcome::AckWrite { idx, ids, len }
+                    }
                     Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
-                    Err(RxOverflow) => slot.fault(idx, pkt.arg0, ChannelFault::RxOverflow),
+                    Err(RxOverflow) => slot.fault(idx, remote, ChannelFault::RxOverflow),
                 };
             }
-            Command::Ready if pkt.arg1 == slot.local_id => {
+            Command::Ready if ours => {
                 let granted = if slot.state == ChannelState::Opening {
-                    slot.accept_open_ready(pkt.arg0, &pkt.data, delayed_ack)
+                    slot.accept_open_ready(remote, &pkt.data, delayed_ack)
                 } else {
                     slot.apply_ready(&pkt.data, delayed_ack)
                 };
                 return match granted {
                     Ok(()) => DispatchOutcome::CreditGranted { idx },
-                    Err(e) => slot.fault(idx, pkt.arg0, ChannelFault::Protocol(e)),
+                    Err(e) => slot.fault(idx, remote, ChannelFault::Protocol(e)),
                 };
             }
-            Command::Close if pkt.arg1 == slot.local_id => {
+            Command::Close if ours => {
                 slot.apply_close();
                 return DispatchOutcome::SlotClosed { idx };
             }
@@ -228,8 +205,10 @@ pub(crate) fn dispatch_packet(
     }
     if pkt.command == Command::Ready && pkt.arg0 != 0 && pkt.arg1 != 0 {
         return DispatchOutcome::StrayReady {
-            local_id: pkt.arg1,
-            remote_id: pkt.arg0,
+            ids: ChannelIds {
+                local: LocalId::from(pkt.arg1),
+                remote,
+            },
         };
     }
     DispatchOutcome::Unmatched
@@ -257,7 +236,7 @@ pub enum SelectResult<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChannelId {
     pub(crate) slot: usize,
-    pub(crate) local_id: u32,
+    pub(crate) local: LocalId,
 }
 
 impl ChannelId {
@@ -266,7 +245,10 @@ impl ChannelId {
     /// ordinary Rust callers should use the `ChannelId` returned by
     /// [`Session::open_channel`] directly.
     pub fn from_raw(slot: usize, local_id: u32) -> Self {
-        Self { slot, local_id }
+        Self {
+            slot,
+            local: LocalId::from(local_id),
+        }
     }
 
     /// Slot index in the connection's channel table.
@@ -276,7 +258,7 @@ impl ChannelId {
 
     /// ADB wire `local_id` for this channel — unique per OPEN.
     pub fn local_id(self) -> u32 {
-        self.local_id
+        self.local.raw()
     }
 }
 
@@ -288,8 +270,8 @@ pub(crate) enum ChannelState {
 }
 
 pub(crate) struct ChannelSlot {
-    pub local_id: u32,
-    pub remote_id: u32,
+    pub local_id: LocalId,
+    pub remote_id: RemoteId,
     pub state: ChannelState,
     pub rx_buf: BytesMut,
     pub wrte_acked: bool,
@@ -315,10 +297,10 @@ pub(crate) struct ChannelSlot {
 }
 
 impl ChannelSlot {
-    pub fn new(local_id: u32) -> Self {
+    pub fn new(local_id: LocalId) -> Self {
         Self {
             local_id,
-            remote_id: 0,
+            remote_id: RemoteId::from(0),
             state: ChannelState::Opening,
             rx_buf: BytesMut::new(),
             wrte_acked: true,
@@ -331,8 +313,11 @@ impl ChannelSlot {
         }
     }
 
-    pub fn channel_ids(&self) -> (u32, u32) {
-        (self.local_id, self.remote_id)
+    pub fn channel_ids(&self) -> ChannelIds {
+        ChannelIds {
+            local: self.local_id,
+            remote: self.remote_id,
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -354,13 +339,15 @@ impl ChannelSlot {
         self.unacked = 0;
     }
 
-    /// `remote_id` comes from the packet: a slot still opening has
-    /// none of its own yet.
-    fn fault(&self, idx: usize, remote_id: u32, fault: ChannelFault) -> DispatchOutcome {
+    /// `remote` comes from the packet: a slot still opening has none of
+    /// its own yet.
+    fn fault(&self, idx: usize, remote: RemoteId, fault: ChannelFault) -> DispatchOutcome {
         DispatchOutcome::ChannelFault {
             idx,
-            local_id: self.local_id,
-            remote_id,
+            ids: ChannelIds {
+                local: self.local_id,
+                remote,
+            },
             opening: self.state == ChannelState::Opening,
             fault,
         }
@@ -368,7 +355,7 @@ impl ChannelSlot {
 
     pub fn accept_open_ready(
         &mut self,
-        remote_id: u32,
+        remote_id: RemoteId,
         payload: &[u8],
         delayed_ack: bool,
     ) -> Result<(), ProtocolError> {
@@ -416,8 +403,7 @@ impl ChannelSlot {
         if !delayed_ack && self.rx_buf.len() < watermark {
             self.unacked = 0;
             return Ok(AckDecision::Now {
-                local_id: self.local_id,
-                remote_id: self.remote_id,
+                ids: self.channel_ids(),
                 len: payload.len(),
             });
         }
@@ -433,19 +419,19 @@ impl ChannelSlot {
         cap: usize,
         delayed_ack: bool,
         watermark: usize,
-    ) -> Result<Option<(u32, u32, usize)>, RxOverflow> {
+    ) -> Result<Option<(ChannelIds, usize)>, RxOverflow> {
         if taken < payload.len() {
             self.push_rx(&payload[taken..], cap)?;
             self.unacked = self.unacked.saturating_add(payload.len() - taken);
         }
         if delayed_ack {
-            return Ok((taken > 0).then_some((self.local_id, self.remote_id, taken)));
+            return Ok((taken > 0).then_some((self.channel_ids(), taken)));
         }
         if self.rx_buf.len() >= watermark {
             return Ok(None);
         }
         let len = core::mem::take(&mut self.unacked);
-        Ok(Some((self.local_id, self.remote_id, len)))
+        Ok(Some((self.channel_ids(), len)))
     }
 
     /// Record that the application took `n` bytes, and say what to
@@ -455,10 +441,10 @@ impl ChannelSlot {
         n: usize,
         delayed_ack: bool,
         watermark: usize,
-    ) -> Option<(u32, u32, usize)> {
+    ) -> Option<(ChannelIds, usize)> {
         let len = self.ack_len(n, self.rx_buf.len(), delayed_ack, watermark)?;
         self.unacked -= len;
-        Some((self.local_id, self.remote_id, len))
+        Some((self.channel_ids(), len))
     }
 
     /// Whether taking up to `want` buffered bytes now would owe the
@@ -502,7 +488,7 @@ impl ChannelSlot {
         buf: &mut [u8],
         delayed_ack: bool,
         watermark: usize,
-    ) -> Result<Option<(usize, Option<(u32, u32, usize)>)>, Error<E>> {
+    ) -> Result<Option<(usize, Option<(ChannelIds, usize)>)>, Error<E>> {
         if self.rx_buf.is_empty() {
             return if self.is_closed() {
                 Err(self.closed_error())
@@ -608,11 +594,11 @@ impl ChannelSlot {
 pub(crate) fn channel_ids_of<E>(
     channels: &[Option<ChannelSlot>],
     ch: ChannelId,
-) -> Result<(u32, u32), Error<E>> {
+) -> Result<ChannelIds, Error<E>> {
     channels
         .get(ch.slot)
         .and_then(|s| s.as_ref())
-        .filter(|s| s.local_id == ch.local_id)
+        .filter(|s| s.local_id == ch.local)
         .map(ChannelSlot::channel_ids)
         .ok_or(Error::ChannelClosed)
 }
@@ -625,7 +611,7 @@ pub(crate) fn slot_for_mut(
     channels
         .get_mut(ch.slot)
         .and_then(|s| s.as_mut())
-        .filter(|s| s.local_id == ch.local_id)
+        .filter(|s| s.local_id == ch.local)
 }
 
 /// An open ADB channel tied to a [`Session`].
@@ -712,10 +698,11 @@ impl<S: Session> Channel<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::ChannelSlot;
+    use crate::base::ids::LocalId;
 
     #[test]
     fn cancellation_churn_behind_a_blocked_head_does_not_accumulate() {
-        let mut slot = ChannelSlot::new(1);
+        let mut slot = ChannelSlot::new(LocalId::from(1));
         let _head = slot.send_enqueue();
 
         for _ in 0..1_000 {

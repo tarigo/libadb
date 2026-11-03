@@ -1,4 +1,5 @@
 use super::super::error::ProtocolError;
+use super::super::ids::{ChannelIds, RemoteId};
 use super::{
     command::AuthKind, constant::MAX_PAYLOAD, Checksumable, Command, Message, MESSAGE_SIZE,
 };
@@ -62,8 +63,20 @@ impl Packet {
         }
     }
 
-    pub fn close(local_id: u32, remote_id: u32) -> Self {
-        Self::new(Command::Close, local_id, remote_id, Bytes::new())
+    /// CLSE for the channel `ids` names.
+    pub(crate) fn close(ids: ChannelIds) -> Self {
+        Self::new(
+            Command::Close,
+            ids.local.raw(),
+            ids.remote.raw(),
+            Bytes::new(),
+        )
+    }
+
+    /// CLSE refusing the OPEN the device sent from `remote`: there is
+    /// no end of ours to name, so `arg0` stays zero.
+    pub(crate) fn refuse(remote: RemoteId) -> Self {
+        Self::new(Command::Close, 0, remote.raw(), Bytes::new())
     }
 
     pub fn auth_signature(signature: impl Into<Bytes>) -> Self {

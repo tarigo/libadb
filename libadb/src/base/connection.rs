@@ -9,11 +9,12 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 
 use super::channel::{
-    channel_ids_of, clse_closes, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
+    channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
     DispatchOutcome, PendingOpen, SelectResult,
 };
 use super::device_banner::DeviceBanner;
 use super::error::Error;
+use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::Negotiated;
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
@@ -85,14 +86,14 @@ where
     /// any cancelled write.
     pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
-        let (remote_id, credit) = (pending.remote_id, pending.credit);
+        let (remote, credit) = (pending.remote, pending.credit);
         let checksum = self.conn.negotiated.checksum();
 
         let Some(slot_idx) = self.conn.channels.iter().position(|s| s.is_none()) else {
             send_pkt(
                 &mut self.conn.transport,
                 &self.conn.desync,
-                &Packet::close(0, remote_id),
+                &Packet::refuse(remote),
                 checksum,
             )
             .await?;
@@ -102,7 +103,7 @@ where
 
         let local_id = self.conn.next_local_id();
         let mut slot = ChannelSlot::new(local_id);
-        slot.remote_id = remote_id;
+        slot.remote_id = remote;
         slot.state = ChannelState::Open;
         if self.conn.negotiated.delayed_ack {
             // OPEN's arg1 is the device's receive credit — our budget.
@@ -119,7 +120,7 @@ where
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::new(Command::Ready, local_id, remote_id, payload),
+            &Packet::new(Command::Ready, local_id.raw(), remote.raw(), payload),
             checksum,
         )
         .await?;
@@ -129,7 +130,7 @@ where
         self.pending.take();
         Ok(ChannelId {
             slot: slot_idx,
-            local_id,
+            local: local_id,
         })
     }
 
@@ -141,12 +142,12 @@ where
     /// before the CLSE write is first polled; after that it is marked
     /// desynchronized, as with any cancelled write.
     pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let remote_id = self.pending.as_ref().expect("undecided").remote_id;
+        let remote = self.pending.as_ref().expect("undecided").remote;
         let checksum = self.conn.negotiated.checksum();
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::close(0, remote_id),
+            &Packet::refuse(remote),
             checksum,
         )
         .await?;
@@ -185,54 +186,31 @@ async fn dispatch_to<T: Write>(
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
     match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark) {
-        DispatchOutcome::AckWrite {
-            local_id,
-            remote_id,
-            len,
-            ..
-        } => {
-            send_okay_to(
-                transport,
-                desync,
-                delayed_ack,
-                local_id,
-                remote_id,
-                len,
-                checksum,
-            )
-            .await?;
+        DispatchOutcome::AckWrite { ids, len, .. } => {
+            send_okay_to(transport, desync, delayed_ack, ids, len, checksum).await?;
         }
         DispatchOutcome::IncomingOpen {
-            remote_id,
+            remote,
             credit,
             destination,
         } => {
             // The queue is bounded by the channel table: past that, an
             // OPEN storm is refused on arrival rather than remembered.
             if incoming.len() >= channels.len() {
-                send_pkt(transport, desync, &Packet::close(0, remote_id), checksum).await?;
+                send_pkt(transport, desync, &Packet::refuse(remote), checksum).await?;
             } else {
                 incoming.push_back(PendingOpen {
-                    remote_id,
+                    remote,
                     credit,
                     destination,
                 });
             }
         }
-        DispatchOutcome::CancelPendingOpen { remote_id } => {
-            incoming.retain(|p| p.remote_id != remote_id);
+        DispatchOutcome::CancelPendingOpen { remote } => {
+            incoming.retain(|p| p.remote != remote);
         }
-        DispatchOutcome::StrayReady {
-            local_id,
-            remote_id,
-        } => {
-            send_pkt(
-                transport,
-                desync,
-                &Packet::close(local_id, remote_id),
-                checksum,
-            )
-            .await?;
+        DispatchOutcome::StrayReady { ids } => {
+            send_pkt(transport, desync, &Packet::close(ids), checksum).await?;
         }
         // The fault surfaces on whichever call is driving the
         // connection, and the channel itself stays as it was.
@@ -425,7 +403,12 @@ where
 
         let local_id = self.next_local_id();
         let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
-        let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
+        let pkt = Packet::new(
+            Command::Open,
+            local_id.raw(),
+            open_arg1,
+            destination.to_vec(),
+        );
         let checksum = self.negotiated.checksum();
         send_pkt(&mut self.transport, &self.desync, &pkt, checksum).await?;
 
@@ -434,7 +417,7 @@ where
 
     async fn await_open_ack(
         &mut self,
-        local_id: u32,
+        local_id: LocalId,
         slot_idx: usize,
     ) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         loop {
@@ -445,18 +428,23 @@ where
             )
             .await?;
             match pkt.command {
-                Command::Ready if pkt.arg1 == local_id => {
+                Command::Ready if pkt.arg1 == local_id.raw() => {
+                    let remote = RemoteId::from(pkt.arg0);
                     let mut slot = ChannelSlot::new(local_id);
                     if let Err(e) =
-                        slot.accept_open_ready(pkt.arg0, &pkt.data, self.negotiated.delayed_ack)
+                        slot.accept_open_ready(remote, &pkt.data, self.negotiated.delayed_ack)
                     {
                         // The device holds an end it takes for open:
                         // close it by its id.
                         let checksum = self.negotiated.checksum();
+                        let ids = ChannelIds {
+                            local: local_id,
+                            remote,
+                        };
                         send_pkt(
                             &mut self.transport,
                             &self.desync,
-                            &Packet::close(local_id, pkt.arg0),
+                            &Packet::close(ids),
                             checksum,
                         )
                         .await?;
@@ -465,10 +453,10 @@ where
                     self.channels[slot_idx] = Some(slot);
                     return Ok(ChannelId {
                         slot: slot_idx,
-                        local_id,
+                        local: local_id,
                     });
                 }
-                Command::Close if pkt.arg1 == local_id => {
+                Command::Close if pkt.arg1 == local_id.raw() => {
                     return Err(Error::ChannelClosed);
                 }
                 _ => {
@@ -550,13 +538,12 @@ where
                 debug_assert!(n > 0, "wait_ack returned with zero budget");
             }
 
-            let (local_id, remote_id) = self.channel_ids(ch)?;
+            let ids = self.channel_ids(ch)?;
             send_raw(
                 &mut self.transport,
                 &self.desync,
                 Command::Write,
-                local_id,
-                remote_id,
+                ids,
                 &data[offset..offset + n],
                 checksum,
             )
@@ -634,12 +621,12 @@ where
         ch: ChannelId,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let ids = self.channel_ids(ch)?;
         let checksum = self.negotiated.checksum();
         send_pkt(
             &mut self.transport,
             &self.desync,
-            &Packet::close(local_id, remote_id),
+            &Packet::close(ids),
             checksum,
         )
         .await?;
@@ -690,13 +677,13 @@ where
             .slot_mut(ch)?
             .take_buffered(buf, delayed_ack, watermark)?;
         if let Some((n, ack)) = buffered {
-            if let Some((local_id, remote_id, len)) = ack {
-                self.send_okay(local_id, remote_id, len).await?;
+            if let Some((ids, len)) = ack {
+                self.send_okay(ids, len).await?;
             }
             return Ok(SelectResult::Data(n));
         }
 
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let ids = self.channel_ids(ch)?;
         let rx_cap = self.negotiated.config.rx_cap();
         let mut interrupt = pin!(interrupt);
 
@@ -714,19 +701,19 @@ where
                 Received::Interrupted(val) => return Ok(SelectResult::Interrupted(val)),
             };
             match pkt.command {
-                Command::Write if pkt.arg1 == local_id => {
+                Command::Write if pkt.arg1 == ids.local.raw() => {
                     let n = buf.len().min(pkt.data.len());
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     let ack = match self.channels[ch.slot].as_mut() {
                         Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
                         None => None,
                     };
-                    if let Some((local_id, remote_id, len)) = ack {
-                        self.send_okay(local_id, remote_id, len).await?;
+                    if let Some((ids, len)) = ack {
+                        self.send_okay(ids, len).await?;
                     }
                     return Ok(SelectResult::Data(n));
                 }
-                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
+                Command::Close if ids.closed_by(&pkt) => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_close();
                     }
@@ -739,14 +726,14 @@ where
         }
     }
 
-    fn next_local_id(&mut self) -> u32 {
+    fn next_local_id(&mut self) -> LocalId {
         const RESERVED_ADB_ID: u32 = 0;
         let id = self.local_id_counter;
         self.local_id_counter = self.local_id_counter.wrapping_add(1);
         if self.local_id_counter == RESERVED_ADB_ID {
             self.local_id_counter = 1;
         }
-        id
+        LocalId::from(id)
     }
 
     fn slot_mut(
@@ -756,21 +743,20 @@ where
         self.channels
             .get_mut(ch.slot)
             .and_then(|s| s.as_mut())
-            .filter(|s| s.local_id == ch.local_id)
+            .filter(|s| s.local_id == ch.local)
             .ok_or(Error::ChannelClosed)
     }
 
     pub(crate) fn channel_ids(
         &self,
         ch: ChannelId,
-    ) -> Result<(u32, u32), Error<<T as ErrorType>::Error>> {
+    ) -> Result<ChannelIds, Error<<T as ErrorType>::Error>> {
         channel_ids_of(&self.channels, ch)
     }
 
     async fn send_okay(
         &mut self,
-        local_id: u32,
-        remote_id: u32,
+        ids: ChannelIds,
         wrte_len: usize,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.negotiated.checksum();
@@ -779,8 +765,7 @@ where
             &mut self.transport,
             &self.desync,
             delayed_ack,
-            local_id,
-            remote_id,
+            ids,
             wrte_len,
             checksum,
         )
@@ -823,7 +808,7 @@ where
                 }
             }
 
-            let (local_id, remote_id) = self.channel_ids(ch)?;
+            let ids = self.channel_ids(ch)?;
             let pkt = recv_pkt(
                 &mut self.transport,
                 &mut self.recv_buf,
@@ -832,7 +817,7 @@ where
             .await?;
 
             match pkt.command {
-                Command::Ready if pkt.arg1 == local_id => {
+                Command::Ready if pkt.arg1 == ids.local.raw() => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_ready(&pkt.data, delayed_ack)?;
                         if !delayed_ack {
@@ -840,7 +825,7 @@ where
                         }
                     }
                 }
-                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
+                Command::Close if ids.closed_by(&pkt) => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_close();
                     }

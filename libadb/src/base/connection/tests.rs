@@ -277,7 +277,7 @@ fn reading_past_the_watermark_releases_the_held_ack() {
 
 mod incoming {
     use super::*;
-    use crate::base::mock::{cnxn_with, now, wrte, Mock, NoAuth};
+    use crate::base::mock::{cnxn_with, now, withdraw, wrte, Mock, NoAuth};
 
     fn connected(host: &'static [u8], device: &str) -> Connection<Mock> {
         let mut mock = Mock::new();
@@ -383,7 +383,7 @@ mod incoming {
     fn a_device_cancel_removes_the_pending_request() {
         let mut conn = connected(b"host::features=shell_v2", "shell_v2");
         now(conn.dispatch(open_pkt(55, 0, b"tcp:5\0"))).unwrap();
-        now(conn.dispatch(Packet::close(55, 0))).unwrap();
+        now(conn.dispatch(withdraw(55))).unwrap();
         assert!(conn.try_accept_incoming().is_none());
     }
 
@@ -396,7 +396,7 @@ mod incoming {
         now(conn.dispatch(open_pkt(90, 0, b"tcp:9\0"))).unwrap();
         let ch = now(conn.try_accept_incoming().unwrap().accept()).unwrap();
 
-        now(conn.dispatch(Packet::close(90, 0))).unwrap();
+        now(conn.dispatch(withdraw(90))).unwrap();
 
         let mut buf = [0u8; 8];
         let err = now(conn.read_channel(ch, &mut buf)).unwrap_err();

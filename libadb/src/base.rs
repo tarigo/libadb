@@ -35,6 +35,7 @@ pub mod connection;
 pub(crate) mod destination;
 pub mod device_banner;
 pub mod error;
+pub(crate) mod ids;
 #[cfg(test)]
 pub(crate) mod mock;
 pub(crate) mod negotiated;

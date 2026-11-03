@@ -494,6 +494,17 @@ pub(crate) fn wrte(local_id: u32, payload: &[u8]) -> Packet {
     Packet::new(Command::Write, 42, local_id, payload.to_vec())
 }
 
+/// The device closing our channel `local_id` from its end, 42.
+pub(crate) fn clse(local_id: u32) -> Packet {
+    Packet::new(Command::Close, 42, local_id, Vec::new())
+}
+
+/// The CLSE a device sends to take back its OPEN from `remote_id`: it
+/// names no end of ours.
+pub(crate) fn withdraw(remote_id: u32) -> Packet {
+    Packet::new(Command::Close, remote_id, 0, Vec::new())
+}
+
 /// A connection with one open channel and one WRTE waiting to be read,
 /// with the transport configured after the handshake so that its
 /// slowness only affects the read under test.

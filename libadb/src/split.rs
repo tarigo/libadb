@@ -69,11 +69,12 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::base::channel::{
-    channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelFault, ChannelId,
-    ChannelSlot, ChannelState, DispatchOutcome, PendingOpen, SelectResult,
+    channel_ids_of, dispatch_packet, slot_for_mut, ChannelFault, ChannelId, ChannelSlot,
+    ChannelState, DispatchOutcome, PendingOpen, SelectResult,
 };
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
+use crate::base::ids::{ChannelIds, LocalId, RemoteId};
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
@@ -120,7 +121,7 @@ pub(crate) struct Shared<WH> {
     /// Requests staged out of the queue in an owned [`SplitIncoming`],
     /// by remote id — the only place a device cancellation can still
     /// reach them once they have left `incoming`.
-    pub(crate) staged: Mutex<Vec<(u32, Arc<AtomicBool>)>>,
+    pub(crate) staged: Mutex<Vec<(RemoteId, Arc<AtomicBool>)>>,
     /// Set once the [`Reader`] is gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
     pub(crate) stopped: AtomicBool,
@@ -130,17 +131,17 @@ pub(crate) struct Shared<WH> {
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(crate) incoming_signal: Event,
     /// CLSEs for channels the device accepted just as their opener gave
-    /// up, `(local id, remote id)`: `Drop` cannot send them, so whoever
-    /// takes the write half next does.
-    pub(crate) owed_closes: Mutex<Vec<(u32, u32)>>,
+    /// up: `Drop` cannot send them, so whoever takes the write half
+    /// next does.
+    pub(crate) owed_closes: Mutex<Vec<ChannelIds>>,
 }
 
 impl<WH> Shared<WH> {
-    fn next_local_id(&self) -> u32 {
+    fn next_local_id(&self) -> LocalId {
         loop {
             let id = self.local_id_counter.fetch_add(1, Ordering::Relaxed);
             if id != 0 {
-                return id;
+                return LocalId::from(id);
             }
         }
     }
@@ -153,11 +154,11 @@ impl<WH> Shared<WH> {
         self.incoming.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn lock_staged(&self) -> std::sync::MutexGuard<'_, Vec<(u32, Arc<AtomicBool>)>> {
+    fn lock_staged(&self) -> std::sync::MutexGuard<'_, Vec<(RemoteId, Arc<AtomicBool>)>> {
         self.staged.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn lock_owed(&self) -> std::sync::MutexGuard<'_, Vec<(u32, u32)>> {
+    fn lock_owed(&self) -> std::sync::MutexGuard<'_, Vec<ChannelIds>> {
         self.owed_closes.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -184,20 +185,23 @@ impl<WH> Shared<WH> {
         let guard = SlotGuard::new(Arc::clone(self), slot);
 
         let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
+        let pkt = Packet::new(
+            Command::Open,
+            local_id.raw(),
+            open_arg1,
+            destination.to_vec(),
+        );
         {
             let mut wh = self.lock_write().await?;
-            send_raw(
-                &mut *wh,
-                &self.desync,
-                Command::Open,
-                local_id,
-                open_arg1,
-                destination,
-                self.negotiated.checksum(),
-            )
-            .await?;
+            send_pkt(&mut *wh, &self.desync, &pkt, self.negotiated.checksum()).await?;
         }
-        Ok((ChannelId { slot, local_id }, guard))
+        Ok((
+            ChannelId {
+                slot,
+                local: local_id,
+            },
+            guard,
+        ))
     }
 
     /// Close a channel a packet broke on its own: its calls fail with
@@ -208,8 +212,7 @@ impl<WH> Shared<WH> {
     async fn fail_channel(
         &self,
         idx: usize,
-        local_id: u32,
-        remote_id: u32,
+        ids: ChannelIds,
         fault: ChannelFault,
     ) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
@@ -217,7 +220,7 @@ impl<WH> Shared<WH> {
     {
         let found = {
             let mut chs = self.lock_channels();
-            let slot = chs[idx].as_mut().filter(|s| s.local_id == local_id);
+            let slot = chs[idx].as_mut().filter(|s| s.local_id == ids.local);
             slot.map(|s| s.fail(fault)).is_some()
         };
         if found {
@@ -227,7 +230,7 @@ impl<WH> Shared<WH> {
         send_pkt(
             &mut *wh,
             &self.desync,
-            &Packet::close(local_id, remote_id),
+            &Packet::close(ids),
             self.negotiated.checksum(),
         )
         .await
@@ -269,13 +272,12 @@ impl<WH> Shared<WH> {
         let Some((n, ack)) = taken else {
             return Ok(None);
         };
-        if let Some((local_id, remote_id, len)) = ack {
+        if let Some((ids, len)) = ack {
             send_okay_to(
                 &mut *wh,
                 &self.desync,
                 self.negotiated.delayed_ack,
-                local_id,
-                remote_id,
+                ids,
                 len,
                 self.negotiated.checksum(),
             )
@@ -286,8 +288,7 @@ impl<WH> Shared<WH> {
 
     async fn send_okay(
         &self,
-        local_id: u32,
-        remote_id: u32,
+        ids: ChannelIds,
         wrte_len: usize,
     ) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
@@ -298,8 +299,7 @@ impl<WH> Shared<WH> {
             &mut *wh,
             &self.desync,
             self.negotiated.delayed_ack,
-            local_id,
-            remote_id,
+            ids,
             wrte_len,
             self.negotiated.checksum(),
         )
@@ -349,13 +349,13 @@ impl<WH> Shared<WH> {
     fn hold_incoming(
         self: &Arc<Self>,
         pending: PendingOpen,
-        staged: &mut Vec<(u32, Arc<AtomicBool>)>,
+        staged: &mut Vec<(RemoteId, Arc<AtomicBool>)>,
     ) -> SplitIncoming<WH>
     where
         WH: Write,
     {
         let cancelled = Arc::new(AtomicBool::new(false));
-        staged.push((pending.remote_id, Arc::clone(&cancelled)));
+        staged.push((pending.remote, Arc::clone(&cancelled)));
         SplitIncoming {
             shared: Arc::clone(self),
             pending: Some(pending),
@@ -399,13 +399,13 @@ impl<WH> Shared<WH> {
         };
         loop {
             let owed = self.lock_owed().pop();
-            let Some((local_id, remote_id)) = owed else {
+            let Some(ids) = owed else {
                 return Ok(lock);
             };
             send_pkt(
                 &mut *lock,
                 &self.desync,
-                &Packet::close(local_id, remote_id),
+                &Packet::close(ids),
                 self.negotiated.checksum(),
             )
             .await?;
@@ -475,10 +475,8 @@ impl<WH> Drop for SlotGuard<WH> {
         };
         // The device accepted before the opener gave up: its end is
         // open, and the CLSE for it is owed to whoever writes next.
-        if slot.remote_id != 0 && slot.failed.is_none() {
-            self.shared
-                .lock_owed()
-                .push((slot.local_id, slot.remote_id));
+        if slot.remote_id.raw() != 0 && slot.failed.is_none() {
+            self.shared.lock_owed().push(slot.channel_ids());
         }
     }
 }
@@ -684,12 +682,13 @@ where
             )
             .await?;
             match pkt.command {
-                Command::Ready if pkt.arg1 == ch.local_id => {
+                Command::Ready if pkt.arg1 == ch.local.raw() => {
+                    let remote = RemoteId::from(pkt.arg0);
                     let accepted = {
                         let mut chs = self.shared.lock_channels();
                         match chs[ch.slot].as_mut() {
                             Some(slot) => slot.accept_open_ready(
-                                pkt.arg0,
+                                remote,
                                 &pkt.data,
                                 self.shared.negotiated.delayed_ack,
                             ),
@@ -699,15 +698,17 @@ where
                     if let Err(e) = accepted {
                         // The device holds an end it takes for open.
                         let fault = ChannelFault::Protocol(e);
-                        self.shared
-                            .fail_channel(ch.slot, ch.local_id, pkt.arg0, fault)
-                            .await?;
+                        let ids = ChannelIds {
+                            local: ch.local,
+                            remote,
+                        };
+                        self.shared.fail_channel(ch.slot, ids, fault).await?;
                         return Err(fault.error());
                     }
                     guard.disarm();
                     return Ok(ch);
                 }
-                Command::Close if pkt.arg1 == ch.local_id => {
+                Command::Close if pkt.arg1 == ch.local.raw() => {
                     return Err(Error::ChannelClosed);
                 }
                 _ => self.dispatch(pkt, OnFault::FailCall).await?,
@@ -793,7 +794,7 @@ where
             return Ok(n);
         }
 
-        let (local_id, remote_id) = self.channel_ids(ch)?;
+        let ids = self.channel_ids(ch)?;
 
         self.drain_overflow().await?;
         loop {
@@ -804,7 +805,7 @@ where
             )
             .await?;
             match pkt.command {
-                Command::Write if pkt.arg1 == local_id => {
+                Command::Write if pkt.arg1 == ids.local.raw() => {
                     let n = buf.len().min(pkt.data.len());
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     let ack = {
@@ -820,12 +821,12 @@ where
                             None => None,
                         }
                     };
-                    if let Some((local_id, remote_id, len)) = ack {
-                        self.shared.send_okay(local_id, remote_id, len).await?;
+                    if let Some((ids, len)) = ack {
+                        self.shared.send_okay(ids, len).await?;
                     }
                     return Ok(n);
                 }
-                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
+                Command::Close if ids.closed_by(&pkt) => {
                     {
                         let mut chs = self.shared.lock_channels();
                         if let Some(slot) = slot_for_mut(&mut chs, ch) {
@@ -842,7 +843,7 @@ where
         }
     }
 
-    fn channel_ids(&self, ch: ChannelId) -> Result<(u32, u32), Error<<RH as ErrorType>::Error>> {
+    fn channel_ids(&self, ch: ChannelId) -> Result<ChannelIds, Error<<RH as ErrorType>::Error>> {
         let chs = self.shared.lock_channels();
         channel_ids_of(&chs, ch)
     }
@@ -905,14 +906,9 @@ where
         };
 
         match outcome {
-            DispatchOutcome::AckWrite {
-                idx,
-                local_id,
-                remote_id,
-                len,
-            } => {
+            DispatchOutcome::AckWrite { idx, ids, len } => {
                 self.shared.signals[idx].wake();
-                self.shared.send_okay(local_id, remote_id, len).await?;
+                self.shared.send_okay(ids, len).await?;
             }
             DispatchOutcome::CreditGranted { idx }
             | DispatchOutcome::SlotClosed { idx }
@@ -920,7 +916,7 @@ where
                 self.shared.signals[idx].wake();
             }
             DispatchOutcome::IncomingOpen {
-                remote_id,
+                remote,
                 credit,
                 destination,
             } => {
@@ -931,7 +927,7 @@ where
                 // holders would drain the queue and let payloads
                 // accumulate without limit.
                 let pending = PendingOpen {
-                    remote_id,
+                    remote,
                     credit,
                     destination,
                 };
@@ -960,7 +956,7 @@ where
                     self.shared.stage_incoming(pending).reject().await?;
                 }
             }
-            DispatchOutcome::CancelPendingOpen { remote_id } => {
+            DispatchOutcome::CancelPendingOpen { remote } => {
                 // Every place the request can live, under one lock
                 // order (channels, then staged, then incoming — the
                 // same order accept and Drop take): a racing accept
@@ -973,10 +969,10 @@ where
                 let staged = self.shared.lock_staged();
                 let mut incoming = self.shared.lock_incoming();
                 let mut closed = None;
-                if remote_id != 0 {
+                if remote.raw() != 0 {
                     for (idx, slot_opt) in chs.iter_mut().enumerate() {
                         let Some(slot) = slot_opt else { continue };
-                        if slot.remote_id == remote_id {
+                        if slot.remote_id == remote {
                             slot.apply_close();
                             closed = Some(idx);
                             break;
@@ -984,11 +980,11 @@ where
                     }
                 }
                 if closed.is_none() {
-                    incoming.retain(|p| p.remote_id != remote_id);
+                    incoming.retain(|p| p.remote != remote);
                     // A request staged out of the queue is cancelled
                     // through its flag: the verdict observes it.
                     for (id, flag) in staged.iter() {
-                        if *id == remote_id {
+                        if *id == remote {
                             flag.store(true, Ordering::Relaxed);
                         }
                     }
@@ -1002,23 +998,19 @@ where
                     }
                 }
             }
-            DispatchOutcome::StrayReady {
-                local_id,
-                remote_id,
-            } => {
+            DispatchOutcome::StrayReady { ids } => {
                 let mut wh = self.shared.lock_write().await?;
                 send_pkt(
                     &mut *wh,
                     &self.shared.desync,
-                    &Packet::close(local_id, remote_id),
+                    &Packet::close(ids),
                     self.shared.negotiated.checksum(),
                 )
                 .await?;
             }
             DispatchOutcome::ChannelFault {
                 idx,
-                local_id,
-                remote_id,
+                ids,
                 opening,
                 fault,
             } => {
@@ -1026,9 +1018,7 @@ where
                 // connection, and the device holds an end it takes for
                 // open: under either policy both have to hear of it.
                 if opening || matches!(on_fault, OnFault::CloseChannel) {
-                    self.shared
-                        .fail_channel(idx, local_id, remote_id, fault)
-                        .await?;
+                    self.shared.fail_channel(idx, ids, fault).await?;
                 }
                 if matches!(on_fault, OnFault::FailCall) {
                     return Err(fault.error());
@@ -1107,7 +1097,7 @@ where
     /// [`Error::ChannelClosed`] comes back.
     pub async fn accept(mut self) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
-        let (remote_id, credit) = (pending.remote_id, pending.credit);
+        let (remote, credit) = (pending.remote, pending.credit);
         let shared = Arc::clone(&self.shared);
         let checksum = shared.negotiated.checksum();
 
@@ -1125,7 +1115,7 @@ where
             chs.iter().position(|s| s.is_none()).map(|idx| {
                 let local_id = shared.next_local_id();
                 let mut slot = ChannelSlot::new(local_id);
-                slot.remote_id = remote_id;
+                slot.remote_id = remote;
                 slot.state = ChannelState::Open;
                 if shared.negotiated.delayed_ack {
                     // OPEN's arg1 is the device's receive credit — our budget.
@@ -1138,13 +1128,7 @@ where
         let Some((slot_idx, local_id)) = reserved else {
             // No slot to give: refuse, and consume the request.
             let mut wh = shared.lock_write().await?;
-            send_pkt(
-                &mut *wh,
-                &shared.desync,
-                &Packet::close(0, remote_id),
-                checksum,
-            )
-            .await?;
+            send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
             self.pending.take();
             return Err(Error::NoFreeChannels);
         };
@@ -1160,7 +1144,7 @@ where
             send_pkt(
                 &mut *wh,
                 &shared.desync,
-                &Packet::new(Command::Ready, local_id, remote_id, payload),
+                &Packet::new(Command::Ready, local_id.raw(), remote.raw(), payload),
                 checksum,
             )
             .await?;
@@ -1171,7 +1155,7 @@ where
         self.pending.take();
         Ok(ChannelId {
             slot: slot_idx,
-            local_id,
+            local: local_id,
         })
     }
 
@@ -1191,18 +1175,12 @@ where
             self.pending.take();
             return Ok(());
         }
-        let remote_id = self.pending.as_ref().expect("undecided").remote_id;
+        let remote = self.pending.as_ref().expect("undecided").remote;
         let shared = Arc::clone(&self.shared);
         let checksum = shared.negotiated.checksum();
         {
             let mut wh = shared.lock_write().await?;
-            send_pkt(
-                &mut *wh,
-                &shared.desync,
-                &Packet::close(0, remote_id),
-                checksum,
-            )
-            .await?;
+            send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
         }
         self.pending.take();
         Ok(())
@@ -1360,14 +1338,14 @@ where
             {
                 let chs = self.shared.lock_channels();
                 match chs[ch.slot].as_ref() {
-                    Some(slot) if slot.local_id == ch.local_id => match slot.state {
+                    Some(slot) if slot.local_id == ch.local => match slot.state {
                         ChannelState::Opening => {}
                         // A remote id comes only with a READY the slot
                         // took: without one the device refused the OPEN,
                         // or answered it with a READY that failed the
                         // slot. With one the channel was opened, even if
                         // it has been closed since.
-                        ChannelState::Closed if slot.remote_id == 0 => {
+                        ChannelState::Closed if slot.remote_id.raw() == 0 => {
                             return Err(slot.closed_error())
                         }
                         ChannelState::Open | ChannelState::Closed => {
@@ -1504,7 +1482,7 @@ where
             let n = self.acquire_credit(ch, want).await?;
             let mut guard = CreditGuard::new(&self.shared, ch, n);
 
-            let (local_id, remote_id) = self.channel_ids(ch)?;
+            let ids = self.channel_ids(ch)?;
             let chunk = &data[offset..offset + n];
 
             {
@@ -1513,8 +1491,7 @@ where
                     &mut *wh,
                     &self.shared.desync,
                     Command::Write,
-                    local_id,
-                    remote_id,
+                    ids,
                     chunk,
                     checksum,
                 )
@@ -1539,7 +1516,7 @@ where
         close_channel_via(&self.shared, ch).await
     }
 
-    fn channel_ids(&self, ch: ChannelId) -> Result<(u32, u32), Error<<WH as ErrorType>::Error>> {
+    fn channel_ids(&self, ch: ChannelId) -> Result<ChannelIds, Error<<WH as ErrorType>::Error>> {
         let chs = self.shared.lock_channels();
         channel_ids_of(&chs, ch)
     }
@@ -1681,7 +1658,7 @@ where
     WH: Write,
 {
     shared.desync.check()?;
-    let (local_id, remote_id) = {
+    let ids = {
         let chs = shared.lock_channels();
         channel_ids_of(&chs, ch)?
     };
@@ -1690,7 +1667,7 @@ where
         send_pkt(
             &mut *wh,
             &shared.desync,
-            &Packet::close(local_id, remote_id),
+            &Packet::close(ids),
             shared.negotiated.checksum(),
         )
         .await?;
@@ -1698,7 +1675,7 @@ where
     {
         let mut chs = shared.lock_channels();
         if let Some(slot) = chs.get_mut(ch.slot) {
-            if slot.as_ref().is_some_and(|s| s.local_id == ch.local_id) {
+            if slot.as_ref().is_some_and(|s| s.local_id == ch.local) {
                 *slot = None;
             }
         }
@@ -1713,7 +1690,9 @@ where
 mod tests {
     use super::*;
     use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
-    use crate::base::mock::{abandon, now, okay, split_with_channel, Mock, NoAuth, SharedMock};
+    use crate::base::mock::{
+        abandon, now, okay, split_with_channel, withdraw, Mock, NoAuth, SharedMock,
+    };
 
     /// Stage one OPEN out of the queue, then deliver more packets —
     /// the device-side traffic a staged request can race against.
@@ -1765,7 +1744,7 @@ mod tests {
 
     #[test]
     fn a_device_cancel_reaches_the_staged_request() {
-        let (mut reader, inc, seen) = staged_with_followup(&[Packet::close(80, 0)]);
+        let (mut reader, inc, seen) = staged_with_followup(&[withdraw(80)]);
 
         // The verdict observes the withdrawal: no READY, no channel.
         let err = now(inc.accept()).unwrap_err();
@@ -1786,7 +1765,7 @@ mod tests {
 
     #[test]
     fn a_staged_reject_after_the_cancel_stays_silent() {
-        let (_reader, inc, seen) = staged_with_followup(&[Packet::close(80, 0)]);
+        let (_reader, inc, seen) = staged_with_followup(&[withdraw(80)]);
 
         now(inc.reject()).unwrap();
         assert!(
@@ -1818,7 +1797,7 @@ mod tests {
 
         // The withdrawal crossed our READY: a reader parked on the
         // channel must observe the close, not wait forever.
-        seen.feed(&Packet::close(90, 0));
+        seen.feed(&withdraw(90));
         let mut buf = [0u8; 8];
         let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
         assert!(
@@ -1961,7 +1940,7 @@ mod tests {
         assert_eq!(refused, [72, 73], "leftover first, then the new arrival");
         let q = reader.shared.lock_incoming();
         assert_eq!(q.len(), 2, "back at the cap");
-        assert_eq!(q.front().unwrap().remote_id, 70);
+        assert_eq!(q.front().unwrap().remote, RemoteId::from(70));
     }
 
     #[test]
@@ -2011,7 +1990,7 @@ mod tests {
         {
             let q = reader.shared.lock_incoming();
             assert_eq!(q.len(), 3, "the refused OPEN must be requeued");
-            assert_eq!(q.front().unwrap().remote_id, 72);
+            assert_eq!(q.front().unwrap().remote, RemoteId::from(72));
         }
         reader
             .shared
@@ -2220,10 +2199,11 @@ mod tests {
         // slot is free, but the device still holds the channel open.
         let (reader, _writer, _ch) = split_with_channel(None);
         let seen = reader.shared.write_half.try_lock().unwrap().clone();
-        now(reader
-            .shared
-            .fail_channel(5, 99, 77, ChannelFault::RxOverflow))
-        .unwrap();
+        let ids = ChannelIds {
+            local: LocalId::from(99),
+            remote: RemoteId::from(77),
+        };
+        now(reader.shared.fail_channel(5, ids, ChannelFault::RxOverflow)).unwrap();
         let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
         assert_eq!((cmd, arg0, arg1), (Command::Close, 99, 77));
     }

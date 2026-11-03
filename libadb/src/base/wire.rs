@@ -8,6 +8,7 @@ use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
 
 use super::error::{Error, ProtocolError};
+use super::ids::ChannelIds;
 use super::protocol::command::Command;
 use super::protocol::constant::MAX_PAYLOAD;
 use super::protocol::Packet;
@@ -136,16 +137,9 @@ pub(crate) async fn send_pkt<T: Write>(
     pkt: &Packet,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
-    send_raw(
-        t,
-        desync,
-        pkt.command,
-        pkt.arg0,
-        pkt.arg1,
-        &pkt.data,
-        checksum,
-    )
-    .await
+    desync.check()?;
+    let header = encode_header(pkt.command, pkt.arg0, pkt.arg1, &pkt.data, checksum)?;
+    send_frame(t, desync, &header, &pkt.data).await
 }
 
 /// Rejects any packet whose announced payload exceeds `max_payload`.
@@ -246,19 +240,37 @@ fn encode_header(
     Ok(h)
 }
 
+/// [`send_pkt`] for a packet on the channel `ids` names, its payload
+/// borrowed rather than built into a [`Packet`].
 pub(crate) async fn send_raw<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
     command: Command,
-    arg0: u32,
-    arg1: u32,
+    ids: ChannelIds,
     payload: &[u8],
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
     desync.check()?;
-    let header = encode_header(command, arg0, arg1, payload, checksum)?;
+    let header = encode_header(
+        command,
+        ids.local.raw(),
+        ids.remote.raw(),
+        payload,
+        checksum,
+    )?;
+    send_frame(t, desync, &header, payload).await
+}
+
+/// Put an encoded header and its payload on the wire, raising `desync`
+/// if the packet does not get out whole.
+async fn send_frame<T: Write>(
+    t: &mut T,
+    desync: &DesyncFlag,
+    header: &[u8; MESSAGE_SIZE],
+    payload: &[u8],
+) -> Result<(), Error<T::Error>> {
     let armed = desync.arm();
-    write_all(t, &header).await?;
+    write_all(t, header).await?;
     if !payload.is_empty() {
         write_all(t, payload).await?;
     }
@@ -274,23 +286,13 @@ pub(crate) async fn send_okay_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
     delayed_ack: bool,
-    local_id: u32,
-    remote_id: u32,
+    ids: ChannelIds,
     wrte_len: usize,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
     let ack = (wrte_len as u32).to_le_bytes();
     let payload: &[u8] = if delayed_ack { &ack } else { &[] };
-    send_raw(
-        transport,
-        desync,
-        Command::Ready,
-        local_id,
-        remote_id,
-        payload,
-        checksum,
-    )
-    .await
+    send_raw(transport, desync, Command::Ready, ids, payload, checksum).await
 }
 
 #[cfg(test)]
@@ -461,7 +463,10 @@ mod tests {
     #[test]
     fn an_empty_packet_is_a_single_header_write() {
         let mut t = WriteLog::default();
-        let pkt = Packet::close(1, 2);
+        let pkt = Packet::close(ChannelIds {
+            local: 1.into(),
+            remote: 2.into(),
+        });
 
         block_on(send_pkt(
             &mut t,

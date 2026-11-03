@@ -7,8 +7,7 @@ use core::cell::Cell;
 
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::error::ProtocolError;
-use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
-use crate::base::protocol::Packet;
+use crate::base::mock::{clse, cnxn, now, okay, wrte, Mock, MockError, NoAuth};
 
 std::thread_local! {
     /// Bytes `Logcat` has moved within its buffer on this thread, for
@@ -561,7 +560,7 @@ fn a_channel_that_closes_before_the_exit_status_fails() {
     mock.feed(&cnxn())
         .feed(&okay(1))
         .feed(&wrte(1, &wire))
-        .feed(&Packet::close(42, 1));
+        .feed(&clse(1));
     let mut conn = now(Connection::connect(
         mock,
         NoAuth,
