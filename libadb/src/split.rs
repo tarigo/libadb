@@ -49,8 +49,6 @@
 //! itself fails. Drop the `Reader` (or fail the transport) to unblock
 //! such a reader unconditionally.
 
-#![cfg(feature = "split")]
-
 use alloc::sync::Arc;
 use async_lock::Mutex as AsyncMutex;
 use bytes::BytesMut;
