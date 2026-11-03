@@ -103,6 +103,10 @@ pub enum ShellMode<'a> {
     Pty {
         /// What `TERM` is set to on the device, e.g.
         /// `"xterm-256color"`; `None` leaves the device's default.
+        ///
+        /// It may not hold a `,`, a `:` or a NUL: each would end the
+        /// name early and rewrite the request, so [`destination`]
+        /// refuses it.
         term: Option<&'a str>,
     },
 }
@@ -116,23 +120,35 @@ pub enum ShellMode<'a> {
 /// would cut the destination short on the device, so it fails with
 /// [`ProtocolError::InvalidDestination`].
 ///
+/// So does a `,` or `:` in the terminal name. adbd reads the options up
+/// to the first `:` and splits them on `,`, the last mode named
+/// winning: `TERM=xterm,raw` would drop the PTY, and `TERM=xterm:x`
+/// would run `x:<command>`. The command itself may hold either.
+///
 /// ```
 /// use libadb::shell::v2::{destination, ShellMode};
 ///
 /// let pty = ShellMode::Pty { term: Some("xterm") };
 /// assert_eq!(destination(pty, "ls").unwrap(), "shell,v2,pty,TERM=xterm:ls\0");
 /// assert_eq!(destination(ShellMode::Raw, "ls").unwrap(), "shell,v2,raw:ls\0");
+///
+/// let rewritten = ShellMode::Pty { term: Some("xterm,raw") };
+/// assert!(destination(rewritten, "ls").is_err());
 /// ```
 pub fn destination(mode: ShellMode<'_>, command: &str) -> Result<String, ProtocolError> {
-    let dest = match mode {
-        ShellMode::Raw => format!("shell,v2,raw:{command}\0"),
-        ShellMode::Pty { term: None } => format!("shell,v2,pty:{command}\0"),
-        ShellMode::Pty { term: Some(term) } => format!("shell,v2,pty,TERM={term}:{command}\0"),
-    };
-    if dest[..dest.len() - 1].contains('\0') {
+    if command.contains('\0') {
         return Err(ProtocolError::InvalidDestination);
     }
-    Ok(dest)
+    Ok(match mode {
+        ShellMode::Raw => format!("shell,v2,raw:{command}\0"),
+        ShellMode::Pty { term: None } => format!("shell,v2,pty:{command}\0"),
+        ShellMode::Pty { term: Some(term) } => {
+            if term.contains([',', ':', '\0']) {
+                return Err(ProtocolError::InvalidDestination);
+            }
+            format!("shell,v2,pty,TERM={term}:{command}\0")
+        }
+    })
 }
 
 /// Size of the framing header in bytes.
@@ -543,7 +559,9 @@ pub async fn open<'a, 'b, S: Session>(
 /// * `command` — command to run inside the PTY. Pass an empty string
 ///   to start a login shell.
 /// * `term` — value for the `TERM` environment variable on the device
-///   (e.g. `"xterm-256color"`); `None` leaves the device's default.
+///   (e.g. `"xterm-256color"`); `None` leaves the device's default. One
+///   holding a `,`, `:` or NUL fails with
+///   [`ProtocolError::InvalidDestination`], as [`destination`] says.
 /// * `window_size` — if `Some`, a
 ///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
 ///   right after the channel opens so the device PTY has

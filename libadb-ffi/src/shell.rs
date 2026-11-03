@@ -135,7 +135,10 @@ async fn send_frame_async(
 ///   Pass empty to start a login shell (only meaningful with `pty == true`).
 /// * `pty`     — if true, opens `shell,v2,pty,...:`; otherwise `shell,v2,raw:`.
 /// * `term`    — value for the device's `TERM` env var (e.g. `"xterm-256color"`).
-///   Null or empty omits it. Ignored when `pty` is false.
+///   Null or empty omits it. Ignored when `pty` is false. One holding a
+///   `,` or `:` would rewrite the request on the device, so it is refused
+///   with [`AdbStatus::Protocol`] before anything is sent, as a NUL in
+///   `command` is.
 /// * `rows`, `cols` — if `pty` and either is non-zero, a `WINDOW_SIZE_CHANGE`
 ///   frame is sent right after the channel opens. The frame is a write like
 ///   any other, header and payload in two WRTEs, so this call can need a

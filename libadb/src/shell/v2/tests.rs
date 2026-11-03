@@ -85,6 +85,53 @@ fn a_nul_in_the_command_or_the_term_is_rejected() {
 }
 
 #[test]
+fn a_comma_in_the_term_is_rejected() {
+    // adbd would read `raw` as one more option, and the last mode it
+    // meets wins: the PTY would be gone.
+    assert_eq!(
+        destination(
+            ShellMode::Pty {
+                term: Some("xterm,raw")
+            },
+            "ls"
+        ),
+        Err(ProtocolError::InvalidDestination)
+    );
+}
+
+#[test]
+fn a_colon_in_the_term_is_rejected() {
+    // The first `:` ends the options, so adbd would run `x:ls`.
+    assert_eq!(
+        destination(
+            ShellMode::Pty {
+                term: Some("xterm:x")
+            },
+            "ls"
+        ),
+        Err(ProtocolError::InvalidDestination)
+    );
+}
+
+#[test]
+fn a_comma_or_colon_in_the_command_reaches_the_device() {
+    assert_eq!(
+        destination(
+            ShellMode::Pty {
+                term: Some("xterm")
+            },
+            "echo a,b:c"
+        )
+        .unwrap(),
+        "shell,v2,pty,TERM=xterm:echo a,b:c\0"
+    );
+    assert_eq!(
+        destination(ShellMode::Raw, "echo a,b:c").unwrap(),
+        "shell,v2,raw:echo a,b:c\0"
+    );
+}
+
+#[test]
 fn parse_header_decodes_id_and_little_endian_length() {
     let buf = [1, 0x04, 0x03, 0x02, 0x01];
     assert_eq!(parse_header(&buf), (Ok(FrameId::Stdout), 0x0102_0304));

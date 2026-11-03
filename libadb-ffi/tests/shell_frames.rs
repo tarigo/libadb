@@ -1,13 +1,18 @@
 //! Two C threads writing stdin on one shell session must not interleave
-//! their frames.
+//! their frames, and a session whose request would reach the device
+//! rewritten is never opened.
 
 use std::ffi::{c_void, CString};
+use std::io::Write as _;
+use std::net::TcpListener;
 use std::ptr;
 use std::thread;
 
 #[path = "common/common.rs"]
 mod common;
-use common::{fake_adbd, FRAME_LEN};
+use common::{
+    fake_adbd, header, read_packet, CMD_CLSE, CMD_CNXN, CMD_OPEN, FRAME_LEN, MAX_PAYLOAD, VERSION,
+};
 
 /// Split a shell_v2 byte stream into `(id, payload)` frames.
 fn frames(mut stream: &[u8]) -> Vec<(u8, Vec<u8>)> {
@@ -151,4 +156,72 @@ fn concurrent_stdin_writes_keep_their_frames_whole() {
             "a frame carries bytes from both writers"
         );
     }
+}
+
+#[test]
+fn a_term_that_would_rewrite_the_request_opens_nothing() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let device = thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let (cmd, _, _) = read_packet(&mut s).expect("the host opens with CNXN");
+        assert_eq!(cmd, CMD_CNXN);
+        s.write_all(&header(
+            CMD_CNXN,
+            VERSION,
+            MAX_PAYLOAD,
+            b"device::features=shell_v2",
+        ))
+        .unwrap();
+        // Whatever arrives until the host hangs up. An OPEN is refused,
+        // so a host that sends one fails rather than waits.
+        let mut after = Vec::new();
+        while let Some((cmd, host_id, payload)) = read_packet(&mut s) {
+            if cmd == CMD_OPEN {
+                s.write_all(&header(CMD_CLSE, 0, host_id, &[])).unwrap();
+            }
+            after.push((cmd.to_le_bytes(), payload));
+        }
+        after
+    });
+
+    let uri = CString::new(format!("tcp://{addr}")).unwrap();
+    let banner = CString::new("host::features=shell_v2").unwrap();
+    let pubkey = b"unused\0";
+    let auth = adb::adb_authenticator_t {
+        public_key: pubkey.as_ptr(),
+        public_key_len: pubkey.len(),
+        sign: Some(never_signs),
+        user_data: ptr::null_mut(),
+    };
+    let mut conn = ptr::null_mut();
+    let status = unsafe {
+        adb::adb_connect_with_authenticator(uri.as_ptr(), &auth, banner.as_ptr(), &mut conn)
+    };
+    assert_eq!(status, adb::AdbStatus::Ok, "connect failed");
+
+    // adbd would take `raw` for the mode and drop the PTY, or run `x:ls`.
+    for term in ["xterm,raw", "xterm:x"] {
+        let c_term = CString::new(term).unwrap();
+        let command = b"ls";
+        let mut sh = ptr::null_mut();
+        let status = unsafe {
+            adb::adb_shell_open(
+                conn,
+                command.as_ptr(),
+                command.len(),
+                true,
+                c_term.as_ptr(),
+                0,
+                0,
+                &mut sh,
+            )
+        };
+        assert_eq!(status, adb::AdbStatus::Protocol, "{term:?}");
+        assert!(sh.is_null(), "{term:?}: a refused session has no handle");
+    }
+
+    unsafe { adb::adb_connection_free(conn) };
+    let after = device.join().unwrap();
+    assert!(after.is_empty(), "nothing follows the handshake: {after:?}");
 }

@@ -116,7 +116,9 @@ pub enum ProtocolError {
     /// Shell v2 frame with an id a device never sends: only stdout,
     /// stderr and exit frames come from it. Carries the id.
     UnexpectedShellFrame(u8),
-    /// Service destination string contains an embedded NUL byte.
+    /// Service destination string contains an embedded NUL byte, or a
+    /// shell_v2 `TERM` holds a `,` or `:` that would end it early and
+    /// rewrite the request.
     InvalidDestination,
     /// Received an unknown feature from a device.
     UnknownFeature,
@@ -221,7 +223,9 @@ impl fmt::Display for ProtocolError {
             Self::UnexpectedShellFrame(id) => f.write_fmt(format_args!(
                 "shell v2 frame id {id} is not one a device sends"
             )),
-            Self::InvalidDestination => f.write_str("service destination contains a NUL byte"),
+            Self::InvalidDestination => {
+                f.write_str("service destination contains a NUL byte, or a ',' or ':' in its TERM")
+            }
             Self::UnknownFeature => f.write_str("unknown feature"),
             Self::InvalidBannerUtf8 => f.write_str("failed to convert the device banner to UTF-8"),
             Self::InvalidBannerPrefix => f.write_str("invalid device banner prefix"),

@@ -523,7 +523,10 @@ typedef struct adb_shell adb_shell_t;
  *
  * `pty` selects shell,v2,pty,... (true) or shell,v2,raw: (false).
  * `term` is the value for the device's TERM env var; may be NULL or
- *   empty to omit it; ignored when `pty` is false.
+ *   empty to omit it; ignored when `pty` is false. A term holding ','
+ *   or ':' would rewrite the request on the device, so it is refused
+ *   with ADB_ERR_PROTOCOL before anything is sent, as a NUL in
+ *   `command` is.
  * `rows`, `cols` — if `pty` and at least one is non-zero, an initial
  *   WINDOW_SIZE_CHANGE frame is sent right after the channel opens.
  *   The frame is a write like any other, header and payload in two
