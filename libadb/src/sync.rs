@@ -52,12 +52,16 @@
 //! sync.quit().await?;
 //! ```
 
+mod error;
+
+pub use error::SyncError;
+
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
-use crate::error::{Error, SyncError};
+use crate::error::Error;
 
 /// A sync session over an open `sync:\0` channel.
 ///
