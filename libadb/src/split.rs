@@ -57,7 +57,7 @@ use bytes::BytesMut;
 use core::convert::Infallible;
 use core::future::{poll_fn, Future};
 use core::pin::{pin, Pin};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::task::Poll;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
@@ -65,16 +65,14 @@ use event_listener::{Event, EventListener};
 use std::sync::Mutex;
 
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::base::channel::{
-    channel_ids_of, close_remote, dispatch_packet, slot_for, slot_for_mut, ChannelFault, ChannelId,
-    ChannelSlot, ChannelState, DispatchOutcome, PendingAck, PendingOpen, SelectResult,
-};
+use crate::base::channel::{ChannelFault, ChannelId, ChannelState, PendingAck, SelectResult};
+use crate::base::channel_table::{ChannelTable, DispatchOutcome};
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
-use crate::base::ids::{ChannelIds, LocalId, RemoteId};
+use crate::base::ids::{ChannelIds, RemoteId};
+use crate::base::incoming::{IncomingQueue, PendingOpen};
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
@@ -110,14 +108,13 @@ impl FlowSignal {
 
 pub(crate) struct Shared<WH> {
     pub(crate) write_half: AsyncMutex<WH>,
-    pub(crate) channels: Mutex<Box<[Option<ChannelSlot>]>>,
+    pub(crate) channels: Mutex<ChannelTable>,
     /// One per slot of `channels`.
     pub(crate) signals: Box<[FlowSignal]>,
     pub(crate) negotiated: Negotiated,
-    pub(crate) local_id_counter: AtomicU32,
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
-    pub(crate) incoming: Mutex<VecDeque<PendingOpen>>,
+    pub(crate) incoming: Mutex<IncomingQueue>,
     /// Requests staged out of the queue in an owned [`SplitIncoming`],
     /// by remote id — the only place a device cancellation can still
     /// reach them once they have left `incoming`.
@@ -137,20 +134,11 @@ pub(crate) struct Shared<WH> {
 }
 
 impl<WH> Shared<WH> {
-    fn next_local_id(&self) -> LocalId {
-        loop {
-            let id = self.local_id_counter.fetch_add(1, Ordering::Relaxed);
-            if id != 0 {
-                return LocalId::from(id);
-            }
-        }
-    }
-
-    fn lock_channels(&self) -> std::sync::MutexGuard<'_, Box<[Option<ChannelSlot>]>> {
+    fn lock_channels(&self) -> std::sync::MutexGuard<'_, ChannelTable> {
         self.channels.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn lock_incoming(&self) -> std::sync::MutexGuard<'_, VecDeque<PendingOpen>> {
+    fn lock_incoming(&self) -> std::sync::MutexGuard<'_, IncomingQueue> {
         self.incoming.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -172,22 +160,18 @@ impl<WH> Shared<WH> {
     where
         WH: Write,
     {
-        let (slot, local_id) = {
+        let ch = {
             let mut chs = self.lock_channels();
-            let idx = chs
-                .iter()
-                .position(|s| s.is_none())
-                .ok_or(Error::NoFreeChannels)?;
-            let id = self.next_local_id();
-            chs[idx] = Some(ChannelSlot::opening(id, self.negotiated.rx_policy()));
-            (idx, id)
+            let ch = chs.allocate()?;
+            chs.insert_opening(ch);
+            ch
         };
-        let guard = SlotGuard::new(Arc::clone(self), slot);
+        let guard = SlotGuard::new(Arc::clone(self), ch);
 
         let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
         let pkt = Packet::new(
             Command::Open,
-            local_id.raw(),
+            ch.local.raw(),
             open_arg1,
             destination.to_vec(),
         );
@@ -195,13 +179,7 @@ impl<WH> Shared<WH> {
             let mut wh = self.lock_write().await?;
             send_pkt(&mut *wh, &self.desync, &pkt, self.negotiated.checksum()).await?;
         }
-        Ok((
-            ChannelId {
-                slot,
-                local: local_id,
-            },
-            guard,
-        ))
+        Ok((ch, guard))
     }
 
     /// Close a channel a packet broke on its own: its calls fail with
@@ -224,7 +202,7 @@ impl<WH> Shared<WH> {
                 slot: idx,
                 local: ids.local,
             };
-            slot_for_mut(&mut chs, ch).map(|s| s.fail(fault)).is_some()
+            chs.get_mut(ch).map(|s| s.fail(fault)).is_some()
         };
         if found {
             self.signals[idx].wake();
@@ -255,7 +233,7 @@ impl<WH> Shared<WH> {
     {
         {
             let mut chs = self.lock_channels();
-            let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
+            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
             // Nothing to take, or nothing this take acknowledges: no
             // OKAY to send, so no lock to wait for.
             if !slot.take_acks(buf.len()) {
@@ -266,7 +244,7 @@ impl<WH> Shared<WH> {
         let mut wh = self.lock_write().await?;
         let taken = {
             let mut chs = self.lock_channels();
-            let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
+            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
             slot.take_buffered(buf)?
         };
         let Some((n, ack)) = taken else {
@@ -440,15 +418,15 @@ impl<WH> Drop for WriteLock<'_, WH> {
 
 struct SlotGuard<WH> {
     shared: Arc<Shared<WH>>,
-    idx: usize,
+    ch: ChannelId,
     armed: bool,
 }
 
 impl<WH> SlotGuard<WH> {
-    fn new(shared: Arc<Shared<WH>>, idx: usize) -> Self {
+    fn new(shared: Arc<Shared<WH>>, ch: ChannelId) -> Self {
         Self {
             shared,
-            idx,
+            ch,
             armed: true,
         }
     }
@@ -464,7 +442,7 @@ impl<WH> Drop for SlotGuard<WH> {
             return;
         }
         let mut chs = self.shared.lock_channels();
-        let Some(slot) = chs.get_mut(self.idx).and_then(Option::take) else {
+        let Some(slot) = chs.free(self.ch) else {
             return;
         };
         // The device accepted before the opener gave up: its end is
@@ -504,7 +482,7 @@ impl<WH> Drop for CreditGuard<'_, WH> {
         }
         {
             let mut chs = self.shared.lock_channels();
-            if let Some(slot) = slot_for_mut(&mut chs, self.ch) {
+            if let Some(slot) = chs.get_mut(self.ch) {
                 slot.refund(self.n);
             }
         }
@@ -531,7 +509,7 @@ impl<WH> Drop for QueueGuard<'_, WH> {
         }
         let head_moved = {
             let mut chs = self.shared.lock_channels();
-            match slot_for_mut(&mut chs, self.ch) {
+            match chs.get_mut(self.ch) {
                 Some(slot) => slot.send_queue().leave(self.place),
                 None => false,
             }
@@ -680,7 +658,7 @@ where
                     let remote = RemoteId::from(pkt.arg0);
                     let accepted = {
                         let mut chs = self.shared.lock_channels();
-                        match chs[ch.slot].as_mut() {
+                        match chs.get_mut(ch) {
                             Some(slot) => slot.accept_open_ready(remote, &pkt.data),
                             None => Ok(()),
                         }
@@ -798,7 +776,7 @@ where
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     let ack = {
                         let mut chs = self.shared.lock_channels();
-                        match slot_for_mut(&mut chs, ch) {
+                        match chs.get_mut(ch) {
                             Some(slot) => slot.deliver(&pkt.data, n)?,
                             None => None,
                         }
@@ -811,7 +789,7 @@ where
                 Command::Close if ids.closed_by(&pkt) => {
                     {
                         let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = slot_for_mut(&mut chs, ch) {
+                        if let Some(slot) = chs.get_mut(ch) {
                             slot.apply_close();
                         }
                     }
@@ -826,8 +804,7 @@ where
     }
 
     fn channel_ids(&self, ch: ChannelId) -> Result<ChannelIds, Error<<RH as ErrorType>::Error>> {
-        let chs = self.shared.lock_channels();
-        channel_ids_of(&chs, ch)
+        self.shared.lock_channels().ids(ch)
     }
 
     /// Wait for a device-initiated channel (`adb reverse` traffic and
@@ -876,10 +853,7 @@ where
         pkt: Packet,
         on_fault: OnFault,
     ) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        let outcome = {
-            let mut chs = self.shared.lock_channels();
-            dispatch_packet(&mut chs, &pkt)
-        };
+        let outcome = { self.shared.lock_channels().dispatch(&pkt) };
 
         match outcome {
             DispatchOutcome::AckWrite { idx, ack } => {
@@ -944,9 +918,9 @@ where
                 let mut chs = self.shared.lock_channels();
                 let staged = self.shared.lock_staged();
                 let mut incoming = self.shared.lock_incoming();
-                let closed = close_remote(&mut chs, remote);
+                let closed = chs.close_remote(remote);
                 if closed.is_none() {
-                    incoming.retain(|p| p.remote != remote);
+                    incoming.withdraw(remote);
                     // A request staged out of the queue is cancelled
                     // through its flag: the verdict observes it.
                     for (id, flag) in staged.iter() {
@@ -1029,7 +1003,7 @@ where
     /// A slot reserved by `accept` before READY is on the wire. If the
     /// future is cancelled or errors before that, `Drop` frees it —
     /// otherwise a cancelled accept would occupy it forever.
-    reserved: Option<usize>,
+    reserved: Option<ChannelId>,
     /// Set by the reader when the device withdraws this OPEN (a CLSE
     /// naming no local id) while the request is staged here.
     cancelled: Arc<AtomicBool>,
@@ -1078,17 +1052,11 @@ where
                 self.pending.take();
                 return Err(Error::ChannelClosed);
             }
-            chs.iter().position(|s| s.is_none()).map(|idx| {
-                let ids = ChannelIds {
-                    local: shared.next_local_id(),
-                    remote,
-                };
-                let policy = shared.negotiated.rx_policy();
-                chs[idx] = Some(ChannelSlot::accepted(ids, credit, policy));
-                (idx, ids.local)
+            chs.allocate().ok().inspect(|&ch| {
+                chs.insert_accepted(ch, remote, credit);
             })
         };
-        let Some((slot_idx, local_id)) = reserved else {
+        let Some(ch) = reserved else {
             // No slot to give: refuse, and consume the request.
             let mut wh = shared.lock_write().await?;
             send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
@@ -1096,7 +1064,7 @@ where
             return Err(Error::NoFreeChannels);
         };
         // Armed for rollback until READY is committed.
-        self.reserved = Some(slot_idx);
+        self.reserved = Some(ch);
 
         let payload = match shared.negotiated.advertised_credit() {
             Some(credit) => credit.to_le_bytes().to_vec(),
@@ -1107,7 +1075,7 @@ where
             send_pkt(
                 &mut *wh,
                 &shared.desync,
-                &Packet::new(Command::Ready, local_id.raw(), remote.raw(), payload),
+                &Packet::new(Command::Ready, ch.local.raw(), remote.raw(), payload),
                 checksum,
             )
             .await?;
@@ -1116,10 +1084,7 @@ where
         // READY is out: the slot is committed and the request consumed.
         self.reserved = None;
         self.pending.take();
-        Ok(ChannelId {
-            slot: slot_idx,
-            local: local_id,
-        })
+        Ok(ch)
     }
 
     /// Refuse the channel: answers CLSE and frees nothing, since
@@ -1156,10 +1121,8 @@ where
 {
     fn drop(&mut self) {
         // A slot reserved but never confirmed by READY: release it.
-        if let Some(idx) = self.reserved.take() {
-            if let Some(slot) = self.shared.lock_channels().get_mut(idx) {
-                *slot = None;
-            }
+        if let Some(ch) = self.reserved.take() {
+            self.shared.lock_channels().free(ch);
         }
         // Unregister and requeue under both locks at once, in the same
         // staged-then-incoming order the cancel dispatch takes: a
@@ -1300,7 +1263,7 @@ where
             let listener = signal.listen();
             {
                 let chs = self.shared.lock_channels();
-                match slot_for(&chs, ch) {
+                match chs.get(ch) {
                     Some(slot) => match slot.state() {
                         ChannelState::Opening => {}
                         // A remote id comes only with a READY the slot
@@ -1480,8 +1443,7 @@ where
     }
 
     fn channel_ids(&self, ch: ChannelId) -> Result<ChannelIds, Error<<WH as ErrorType>::Error>> {
-        let chs = self.shared.lock_channels();
-        channel_ids_of(&chs, ch)
+        self.shared.lock_channels().ids(ch)
     }
 
     async fn acquire_credit(
@@ -1499,7 +1461,7 @@ where
         // already waiting and cannot drain a grant past them.
         let place = {
             let mut chs = self.shared.lock_channels();
-            let Some(slot) = slot_for_mut(&mut chs, ch) else {
+            let Some(slot) = chs.get_mut(ch) else {
                 return Err(Error::ChannelClosed);
             };
             if slot.is_closed() {
@@ -1544,7 +1506,7 @@ where
         place: u64,
     ) -> Option<Result<(usize, bool), Error<<WH as ErrorType>::Error>>> {
         let mut chs = self.shared.lock_channels();
-        let Some(slot) = slot_for_mut(&mut chs, ch) else {
+        let Some(slot) = chs.get_mut(ch) else {
             return Some(Err(Error::ChannelClosed));
         };
         if slot.is_closed() {
@@ -1620,10 +1582,7 @@ where
     WH: Write,
 {
     shared.desync.check()?;
-    let ids = {
-        let chs = shared.lock_channels();
-        channel_ids_of(&chs, ch)?
-    };
+    let ids = shared.lock_channels().ids(ch)?;
     {
         let mut wh = shared.lock_write().await?;
         send_pkt(
@@ -1634,12 +1593,7 @@ where
         )
         .await?;
     }
-    {
-        let mut chs = shared.lock_channels();
-        if slot_for(&chs, ch).is_some() {
-            chs[ch.slot] = None;
-        }
-    }
+    shared.lock_channels().free(ch);
     if let Some(signal) = shared.signals.get(ch.slot) {
         signal.wake();
     }
@@ -1651,6 +1605,7 @@ mod tests {
     use super::*;
     use crate::base::channel::AckDecision;
     use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::ids::LocalId;
     use crate::base::mock::{
         abandon, now, okay, split_with_channel, withdraw, Mock, NoAuth, SharedMock,
     };
@@ -2084,7 +2039,7 @@ mod tests {
         // leaves them under delayed ACK.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut chs, ch).unwrap();
+            let slot = chs.get_mut(ch).unwrap();
             assert!(matches!(slot.apply_write(b"hello"), Ok(AckDecision::Hold)));
         }
         // Another task is mid-packet, so the read's OKAY has to wait.
@@ -2099,7 +2054,7 @@ mod tests {
         }
         {
             let chs = writer.shared.lock_channels();
-            let slot = chs[ch.slot].as_ref().unwrap();
+            let slot = chs.get(ch).unwrap();
             assert_eq!(
                 (slot.buffered(), slot.unacked()),
                 (5, 5),
@@ -2188,7 +2143,7 @@ mod tests {
         // Well past the watermark, with its acknowledgement held back.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut chs, ch).unwrap();
+            let slot = chs.get_mut(ch).unwrap();
             // The first is acknowledged on arrival, the second takes the
             // channel past the watermark and is held.
             slot.apply_write(&[0xEE; 1000]).unwrap();
@@ -2201,7 +2156,7 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(now(writer.read_channel(ch, &mut buf)).unwrap(), 8);
         let chs = writer.shared.lock_channels();
-        assert_eq!(chs[ch.slot].as_ref().unwrap().unacked(), 1000);
+        assert_eq!(chs.get(ch).unwrap().unacked(), 1000);
     }
 
     #[test]
@@ -2220,7 +2175,7 @@ mod tests {
         // Data lands while another task abandons a packet mid-write.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut chs, ch).unwrap();
+            let slot = chs.get_mut(ch).unwrap();
             slot.apply_write(b"hi").unwrap();
         }
         abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
@@ -2251,7 +2206,7 @@ mod send_queue_tests {
     use core::pin::Pin;
     use core::task::{Context, Poll, Waker};
 
-    use crate::base::channel::{slot_for_mut, ChannelId};
+    use crate::base::channel::ChannelId;
     use crate::base::mock::{okay_with_budget, split_one_channel_delayed_ack, SharedMock};
     use crate::base::protocol::command::Command;
 
@@ -2275,7 +2230,7 @@ mod send_queue_tests {
     fn grant(writer: &super::Writer<SharedMock>, ch: ChannelId, credit: u32) {
         {
             let mut chs = writer.shared.lock_channels();
-            slot_for_mut(&mut chs, ch)
+            chs.get_mut(ch)
                 .unwrap()
                 .apply_ready(&credit.to_le_bytes())
                 .unwrap();

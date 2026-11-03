@@ -30,12 +30,14 @@
 
 pub mod auth;
 pub mod channel;
+pub(crate) mod channel_table;
 pub mod connection;
 
 pub(crate) mod destination;
 pub mod device_banner;
 pub mod error;
 pub(crate) mod ids;
+pub(crate) mod incoming;
 #[cfg(test)]
 pub(crate) mod mock;
 pub(crate) mod negotiated;

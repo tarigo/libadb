@@ -1,11 +1,9 @@
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BytesMut};
 use core::future::Future;
 
 use super::error::{Error, ProtocolError, RxOverflow};
 use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::{AckMode, RxPolicy};
-use super::protocol::command::Command;
-use super::protocol::Packet;
 use super::send_queue::SendQueue;
 use super::session::Session;
 
@@ -40,67 +38,6 @@ pub(crate) enum AckDecision {
     Hold,
 }
 
-/// What a packet did to the channel table, and what is left for
-/// whoever dispatched it to do. The slot indices and a fault's ids are
-/// read only by `split::Reader`, which wakes a slot's waiters and
-/// closes a faulted channel; a [`Connection`](crate::Connection) has
-/// no one else to wake.
-#[cfg_attr(not(feature = "split"), allow(dead_code))]
-pub(crate) enum DispatchOutcome {
-    /// A WRTE was buffered and has to be acknowledged now.
-    AckWrite {
-        idx: usize,
-        ack: PendingAck,
-    },
-    /// An OKAY refilled the slot's send budget: one writer can proceed.
-    CreditGranted {
-        idx: usize,
-    },
-    /// A CLSE closed the slot: every waiter has to see the error.
-    SlotClosed {
-        idx: usize,
-    },
-    /// A WRTE was buffered with its acknowledgement held back until it
-    /// is read.
-    DataBuffered {
-        idx: usize,
-    },
-    /// The device opened a channel toward the host (`adb reverse`).
-    /// The host queues it for [`accept_incoming`] and answers READY on
-    /// accept or CLSE on refusal.
-    ///
-    /// [`accept_incoming`]: super::connection::Connection::accept_incoming
-    IncomingOpen {
-        remote: RemoteId,
-        /// The device's receive credit from OPEN `arg1`; our send
-        /// budget once accepted, meaningful only with delayed ack.
-        credit: u32,
-        destination: Bytes,
-    },
-    /// The device gave up on an OPEN it had sent — a CLSE that names
-    /// no local id. Drop the matching pending entry if still queued.
-    CancelPendingOpen {
-        remote: RemoteId,
-    },
-    /// A READY for no channel of ours: the device accepted an OPEN its
-    /// opener gave up on before the answer. Answer CLSE with both ids —
-    /// adbd ignores one that does not name its own — or the device's
-    /// end stays open.
-    StrayReady {
-        ids: ChannelIds,
-    },
-    /// A packet broke this slot's channel alone. The slot is not
-    /// closed: whoever dispatched decides what the fault costs.
-    ChannelFault {
-        idx: usize,
-        ids: ChannelIds,
-        /// The slot was waiting for the device's answer to its OPEN.
-        opening: bool,
-        fault: ChannelFault,
-    },
-    Unmatched,
-}
-
 /// What breaks one channel without breaking the connection: the packet
 /// was read whole, so the stream stays in step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,113 +56,6 @@ impl ChannelFault {
             Self::Protocol(e) => Error::Protocol(e),
         }
     }
-}
-
-/// A device-initiated OPEN waiting for the application's verdict.
-#[derive(Debug)]
-pub(crate) struct PendingOpen {
-    pub remote: RemoteId,
-    pub credit: u32,
-    pub destination: Bytes,
-}
-
-/// A WRTE that would push a channel past its receive cap is a
-/// [`ChannelFault::RxOverflow`] instead of a bigger buffer.
-pub(crate) fn dispatch_packet(
-    channels: &mut [Option<ChannelSlot>],
-    pkt: &Packet,
-) -> DispatchOutcome {
-    // The handshake is over, so a device that opens it again, or asks
-    // for TLS now, is out of turn. It is dropped like any packet nobody
-    // claims, but said in the log, since nothing else will mention it.
-    if matches!(
-        pkt.command,
-        Command::Connect | Command::Auth | Command::StartTls
-    ) {
-        log::warn!(
-            "dropping {:?} from the device after the handshake",
-            pkt.command
-        );
-        return DispatchOutcome::Unmatched;
-    }
-    if pkt.command == Command::Open {
-        return DispatchOutcome::IncomingOpen {
-            remote: RemoteId::from(pkt.arg0),
-            credit: pkt.arg1,
-            destination: pkt.data.clone(),
-        };
-    }
-    if pkt.command == Command::Close && pkt.arg1 == 0 {
-        // The withdrawal may have crossed our READY in flight: the
-        // request is then no longer queued but an accepted slot, and
-        // has to close like any remote CLSE — the cancel handlers only
-        // reach requests still awaiting a verdict.
-        let remote = RemoteId::from(pkt.arg0);
-        if let Some(idx) = close_remote(channels, remote) {
-            return DispatchOutcome::SlotClosed { idx };
-        }
-        return DispatchOutcome::CancelPendingOpen { remote };
-    }
-    let remote = RemoteId::from(pkt.arg0);
-    for (idx, slot_opt) in channels.iter_mut().enumerate() {
-        let Some(slot) = slot_opt else { continue };
-        let ours = pkt.arg1 == slot.local.raw();
-        match pkt.command {
-            // A channel closed for a fault takes nothing more: data that
-            // was still in flight would read as if no gap came before it.
-            Command::Write | Command::Ready if ours && slot.failed.is_some() => {
-                return DispatchOutcome::Unmatched;
-            }
-            Command::Write if ours => {
-                return match slot.apply_write(&pkt.data) {
-                    Ok(AckDecision::Now(ack)) => DispatchOutcome::AckWrite { idx, ack },
-                    Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
-                    Err(RxOverflow) => slot.fault(idx, remote, ChannelFault::RxOverflow),
-                };
-            }
-            Command::Ready if ours => {
-                let granted = if slot.state == ChannelState::Opening {
-                    slot.accept_open_ready(remote, &pkt.data)
-                } else {
-                    slot.apply_ready(&pkt.data)
-                };
-                return match granted {
-                    Ok(()) => DispatchOutcome::CreditGranted { idx },
-                    Err(e) => slot.fault(idx, remote, ChannelFault::Protocol(e)),
-                };
-            }
-            Command::Close if ours => {
-                slot.apply_close();
-                return DispatchOutcome::SlotClosed { idx };
-            }
-            _ => {}
-        }
-    }
-    if pkt.command == Command::Ready && pkt.arg0 != 0 && pkt.arg1 != 0 {
-        return DispatchOutcome::StrayReady {
-            ids: ChannelIds {
-                local: LocalId::from(pkt.arg1),
-                remote,
-            },
-        };
-    }
-    DispatchOutcome::Unmatched
-}
-
-/// Close the channel whose device end is `remote`, and say which slot
-/// it was in. A zero id names no end, so it closes nothing.
-pub(crate) fn close_remote(
-    channels: &mut [Option<ChannelSlot>],
-    remote: RemoteId,
-) -> Option<usize> {
-    if remote.raw() == 0 {
-        return None;
-    }
-    let idx = channels
-        .iter()
-        .position(|s| s.as_ref().is_some_and(|s| s.remote == Some(remote)))?;
-    channels[idx].as_mut()?.apply_close();
-    Some(idx)
 }
 
 /// Result of [`Channel::select`] / [`Session::select_channel`].
@@ -340,6 +170,21 @@ impl ChannelSlot {
         slot
     }
 
+    /// Our end of the channel.
+    pub fn local(&self) -> LocalId {
+        self.local
+    }
+
+    /// Where the channel stands.
+    pub fn state(&self) -> ChannelState {
+        self.state
+    }
+
+    /// Whether a fault closed the channel, its CLSE sent with it.
+    pub fn is_failed(&self) -> bool {
+        self.failed.is_some()
+    }
+
     /// Both ends of the channel, once the device named its own.
     pub fn ids(&self) -> Option<ChannelIds> {
         Some(ChannelIds {
@@ -356,20 +201,6 @@ impl ChannelSlot {
     pub fn closed_error<E>(&self) -> Error<E> {
         self.failed
             .map_or(Error::ChannelClosed, ChannelFault::error)
-    }
-
-    /// `remote` comes from the packet: a slot still opening has none of
-    /// its own yet.
-    fn fault(&self, idx: usize, remote: RemoteId, fault: ChannelFault) -> DispatchOutcome {
-        DispatchOutcome::ChannelFault {
-            idx,
-            ids: ChannelIds {
-                local: self.local,
-                remote,
-            },
-            opening: self.state == ChannelState::Opening,
-            fault,
-        }
     }
 
     pub fn accept_open_ready(
@@ -534,20 +365,10 @@ impl ChannelSlot {
 }
 
 /// What only the split halves ask of a slot: credit spent ahead of the
-/// send it pays for, a channel closed for a fault, and how an open that
-/// someone else dispatched went.
+/// send it pays for, a channel closed for a fault, and writers taking
+/// turns.
 #[cfg_attr(not(feature = "split"), allow(dead_code))]
 impl ChannelSlot {
-    /// Where the channel stands.
-    pub fn state(&self) -> ChannelState {
-        self.state
-    }
-
-    /// Whether a fault closed the channel, its CLSE sent with it.
-    pub fn is_failed(&self) -> bool {
-        self.failed.is_some()
-    }
-
     /// Whether taking up to `want` buffered bytes now would owe the
     /// device an OKAY — what [`take_buffered`](Self::take_buffered)
     /// would answer, without taking anything.
@@ -588,34 +409,6 @@ impl ChannelSlot {
     pub fn send_queue(&mut self) -> &mut SendQueue {
         &mut self.send_queue
     }
-}
-
-pub(crate) fn channel_ids_of<E>(
-    channels: &[Option<ChannelSlot>],
-    ch: ChannelId,
-) -> Result<ChannelIds, Error<E>> {
-    slot_for(channels, ch)
-        .and_then(ChannelSlot::ids)
-        .ok_or(Error::ChannelClosed)
-}
-
-/// The slot `ch` names, unless it has been freed or reused since.
-pub(crate) fn slot_for(channels: &[Option<ChannelSlot>], ch: ChannelId) -> Option<&ChannelSlot> {
-    channels
-        .get(ch.slot)
-        .and_then(|s| s.as_ref())
-        .filter(|s| s.local == ch.local)
-}
-
-/// [`slot_for`], to change.
-pub(crate) fn slot_for_mut(
-    channels: &mut [Option<ChannelSlot>],
-    ch: ChannelId,
-) -> Option<&mut ChannelSlot> {
-    channels
-        .get_mut(ch.slot)
-        .and_then(|s| s.as_mut())
-        .filter(|s| s.local == ch.local)
 }
 
 #[cfg(all(test, feature = "split"))]

@@ -4,7 +4,9 @@ use embedded_io_async::{Read, Write};
 
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
+use crate::base::channel_table::ChannelTable;
 use crate::base::error::{AuthError, Error, ProtocolError};
+use crate::base::incoming::IncomingQueue;
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::{self, AuthKind, Command};
 use crate::base::protocol::Checksum;
@@ -212,12 +214,9 @@ where
         let negotiated = Negotiated::new(&self.banner, cnxn, self.config)?;
         Ok(Connection {
             transport: self.transport,
-            channels: (0..negotiated.config.max_channels())
-                .map(|_| None)
-                .collect(),
+            table: ChannelTable::new(negotiated.config.max_channels(), negotiated.rx_policy()),
             negotiated,
-            local_id_counter: 1,
-            incoming: alloc::collections::VecDeque::new(),
+            incoming: IncomingQueue::default(),
             recv_buf: self.recv_buf,
             desync: self.desync,
         })

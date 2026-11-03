@@ -437,7 +437,7 @@ mod incoming {
 
         // The reserved slot came back: the table is empty again.
         assert!(
-            conn.channels.iter().all(Option::is_none),
+            conn.table.in_use() == 0,
             "the reserved slot leaked past the cancel"
         );
         // The request came back too: it is acceptable again.

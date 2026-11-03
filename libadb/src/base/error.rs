@@ -351,6 +351,18 @@ impl<E> From<RxOverflow> for Error<E> {
     }
 }
 
+/// Every slot of the channel table is taken. Internal marker turned
+/// into [`Error::NoFreeChannels`] at the call sites that know the
+/// transport error type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NoFreeChannels;
+
+impl<E> From<NoFreeChannels> for Error<E> {
+    fn from(_: NoFreeChannels) -> Self {
+        Self::NoFreeChannels
+    }
+}
+
 impl<E> From<AuthError> for Error<E> {
     fn from(e: AuthError) -> Self {
         Self::Auth(e)
