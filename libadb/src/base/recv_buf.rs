@@ -1,14 +1,23 @@
+//! [`RecvBuf`]: a caller's byte slice used as a receive buffer, read
+//! into from a channel until a reply of known size is in.
+
 use super::channel::Channel;
 use super::session::Session;
 use crate::error::Error;
 
+/// The receive buffer of a service that parses replies in place:
+/// `buf[head..tail]` is what arrived and has not been consumed.
 pub(crate) struct RecvBuf<'b> {
+    /// The caller's buffer.
     pub buf: &'b mut [u8],
+    /// Where the bytes not consumed yet start; the parser moves it on.
     pub head: usize,
+    /// One past the last byte read in.
     pub tail: usize,
 }
 
 impl<'b> RecvBuf<'b> {
+    /// An empty receive buffer over `buf`.
     pub fn new(buf: &'b mut [u8]) -> Self {
         Self {
             buf,
@@ -17,6 +26,8 @@ impl<'b> RecvBuf<'b> {
         }
     }
 
+    /// Move the bytes not consumed yet to the front of `buf`, freeing
+    /// what lay before them for the next read.
     pub fn compact(&mut self) {
         if self.head > 0 {
             self.buf.copy_within(self.head..self.tail, 0);
@@ -25,6 +36,11 @@ impl<'b> RecvBuf<'b> {
         }
     }
 
+    /// Read from `channel` until at least `n` bytes not consumed yet are
+    /// buffered, compacting once the end of `buf` is reached.
+    ///
+    /// Fails with [`Error::ReceiveBufferFull`] when `buf` is shorter
+    /// than `n`, and with whatever the read fails with.
     pub async fn fill_at_least<S: Session>(
         &mut self,
         channel: &mut Channel<'_, S>,
