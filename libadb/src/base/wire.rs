@@ -1,4 +1,8 @@
+use core::convert::Infallible;
+use core::future::{pending, poll_fn, Future};
+use core::pin::{pin, Pin};
 use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::Poll;
 
 use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
@@ -150,14 +154,63 @@ pub(crate) async fn recv_pkt<T: Read>(
     buf: &mut BytesMut,
     max_payload: u32,
 ) -> Result<Packet, Error<T::Error>> {
+    match recv_pkt_or(t, buf, max_payload, pin!(pending::<Infallible>()), true).await? {
+        Received::Packet(pkt) => Ok(pkt),
+        Received::Interrupted(never) => match never {},
+    }
+}
+
+/// What [`recv_pkt_or`] came back with.
+pub(crate) enum Received<I> {
+    Packet(Packet),
+    Interrupted(I),
+}
+
+/// [`recv_pkt`], giving up once `interrupt` resolves while the packet
+/// still has to be read.
+///
+/// A packet already whole in `buf` wins over a ready interrupt. With
+/// `race`, every read is raced against `interrupt` and dropped when it
+/// loses, which only a transport whose reads are cancel-safe can
+/// afford. Without it, `interrupt` is asked once before each read, and
+/// a read once issued runs to completion. Bytes read before the
+/// interrupt stay in `buf` either way.
+pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
+    t: &mut T,
+    buf: &mut BytesMut,
+    max_payload: u32,
+    mut interrupt: Pin<&mut F>,
+    race: bool,
+) -> Result<Received<F::Output>, Error<T::Error>> {
     loop {
         if let Some(pkt) = Packet::decode(buf, max_payload)? {
-            return Ok(pkt);
+            return Ok(Received::Packet(pkt));
         }
         let want = Packet::missing(buf).max(MIN_READ);
         let mut staged = Staged::new(buf, want);
         loop {
-            match t.read(staged.spare()).await {
+            let got = if race {
+                let mut read = pin!(t.read(staged.spare()));
+                let raced = poll_fn(|cx| {
+                    if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
+                        return Poll::Ready(Err(val));
+                    }
+                    read.as_mut().poll(cx).map(Ok)
+                })
+                .await;
+                match raced {
+                    Ok(got) => got,
+                    Err(val) => return Ok(Received::Interrupted(val)),
+                }
+            } else {
+                if let Poll::Ready(val) =
+                    poll_fn(|cx| Poll::Ready(interrupt.as_mut().poll(cx))).await
+                {
+                    return Ok(Received::Interrupted(val));
+                }
+                t.read(staged.spare()).await
+            };
+            match got {
                 Ok(0) => return Err(Error::UnexpectedEof),
                 Ok(n) => staged.commit(n),
                 Err(e) => return Err(Error::Io(e)),
