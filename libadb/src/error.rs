@@ -1,3 +1,9 @@
+//! [`Error`], what every connection and service call fails with, and
+//! the [`ProtocolError`] and [`AuthError`] it carries.
+//!
+//! Errors particular to one service live with it; [`SyncError`],
+//! [`ReverseError`] and [`DecodeError`] are re-exported here as well.
+
 #[cfg(test)]
 mod tests;
 
