@@ -5,6 +5,7 @@ use core::pin::pin;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 
 use super::channel::{
@@ -20,8 +21,8 @@ use super::protocol::Packet;
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
-pub const DEFAULT_MAX_CHANNELS: usize = 32;
-pub const DEFAULT_MAX_PROPERTIES: usize = 64;
+pub const DEFAULT_MAX_CHANNELS: usize = ConnectionConfig::DEFAULT_MAX_CHANNELS;
+pub const DEFAULT_MAX_PROPERTIES: usize = ConnectionConfig::DEFAULT_MAX_BANNER_PROPERTIES;
 pub const DEFAULT_MAX_FEATURES: usize = 24;
 
 /// ADB connection over an async transport.
@@ -34,7 +35,8 @@ pub struct Connection<
     T: Read + Write,
 {
     transport: T,
-    channels: [Option<ChannelSlot>; MAX_CHANNELS],
+    /// [`ConnectionConfig::max_channels`] slots, allocated up front.
+    channels: Box<[Option<ChannelSlot>]>,
     max_payload: u32,
     protocol_version: u32,
     config: ConnectionConfig,
@@ -44,7 +46,7 @@ pub struct Connection<
     recv_buf: BytesMut,
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`accept_incoming`]. Bounded by
-    /// the channel table size; overflow is refused with CLSE on
+    /// the size of `channels`; overflow is refused with CLSE on
     /// arrival.
     ///
     /// [`accept_incoming`]: Self::accept_incoming
@@ -381,8 +383,12 @@ where
 
         let shared = Arc::new(Shared {
             write_half: async_lock::Mutex::new(write_half),
+            signals: self
+                .channels
+                .iter()
+                .map(|_| crate::split::FlowSignal::new())
+                .collect(),
             channels: std::sync::Mutex::new(self.channels),
-            signals: core::array::from_fn(|_| crate::split::FlowSignal::new()),
             max_payload: self.max_payload,
             protocol_version: self.protocol_version,
             config: self.config,
@@ -617,8 +623,9 @@ where
     /// lose packet bytes, exactly as with a cancelled
     /// [`read_channel`](Self::read_channel).
     ///
-    /// Pending requests are bounded by the channel table size: past
-    /// that, new OPENs are refused with CLSE on arrival.
+    /// Pending requests are bounded by
+    /// [`ConnectionConfig::max_channels`]: past that, new OPENs are
+    /// refused with CLSE on arrival.
     pub async fn accept_incoming(
         &mut self,
     ) -> Result<

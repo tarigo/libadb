@@ -160,11 +160,14 @@ where
         let delayed_ack = features::has_feature(banner, features::DELAYED_ACK)
             && features::has_feature(&cnxn.data, features::DELAYED_ACK);
 
-        let device_banner = Some(DeviceBanner::from_bytes(cnxn.data, MAX_PROPERTIES)?);
+        let device_banner = Some(DeviceBanner::from_bytes(
+            cnxn.data,
+            config.max_banner_properties(),
+        )?);
 
         Ok(Self {
             transport,
-            channels: core::array::from_fn(|_| None),
+            channels: (0..config.max_channels()).map(|_| None).collect(),
             // Bounded by our own encoder, not just by the device's offer.
             max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
             protocol_version: cnxn.arg0.min(command::ADB_VERSION),

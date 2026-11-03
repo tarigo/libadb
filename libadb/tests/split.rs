@@ -286,9 +286,14 @@ async fn split_open_channel_no_free_slots_when_table_is_full() {
     });
 
     let stream = rt::connect(addr).await;
-    let conn = Connection::<_, 2>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::")
-        .await
-        .unwrap();
+    let conn = Connection::<_>::connect_with_raw_banner_and_config(
+        wrap(stream),
+        TestAuth,
+        b"host::",
+        ConnectionConfig::new().with_max_channels(2),
+    )
+    .await
+    .unwrap();
     let (mut reader, writer) = conn.split().unwrap();
 
     let ch1 = reader.open_channel(b"svc1:\0").await.unwrap();

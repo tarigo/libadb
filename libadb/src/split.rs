@@ -64,6 +64,7 @@ use embedded_io_async::{Read, Write};
 use event_listener::{Event, EventListener};
 use std::sync::Mutex;
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
@@ -110,8 +111,9 @@ impl FlowSignal {
 
 pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> {
     pub(crate) write_half: AsyncMutex<WH>,
-    pub(crate) channels: Mutex<[Option<ChannelSlot>; MC]>,
-    pub(crate) signals: [FlowSignal; MC],
+    pub(crate) channels: Mutex<Box<[Option<ChannelSlot>]>>,
+    /// One per slot of `channels`.
+    pub(crate) signals: Box<[FlowSignal]>,
     pub(crate) max_payload: u32,
     pub(crate) protocol_version: u32,
     pub(crate) config: ConnectionConfig,
@@ -149,7 +151,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         }
     }
 
-    fn lock_channels(&self) -> std::sync::MutexGuard<'_, [Option<ChannelSlot>; MC]> {
+    fn lock_channels(&self) -> std::sync::MutexGuard<'_, Box<[Option<ChannelSlot>]>> {
         self.channels.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -258,7 +260,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         let watermark = self.config.rx_watermark();
         {
             let mut chs = self.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
+            let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
             // Nothing to take, or nothing this take acknowledges: no
             // OKAY to send, so no lock to wait for.
             if slot.rx_buf.is_empty() || !slot.take_acks(buf.len(), self.delayed_ack, watermark) {
@@ -269,7 +271,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         let mut wh = self.lock_write().await?;
         let taken = {
             let mut chs = self.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).ok_or(Error::ChannelClosed)?;
+            let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
             slot.take_buffered(buf, self.delayed_ack, watermark)?
         };
         let Some((n, ack)) = taken else {
@@ -530,7 +532,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
         }
         {
             let mut chs = self.shared.lock_channels();
-            if let Some(slot) = slot_for_mut(&mut *chs, self.ch) {
+            if let Some(slot) = slot_for_mut(&mut chs, self.ch) {
                 slot.refund(self.n, self.shared.delayed_ack);
             }
         }
@@ -559,7 +561,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
         }
         let head_moved = {
             let mut chs = self.shared.lock_channels();
-            match slot_for_mut(&mut *chs, self.ch) {
+            match slot_for_mut(&mut chs, self.ch) {
                 Some(slot) => slot.send_leave(self.place),
                 None => false,
             }
@@ -692,7 +694,8 @@ where
     /// (`accept_incoming` needs no barrier — it only reads with the
     /// queue empty.)
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        while let Some(excess) = self.shared.take_incoming_past(MC) {
+        let cap = self.shared.config.max_channels();
+        while let Some(excess) = self.shared.take_incoming_past(cap) {
             excess.reject().await?;
         }
         Ok(())
@@ -835,7 +838,7 @@ where
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     let ack = {
                         let mut chs = self.shared.lock_channels();
-                        match slot_for_mut(&mut *chs, ch) {
+                        match slot_for_mut(&mut chs, ch) {
                             Some(slot) => slot.deliver(
                                 &pkt.data,
                                 n,
@@ -854,7 +857,7 @@ where
                 Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
                     {
                         let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = slot_for_mut(&mut *chs, ch) {
+                        if let Some(slot) = slot_for_mut(&mut chs, ch) {
                             slot.apply_close();
                         }
                     }
@@ -870,7 +873,7 @@ where
 
     fn channel_ids(&self, ch: ChannelId) -> Result<(u32, u32), Error<<RH as ErrorType>::Error>> {
         let chs = self.shared.lock_channels();
-        channel_ids_of(&*chs, ch)
+        channel_ids_of(&chs, ch)
     }
 
     /// Wait for a device-initiated channel (`adb reverse` traffic and
@@ -922,7 +925,7 @@ where
         let outcome = {
             let mut chs = self.shared.lock_channels();
             dispatch_packet(
-                &mut *chs,
+                &mut chs,
                 &pkt,
                 self.shared.delayed_ack,
                 self.shared.config.rx_cap(),
@@ -964,7 +967,7 @@ where
                 let refused = {
                     let staged = self.shared.lock_staged();
                     let mut q = self.shared.lock_incoming();
-                    if staged.len() + q.len() >= MC {
+                    if staged.len() + q.len() >= self.shared.config.max_channels() {
                         Some(pending)
                     } else {
                         q.push_back(pending);
@@ -1569,7 +1572,7 @@ where
 
     fn channel_ids(&self, ch: ChannelId) -> Result<(u32, u32), Error<<WH as ErrorType>::Error>> {
         let chs = self.shared.lock_channels();
-        channel_ids_of(&*chs, ch)
+        channel_ids_of(&chs, ch)
     }
 
     async fn acquire_credit(
@@ -1587,7 +1590,7 @@ where
         // already waiting and cannot drain a grant past them.
         let place = {
             let mut chs = self.shared.lock_channels();
-            let Some(slot) = slot_for_mut(&mut *chs, ch) else {
+            let Some(slot) = slot_for_mut(&mut chs, ch) else {
                 return Err(Error::ChannelClosed);
             };
             if slot.is_closed() {
@@ -1632,7 +1635,7 @@ where
         place: u64,
     ) -> Option<Result<(usize, bool), Error<<WH as ErrorType>::Error>>> {
         let mut chs = self.shared.lock_channels();
-        let Some(slot) = slot_for_mut(&mut *chs, ch) else {
+        let Some(slot) = slot_for_mut(&mut chs, ch) else {
             return Some(Err(Error::ChannelClosed));
         };
         if slot.is_closed() {
@@ -1718,7 +1721,7 @@ where
     shared.desync.check()?;
     let (local_id, remote_id) = {
         let chs = shared.lock_channels();
-        channel_ids_of(&*chs, ch)?
+        channel_ids_of(&chs, ch)?
     };
     {
         let mut wh = shared.lock_write().await?;
@@ -1861,16 +1864,17 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_, 2, 64, 24>::connect(
+        let conn = now(Connection::<_>::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
+            ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
         let ch = now(reader.open_channel(b"shell:\0")).unwrap();
 
-        let pump = |reader: &mut Reader<SharedMock, SharedMock, 2, 64, 24>| {
+        let pump = |reader: &mut Reader<SharedMock, SharedMock>| {
             let mut buf = [0u8; 16];
             let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
             let mut cx = Context::from_waker(Waker::noop());
@@ -1880,7 +1884,7 @@ mod tests {
             }
         };
 
-        // Two held holders exhaust the MC = 2 budget without ever
+        // Two held holders exhaust the two-channel budget without ever
         // touching the queue length.
         seen.feed(&open_pkt(60, b"tcp:60\0"));
         pump(&mut reader);
@@ -1922,10 +1926,11 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_, 2, 64, 24>::connect(
+        let conn = now(Connection::<_>::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
+            ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
@@ -1937,7 +1942,7 @@ mod tests {
 
         let shared = Arc::clone(&reader.shared);
         let wh = now(shared.write_half.lock());
-        let cancel_once = |reader: &mut Reader<SharedMock, SharedMock, 2, 64, 24>| {
+        let cancel_once = |reader: &mut Reader<SharedMock, SharedMock>| {
             let mut buf = [0u8; 16];
             let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
             let mut cx = Context::from_waker(Waker::noop());
@@ -1998,10 +2003,11 @@ mod tests {
         let seen = SharedMock::new(mock);
         // Two incoming slots: OPENs 70 and 71 fill the queue, 72
         // overflows it and has to be refused with CLSE.
-        let conn = now(Connection::<_, 2, 64, 24>::connect(
+        let conn = now(Connection::<_>::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
+            ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
@@ -2158,7 +2164,7 @@ mod tests {
         // leaves them under delayed ACK.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            let slot = slot_for_mut(&mut chs, ch).unwrap();
             slot.push_rx(b"hello", usize::MAX).unwrap();
             slot.unacked = 5;
         }
@@ -2256,7 +2262,7 @@ mod tests {
         // Well past the watermark, with its acknowledgement held back.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            let slot = slot_for_mut(&mut chs, ch).unwrap();
             slot.push_rx(&[0xEE; 2000], usize::MAX).unwrap();
             slot.unacked = 1000;
         }
@@ -2286,7 +2292,7 @@ mod tests {
         // Data lands while another task abandons a packet mid-write.
         {
             let mut chs = writer.shared.lock_channels();
-            let slot = slot_for_mut(&mut *chs, ch).unwrap();
+            let slot = slot_for_mut(&mut chs, ch).unwrap();
             slot.push_rx(b"hi", usize::MAX).unwrap();
         }
         abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
@@ -2341,7 +2347,7 @@ mod send_queue_tests {
     fn grant(writer: &super::Writer<SharedMock>, ch: ChannelId, credit: u32) {
         {
             let mut chs = writer.shared.lock_channels();
-            slot_for_mut(&mut *chs, ch)
+            slot_for_mut(&mut chs, ch)
                 .unwrap()
                 .apply_ready(&credit.to_le_bytes(), true)
                 .unwrap();

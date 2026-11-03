@@ -115,7 +115,8 @@ pub enum ProtocolError {
     InvalidBannerPrefix,
     /// Invalid key-value pair in the device banner.
     InvalidBannerKeyValue,
-    /// Too many properties in the device banner.
+    /// Too many properties in the device banner: more than
+    /// [`ConnectionConfig::max_banner_properties`](crate::ConnectionConfig::max_banner_properties).
     TooManyBannerProperties,
     /// The device answered the handshake with `STLS`: it speaks nothing
     /// but TLS from here on.

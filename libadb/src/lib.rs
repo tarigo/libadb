@@ -57,7 +57,10 @@
 //!   size of any single inbound packet (and hence the receive buffer);
 //! * `initial_ack_bytes` — delayed-ACK credit granted per channel;
 //! * `max_rx_per_channel` — fuse on data buffered for a channel nobody
-//!   is reading.
+//!   is reading;
+//! * `max_channels` — slots in the channel table, allocated up front;
+//! * `max_banner_properties` — how many properties the device's CNXN
+//!   banner may carry.
 //!
 //! [`ConnectionConfig::new`] reproduces `adb`'s desktop behaviour (1 MiB
 //! packets, 32 MiB credit, unbounded buffering).

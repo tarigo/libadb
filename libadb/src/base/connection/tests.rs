@@ -351,10 +351,11 @@ mod incoming {
     fn a_full_queue_refuses_new_opens_on_arrival() {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2"));
-        let mut conn = now(Connection::<_, 2, 64, 24>::connect_with_raw_banner(
+        let mut conn = now(Connection::<_>::connect_with_raw_banner_and_config(
             mock,
             NoAuth,
             b"host::features=shell_v2",
+            ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
 
@@ -466,10 +467,11 @@ mod incoming {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2"));
         mock.feed(&crate::base::mock::okay(1));
-        let mut conn = now(Connection::<_, 1, 64, 24>::connect_with_raw_banner(
+        let mut conn = now(Connection::<_>::connect_with_raw_banner_and_config(
             mock,
             NoAuth,
             b"host::features=shell_v2",
+            ConnectionConfig::new().with_max_channels(1),
         ))
         .unwrap();
         let _busy = now(conn.open_channel(b"shell:\0")).unwrap();
@@ -498,6 +500,41 @@ fn a_device_that_answers_the_handshake_with_stls_says_it_wants_tls() {
         matches!(err, Error::Protocol(ProtocolError::TlsRequired)),
         "expected TlsRequired, got {err:?}"
     );
+}
+
+/// The banner's property cap is the config's: one property past it
+/// fails the handshake, and exactly as many connect.
+#[test]
+fn the_banner_property_cap_comes_from_the_config() {
+    let banner = b"device::ro.product.name=a;ro.product.model=b;features=shell_v2";
+    let connect = |cap: usize| {
+        let mut mock = Mock::new();
+        mock.feed(&Packet::new(
+            Command::Connect,
+            crate::base::protocol::command::ADB_VERSION,
+            256 * 1024,
+            banner.to_vec(),
+        ));
+        let config = ConnectionConfig::new().with_max_banner_properties(cap);
+        now(Connection::<_>::connect_with_config(
+            mock,
+            NoAuth,
+            &[],
+            config,
+        ))
+    };
+
+    let Err(err) = connect(1) else {
+        panic!("two properties must not fit a cap of one");
+    };
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::TooManyBannerProperties)),
+        "expected TooManyBannerProperties, got {err:?}"
+    );
+
+    let conn = connect(2).unwrap();
+    let parsed = conn.device_banner_parsed().unwrap();
+    assert_eq!(parsed.product_model(), Some("b"));
 }
 
 #[test]

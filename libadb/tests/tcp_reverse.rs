@@ -146,7 +146,7 @@ rt_test! {
 async fn every_call_frees_its_channel_slot() {
     // One round more than there are slots: a call that leaks its slot
     // runs the pool dry before the loop ends.
-    const ROUNDS: usize = libadb::connection::DEFAULT_MAX_CHANNELS + 1;
+    const ROUNDS: usize = libadb::ConnectionConfig::DEFAULT_MAX_CHANNELS + 1;
 
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         for _ in 0..ROUNDS {

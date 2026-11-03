@@ -126,11 +126,13 @@ never leaves the host.
 `ConnectionConfig` bounds everything the library allocates per
 connection:
 
-| Field                | Default (`new()`) | `embedded()` | Effect                                              |
-|----------------------|-------------------|--------------|-----------------------------------------------------|
-| `max_payload`        | 1 MiB             | 8 KiB        | advertised in CNXN — caps any single inbound packet |
-| `initial_ack_bytes`  | 32 MiB            | 32 KiB       | delayed-ACK credit granted per channel              |
-| `max_rx_per_channel` | unbounded         | 64 KiB       | fuse on data buffered for an unread channel         |
+| Field                   | Default (`new()`) | `embedded()` | Effect                                              |
+|-------------------------|-------------------|--------------|-----------------------------------------------------|
+| `max_payload`           | 1 MiB             | 8 KiB        | advertised in CNXN — caps any single inbound packet |
+| `initial_ack_bytes`     | 32 MiB            | 32 KiB       | delayed-ACK credit granted per channel              |
+| `max_rx_per_channel`    | unbounded         | 64 KiB       | fuse on data buffered for an unread channel         |
+| `max_channels`          | 32                | 32           | slots in the channel table, allocated up front      |
+| `max_banner_properties` | 64                | 64           | properties the device banner may carry              |
 
 ```rust,ignore
 use libadb::{Connection, ConnectionConfig, Feature};
