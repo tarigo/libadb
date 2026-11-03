@@ -21,14 +21,13 @@
 //! [`abb`](crate::abb) run Android's `cmd`, [`logcat`](crate::logcat)
 //! runs `logcat`.
 //!
-//! Zero-alloc: [`Exec`] wraps an open [`Channel`] and all destination
-//! strings and output bytes land in caller-provided byte slices. Use
-//! [`open`] for streaming use and [`run`] for a one-shot command that
-//! collects output into a single caller-owned buffer.
+//! Zero-alloc: [`Exec`] wraps an open [`Channel`](crate::channel::Channel)
+//! and all destination strings and output bytes land in caller-provided
+//! byte slices. Use [`open`] for streaming use and [`run`] for a
+//! one-shot command that collects output into a single caller-owned
+//! buffer.
 
-use core::future::Future;
-
-use crate::base::channel::{Channel, ReadToEnd, SelectResult};
+use crate::base::channel::ReadToEnd;
 use crate::base::destination::{self, DestinationError};
 use crate::base::session::Session;
 use crate::error::Error;
@@ -37,56 +36,9 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
     destination::write_destination(buf, &[b"exec:", command.as_bytes()], &[])
 }
 
-/// `exec:` session. Construct via [`open`].
-///
-/// Provides named methods for reading the combined stdout+stderr byte
-/// stream, forwarding stdin, and integrating with [`Channel::select`]
-/// for full-duplex use. Output is binary-clean.
-pub struct Exec<'a, S> {
-    channel: Channel<'a, S>,
-}
-
-impl<'a, S: Session> Exec<'a, S> {
-    /// Read raw output bytes from the device into `buf`. Returns the
-    /// number of bytes read.
-    ///
-    /// Output combines stdout and stderr in whatever order the device
-    /// produced them. [`Error::ChannelClosed`] signals that the remote
-    /// command has exited.
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
-        self.channel.read(buf).await
-    }
-
-    /// Send raw bytes to the device as stdin.
-    pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
-        self.channel.write(data).await
-    }
-
-    /// Read from the channel, but return early if `interrupt` resolves
-    /// first.
-    ///
-    /// On a transport whose reads cannot be safely cancelled (USB, the
-    /// blocking socket `Inline` dials), the interrupt is checked between
-    /// reads: one already in flight completes first and may return its
-    /// data ahead of a ready interrupt — see
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
-    ///
-    /// After a [`SelectResult::Interrupted`] result the caller can act
-    /// on the interrupt (e.g. forward stdin) and call `select` again —
-    /// the channel state is unchanged and the next read will resume.
-    pub async fn select<F: Future>(
-        &mut self,
-        buf: &mut [u8],
-        interrupt: F,
-    ) -> Result<SelectResult<F::Output>, Error<S::IoError>> {
-        self.channel.select(buf, interrupt).await
-    }
-
-    /// Close the underlying channel.
-    pub async fn close(self) -> Result<(), Error<S::IoError>> {
-        self.channel.close().await
-    }
-}
+/// An `exec:` session: the same frameless byte stream a `shell:`
+/// channel carries, minus the PTY. Construct via [`open`].
+pub type Exec<'a, S> = crate::shell::v1::Shell<'a, S>;
 
 /// Open an `exec:` channel and wrap it in an [`Exec`] session.
 ///
@@ -109,7 +61,7 @@ pub async fn open<'a, S: Session>(
 ) -> Result<Exec<'a, S>, Error<S::IoError>> {
     let dest_len = write_destination(dest_buf, command)?;
     let channel = session.open(&dest_buf[..dest_len]).await?;
-    Ok(Exec { channel })
+    Ok(Exec::new(channel))
 }
 
 /// Run a one-shot command over `exec:` and accumulate the combined

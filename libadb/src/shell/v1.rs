@@ -29,21 +29,31 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
     destination::write_destination(buf, &[b"shell:", command.as_bytes()], &[])
 }
 
-/// Shell v1 (legacy) session. Construct via [`open`].
+/// A frameless byte stream to a command on the device: what a `shell:`
+/// channel carries, and an `exec:` one too —
+/// [`exec::Exec`](crate::exec::Exec) is this type under that service's
+/// name. Construct via [`open`] or [`exec::open`](crate::exec::open).
 ///
 /// Provides named methods for reading the combined stdout+stderr byte
 /// stream, forwarding stdin, and integrating with [`Channel::select`]
 /// for full-duplex interactive sessions.
 ///
-/// Unlike [`shell::v2::Shell`](crate::shell::v2::Shell), the v1 protocol is
-/// frameless — `read` returns raw bytes as they arrive and `write_stdin`
-/// sends raw bytes to the device's TTY. There is no separate stderr
-/// stream and no exit code.
+/// Unlike [`shell::v2::Shell`](crate::shell::v2::Shell), nothing frames
+/// the stream: `read` returns bytes as they arrive and `write_stdin`
+/// sends bytes as they are. There is no separate stderr stream and no
+/// exit code. Over `shell:` both directions pass the PTY the device
+/// allocates, which echoes input and turns `\n` into `\r\n`; over
+/// `exec:` they reach the command untouched.
 pub struct Shell<'a, S> {
     channel: Channel<'a, S>,
 }
 
 impl<'a, S: Session> Shell<'a, S> {
+    /// Wrap an already-opened `shell:` or `exec:` channel.
+    pub fn new(channel: Channel<'a, S>) -> Self {
+        Self { channel }
+    }
+
     /// Read raw output bytes from the device into `buf`. Returns the
     /// number of bytes read.
     ///
@@ -107,7 +117,7 @@ pub async fn open<'a, S: Session>(
 ) -> Result<Shell<'a, S>, Error<S::IoError>> {
     let dest_len = write_destination(dest_buf, command)?;
     let channel = session.open(&dest_buf[..dest_len]).await?;
-    Ok(Shell { channel })
+    Ok(Shell::new(channel))
 }
 
 /// Run a one-shot command over `shell:` and accumulate the combined
