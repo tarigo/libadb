@@ -34,6 +34,9 @@ pub mod nusb;
 #[cfg(feature = "rusb")]
 pub mod rusb;
 
+#[cfg(any(feature = "nusb", feature = "rusb"))]
+mod usb;
+
 #[cfg(feature = "split")]
 pub mod common;
 

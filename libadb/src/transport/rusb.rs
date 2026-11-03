@@ -17,13 +17,14 @@
 //! [`ReadCancelSafety`](crate::transport::ReadCancelSafety). What
 //! `nusb` buys is waiting without parking an OS thread.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 use rusb::{Context, Direction, TransferType, UsbContext};
 
 use crate::transport::runtime::Runtime;
-use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
+use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
 use crate::uri::UsbSelector;
 
 const NO_TIMEOUT: Duration = Duration::ZERO;
@@ -84,9 +85,16 @@ impl<R: Runtime> UsbTransport<R> {
     /// Build a transport from an already-claimed `rusb::DeviceHandle`,
     /// picking bulk IN/OUT endpoints from the given interface.
     pub fn new(handle: rusb::DeviceHandle<Context>, iface: u8) -> Result<Self, UsbConnectError> {
-        let (_, ep_in, ep_out) =
-            find_interface_endpoints(&handle.device(), |desc| desc.interface_number() == iface)?
-                .ok_or(UsbConnectError::NoBulkEndpoints)?;
+        let config = handle
+            .device()
+            .active_config_descriptor()
+            .map_err(UsbConnectError::Descriptor)?;
+        let (ep_in, ep_out) = config
+            .interfaces()
+            .filter(|i| i.number() == iface)
+            .flat_map(|i| i.descriptors())
+            .find_map(|desc| bulk_endpoints(&desc))
+            .ok_or(UsbConnectError::NoBulkEndpoints)?;
         Ok(Self::from_parts(handle, ep_in, ep_out))
     }
 
@@ -244,7 +252,7 @@ pub enum UsbConnectError {
     NoAdbInterface,
     /// Opening the device failed.
     Open(rusb::Error),
-    /// Reading a device or config descriptor failed.
+    /// Reading a configuration descriptor failed.
     Descriptor(rusb::Error),
     /// Reading the serial-number string descriptor failed during a
     /// [`UsbSelector::Serial`] probe.
@@ -296,118 +304,118 @@ pub fn connect_by_selector<R: Runtime>(
 ) -> Result<UsbTransport<R>, UsbConnectError> {
     let context = Context::new().map_err(UsbConnectError::Context)?;
     let devices = context.devices().map_err(UsbConnectError::Enumerate)?;
-
-    // VidPid pre-identifies a unique device, so per-device failures
-    // are surfaced; Any/Serial keep scanning on failure but remember
-    // the first probe error so it can be reported if no device
-    // ultimately succeeds.
-    let hard_fail = matches!(selector, UsbSelector::VidPid { .. });
-    let mut first_err: Option<UsbConnectError> = None;
-
-    for device in devices.iter() {
-        match try_open_device(device, selector, hard_fail) {
-            Ok(Some(t)) => return Ok(t),
-            Ok(None) => continue,
-            Err(e) if hard_fail => return Err(e),
-            Err(e) => {
-                first_err.get_or_insert(e);
-            }
-        }
-    }
-
-    Err(first_err.unwrap_or(UsbConnectError::NotFound))
+    // libusb has kept the device descriptor in memory since 1.0.16 and
+    // no longer fails to hand it out.
+    let candidates = devices.iter().filter_map(|device| {
+        let descriptor = device.device_descriptor().ok()?;
+        Some(Candidate {
+            device,
+            descriptor,
+            handle: None,
+        })
+    });
+    scan(candidates, selector, |candidate, iface| {
+        let handle = candidate.open()?;
+        handle
+            .claim_interface(iface)
+            .map_err(UsbConnectError::Claim)?;
+        UsbTransport::new(handle, iface)
+    })
 }
 
-fn try_open_device<R: Runtime>(
+/// One enumerated device, opened only once the scan needs a handle.
+struct Candidate {
     device: rusb::Device<Context>,
-    selector: UsbSelector<'_>,
-    hard_fail: bool,
-) -> Result<Option<UsbTransport<R>>, UsbConnectError> {
-    let desc = device
-        .device_descriptor()
-        .map_err(UsbConnectError::Descriptor)?;
-
-    if let UsbSelector::VidPid { vid, pid } = selector {
-        if desc.vendor_id() != vid || desc.product_id() != pid {
-            return Ok(None);
-        }
-    }
-
-    let (iface_num, ep_in, ep_out) = match find_interface_endpoints(&device, |desc| {
-        desc.class_code() == ADB_CLASS
-            && desc.sub_class_code() == ADB_SUBCLASS
-            && desc.protocol_code() == ADB_PROTOCOL
-    })? {
-        Some(t) => t,
-        None if hard_fail => return Err(UsbConnectError::NoAdbInterface),
-        None => return Ok(None),
-    };
-
-    let handle = device.open().map_err(UsbConnectError::Open)?;
-
-    // libusb reads the serial string through an open handle, so
-    // Serial matching is deferred until after `open()` (nusb has
-    // it as enumeration metadata and can match up front).
-    if let UsbSelector::Serial(wanted) = selector {
-        let serial = read_serial(&handle, &desc).map_err(UsbConnectError::SerialRead)?;
-        if serial.as_deref() != Some(wanted) {
-            return Ok(None);
-        }
-    }
-
-    handle
-        .claim_interface(iface_num)
-        .map_err(UsbConnectError::Claim)?;
-    Ok(Some(UsbTransport::from_parts(handle, ep_in, ep_out)))
+    descriptor: rusb::DeviceDescriptor,
+    handle: Option<rusb::DeviceHandle<Context>>,
 }
 
-fn find_interface_endpoints(
-    device: &rusb::Device<Context>,
-    pick: impl Fn(&rusb::InterfaceDescriptor) -> bool,
-) -> Result<Option<(u8, u8, u8)>, UsbConnectError> {
-    let config = device
-        .active_config_descriptor()
-        .map_err(UsbConnectError::Descriptor)?;
-    let mut any_match = false;
-    for iface in config.interfaces() {
-        for desc in iface.descriptors() {
-            if !pick(&desc) {
-                continue;
-            }
-            any_match = true;
-            let mut ep_in = None;
-            let mut ep_out = None;
-            for ep in desc.endpoint_descriptors() {
-                if ep.transfer_type() == TransferType::Bulk {
-                    match ep.direction() {
-                        Direction::In => ep_in = Some(ep.address()),
-                        Direction::Out => ep_out = Some(ep.address()),
-                    }
-                }
-            }
-            if let (Some(r), Some(w)) = (ep_in, ep_out) {
-                return Ok(Some((iface.number(), r, w)));
-            }
+impl Candidate {
+    /// The handle reading the serial opened, or a fresh one.
+    fn open(self) -> Result<rusb::DeviceHandle<Context>, UsbConnectError> {
+        match self.handle {
+            Some(handle) => Ok(handle),
+            None => self.device.open().map_err(UsbConnectError::Open),
         }
-    }
-    if any_match {
-        Err(UsbConnectError::NoBulkEndpoints)
-    } else {
-        Ok(None)
     }
 }
 
-fn read_serial(
-    handle: &rusb::DeviceHandle<Context>,
-    desc: &rusb::DeviceDescriptor,
-) -> Result<Option<alloc::string::String>, rusb::Error> {
-    let langs = handle.read_languages(CONTROL_TIMEOUT)?;
-    let Some(&lang) = langs.first() else {
-        return Ok(None);
-    };
-    handle
-        .read_serial_number_string(lang, desc, CONTROL_TIMEOUT)
-        .map(Some)
+impl Enumerated for Candidate {
+    type Error = UsbConnectError;
+
+    fn vid(&self) -> u16 {
+        self.descriptor.vendor_id()
+    }
+
+    fn pid(&self) -> u16 {
+        self.descriptor.product_id()
+    }
+
+    fn adb_interface(&self) -> Result<Option<u8>, UsbConnectError> {
+        let config = self
+            .device
+            .active_config_descriptor()
+            .map_err(UsbConnectError::Descriptor)?;
+        Ok(config
+            .interfaces()
+            .flat_map(|i| i.descriptors())
+            .find(|desc| {
+                speaks_adb(
+                    desc.class_code(),
+                    desc.sub_class_code(),
+                    desc.protocol_code(),
+                )
+            })
+            .map(|desc| desc.interface_number()))
+    }
+
+    fn serial(&mut self) -> Result<Option<String>, UsbConnectError> {
+        // The device descriptor says whether there is a string to read,
+        // so a device without one is not opened to find out.
+        if self.descriptor.serial_number_string_index().is_none() {
+            return Ok(None);
+        }
+        let handle = match self.handle.take() {
+            Some(handle) => handle,
+            None => self.device.open().map_err(UsbConnectError::Open)?,
+        };
+        let handle = self.handle.insert(handle);
+        let langs = handle
+            .read_languages(CONTROL_TIMEOUT)
+            .map_err(UsbConnectError::SerialRead)?;
+        let Some(&lang) = langs.first() else {
+            return Ok(None);
+        };
+        handle
+            .read_serial_number_string(lang, &self.descriptor, CONTROL_TIMEOUT)
+            .map(Some)
+            .map_err(UsbConnectError::SerialRead)
+    }
+}
+
+impl ScanError for UsbConnectError {
+    fn not_found() -> Self {
+        Self::NotFound
+    }
+
+    fn no_adb_interface() -> Self {
+        Self::NoAdbInterface
+    }
+}
+
+/// The bulk IN and OUT endpoint addresses of one interface setting.
+fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<(u8, u8)> {
+    let mut ep_in = None;
+    let mut ep_out = None;
+    for ep in desc.endpoint_descriptors() {
+        if ep.transfer_type() == TransferType::Bulk {
+            match ep.direction() {
+                Direction::In => ep_in = Some(ep.address()),
+                Direction::Out => ep_out = Some(ep.address()),
+            }
+        }
+    }
+    Some((ep_in?, ep_out?))
 }
 
 #[cfg(all(test, feature = "rusb"))]

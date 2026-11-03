@@ -14,10 +14,12 @@
 //! checking its interrupt between reads instead of racing it against
 //! one.
 
+use alloc::string::String;
+
 use nusb::transfer::{Direction, EndpointType, RequestBuffer};
 use nusb::Interface;
 
-use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
+use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
 
 /// USB transport wrapping `nusb::Interface` with bulk endpoints.
 ///
@@ -202,17 +204,9 @@ pub fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, Us
     })
 }
 
-/// What device selection needs to know about one enumerated device.
-///
-/// Exists so the scan can be exercised without a USB bus.
-trait Enumerated {
-    fn vid(&self) -> u16;
-    fn pid(&self) -> u16;
-    fn serial(&self) -> Option<&str>;
-    fn adb_interface(&self) -> Option<u8>;
-}
-
 impl Enumerated for nusb::DeviceInfo {
+    type Error = UsbConnectError;
+
     fn vid(&self) -> u16 {
         self.vendor_id()
     }
@@ -221,119 +215,31 @@ impl Enumerated for nusb::DeviceInfo {
         self.product_id()
     }
 
-    fn serial(&self) -> Option<&str> {
-        self.serial_number()
+    fn adb_interface(&self) -> Result<Option<u8>, UsbConnectError> {
+        Ok(self.interfaces().find_map(|iface| {
+            speaks_adb(iface.class(), iface.subclass(), iface.protocol())
+                .then(|| iface.interface_number())
+        }))
     }
 
-    fn adb_interface(&self) -> Option<u8> {
-        self.interfaces().find_map(|iface| {
-            (iface.class() == ADB_CLASS
-                && iface.subclass() == ADB_SUBCLASS
-                && iface.protocol() == ADB_PROTOCOL)
-                .then(|| iface.interface_number())
-        })
+    fn serial(&mut self) -> Result<Option<String>, UsbConnectError> {
+        Ok(self.serial_number().map(String::from))
     }
 }
 
-/// Walk `devices`, handing the first one the selector accepts to
-/// `open`, and keep walking if that one turns out unusable.
-///
-/// A VID:PID names one device, so its failures are reported as they
-/// happen. `Any` and a serial number describe a search: a device
-/// that speaks no ADB, or refuses to open, is passed over, and the
-/// first failure is only reported if nothing else works out. Without
-/// that, a hub or a webcam enumerated ahead of the phone ends the
-/// search — which is what this backend used to do.
-fn scan<D, T, F>(
-    devices: impl IntoIterator<Item = D>,
-    selector: UsbSelector<'_>,
-    mut open: F,
-) -> Result<T, UsbConnectError>
-where
-    D: Enumerated,
-    F: FnMut(D, u8) -> Result<T, UsbConnectError>,
-{
-    let named = matches!(selector, UsbSelector::VidPid { .. });
-    let mut first_err = None;
-
-    for device in devices {
-        let matches = match selector {
-            UsbSelector::Any => true,
-            UsbSelector::VidPid { vid, pid } => device.vid() == vid && device.pid() == pid,
-            UsbSelector::Serial(s) => device.serial() == Some(s),
-        };
-        if !matches {
-            continue;
-        }
-
-        let Some(iface_num) = device.adb_interface() else {
-            if named {
-                return Err(UsbConnectError::NoAdbInterface);
-            }
-            continue;
-        };
-
-        match open(device, iface_num) {
-            Ok(transport) => return Ok(transport),
-            Err(e) if named => return Err(e),
-            Err(e) => {
-                first_err.get_or_insert(e);
-            }
-        }
+impl ScanError for UsbConnectError {
+    fn not_found() -> Self {
+        Self::NotFound
     }
 
-    Err(first_err.unwrap_or(UsbConnectError::NotFound))
+    fn no_adb_interface() -> Self {
+        Self::NoAdbInterface
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
-    use alloc::vec::Vec;
-
     use super::*;
-
-    struct Dev {
-        vid: u16,
-        pid: u16,
-        serial: Option<&'static str>,
-        adb: Option<u8>,
-    }
-
-    impl Dev {
-        fn new(vid: u16, pid: u16, adb: Option<u8>) -> Self {
-            Self {
-                vid,
-                pid,
-                serial: None,
-                adb,
-            }
-        }
-
-        fn with_serial(mut self, serial: &'static str) -> Self {
-            self.serial = Some(serial);
-            self
-        }
-    }
-
-    impl Enumerated for Dev {
-        fn vid(&self) -> u16 {
-            self.vid
-        }
-        fn pid(&self) -> u16 {
-            self.pid
-        }
-        fn serial(&self) -> Option<&str> {
-            self.serial
-        }
-        fn adb_interface(&self) -> Option<u8> {
-            self.adb
-        }
-    }
-
-    /// Scan that reports which device was picked, by pid.
-    fn pick(devices: Vec<Dev>, selector: UsbSelector<'_>) -> Result<(u16, u8), UsbConnectError> {
-        scan(devices, selector, |d, iface| Ok((d.pid, iface)))
-    }
 
     #[test]
     fn a_transfer_error_stays_reachable_through_the_wrapper() {
@@ -344,127 +250,5 @@ mod tests {
             alloc::format!("{source}"),
             alloc::format!("{}", nusb::transfer::TransferError::Cancelled)
         );
-    }
-
-    #[test]
-    fn any_walks_past_a_device_without_an_adb_interface() {
-        let devices = vec![
-            Dev::new(0xf00d, 0x0001, None),
-            Dev::new(0xf00d, 0x0002, None),
-            Dev::new(0xbeef, 0x0001, Some(1)),
-        ];
-        assert_eq!(pick(devices, UsbSelector::Any).unwrap(), (0x0001, 1));
-    }
-
-    #[test]
-    fn any_finds_nothing_when_no_device_speaks_adb() {
-        let devices = vec![Dev::new(0xf00d, 0x0001, None)];
-        assert!(matches!(
-            pick(devices, UsbSelector::Any),
-            Err(UsbConnectError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn vid_pid_ignores_other_devices() {
-        let devices = vec![
-            Dev::new(0xf00d, 0x0001, Some(0)),
-            Dev::new(0xbeef, 0x0001, Some(2)),
-        ];
-        let selector = UsbSelector::VidPid {
-            vid: 0xbeef,
-            pid: 0x0001,
-        };
-        assert_eq!(pick(devices, selector).unwrap(), (0x0001, 2));
-    }
-
-    #[test]
-    fn a_vid_pid_has_to_match_both_halves() {
-        let selector = UsbSelector::VidPid {
-            vid: 0x18d1,
-            pid: 0x4ee7,
-        };
-        let same_vid = vec![Dev::new(0x18d1, 0x4ee8, Some(0))];
-        assert!(matches!(
-            pick(same_vid, selector),
-            Err(UsbConnectError::NotFound)
-        ));
-        let same_pid = vec![Dev::new(0x18d2, 0x4ee7, Some(0))];
-        assert!(matches!(
-            pick(same_pid, selector),
-            Err(UsbConnectError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn a_named_device_without_an_adb_interface_says_so() {
-        let devices = vec![Dev::new(0xbeef, 0x0001, None)];
-        let selector = UsbSelector::VidPid {
-            vid: 0xbeef,
-            pid: 0x0001,
-        };
-        assert!(matches!(
-            pick(devices, selector),
-            Err(UsbConnectError::NoAdbInterface)
-        ));
-    }
-
-    #[test]
-    fn a_serial_picks_its_own_device() {
-        let devices = vec![
-            Dev::new(0xbeef, 0x0001, Some(0)).with_serial("OTHER"),
-            Dev::new(0xbeef, 0x0001, Some(1)).with_serial("WANTED"),
-        ];
-        assert_eq!(
-            pick(devices, UsbSelector::Serial("WANTED")).unwrap(),
-            (0x0001, 1)
-        );
-    }
-
-    #[test]
-    fn an_unclaimable_device_does_not_end_an_any_scan() {
-        let devices = vec![
-            Dev::new(0xbeef, 0x0001, Some(0)),
-            Dev::new(0xbeef, 0x0002, Some(1)),
-        ];
-        let mut seen = 0;
-        let picked = scan(devices, UsbSelector::Any, |d, iface| {
-            seen += 1;
-            if d.pid == 0x0001 {
-                Err(UsbConnectError::NoBulkEndpoints)
-            } else {
-                Ok((d.pid, iface))
-            }
-        });
-        assert_eq!(picked.unwrap(), (0x0002, 1));
-        assert_eq!(seen, 2);
-    }
-
-    #[test]
-    fn the_first_failure_is_reported_when_the_scan_finds_nothing_else() {
-        let devices = vec![Dev::new(0xbeef, 0x0001, Some(0))];
-        let picked: Result<(), _> = scan(devices, UsbSelector::Any, |_, _| {
-            Err(UsbConnectError::NoBulkEndpoints)
-        });
-        assert!(matches!(picked, Err(UsbConnectError::NoBulkEndpoints)));
-    }
-
-    #[test]
-    fn a_named_device_surfaces_its_failure_at_once() {
-        let devices = vec![
-            Dev::new(0xbeef, 0x0001, Some(0)),
-            Dev::new(0xbeef, 0x0001, Some(1)),
-        ];
-        let selector = UsbSelector::VidPid {
-            vid: 0xbeef,
-            pid: 0x0001,
-        };
-        let mut seen = 0;
-        let picked: Result<(), _> = scan(devices, selector, |_, _| {
-            seen += 1;
-            Err(UsbConnectError::NoBulkEndpoints)
-        });
-        assert!(matches!(picked, Err(UsbConnectError::NoBulkEndpoints)));
-        assert_eq!(seen, 1);
     }
 }
