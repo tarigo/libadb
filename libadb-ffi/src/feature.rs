@@ -1,6 +1,13 @@
+//! The `ADB_FEATURE_*` table and the C calls that ask a connection
+//! about features.
+
 use core::ffi::c_char;
+use core::ptr;
 
 use libadb::protocol::features::Feature;
+
+use crate::connection::adb_connection_t;
+use crate::error::{self, AdbStatus};
 
 macro_rules! features {
     ($($variant:ident = $discriminant:literal => $rust:ident, $wire:literal;)*) => {
@@ -61,6 +68,92 @@ features! {
     ShellV2 = 18 => ShellV2, "shell_v2";
     StatV2 = 19 => StatV2, "stat_v2";
     TrackApp = 20 => TrackApp, "track_app";
+}
+
+/// Whether the device advertises `feature`.
+///
+/// Returns `false` if `conn` is NULL, if the handshake did not
+/// produce a parseable banner, or if `feature` is not one of the
+/// `ADB_FEATURE_*` constants defined in `libadb.h`.
+///
+/// Does not take the read lock — safe to call while another thread is
+/// blocked in [`adb_read_channel`].
+///
+/// [`adb_read_channel`]: crate::adb_read_channel
+///
+/// # Safety
+/// `conn` must be NULL or a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn adb_connection_has_feature(
+    conn: *const adb_connection_t,
+    feature: u32,
+) -> bool {
+    if conn.is_null() {
+        return false;
+    }
+    let Some(ff) = FfiFeature::from_raw(feature) else {
+        return false;
+    };
+    (*conn)
+        .writer
+        .device_banner_parsed()
+        .is_some_and(|b| b.has_feature(&ff.to_feature()))
+}
+
+/// Wire-format name of `feature` (e.g. `"shell_v2"`) as a static
+/// NUL-terminated string, or NULL if `feature` is not one of the
+/// `ADB_FEATURE_*` constants defined in `libadb.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn adb_feature_name(feature: u32) -> *const c_char {
+    match FfiFeature::from_raw(feature) {
+        Some(f) => f.wire_name(),
+        None => ptr::null(),
+    }
+}
+
+/// Copy up to `buf_cap` features advertised by the device into
+/// `buf` (in handshake order) and write the full count through
+/// `out_len`. Either pointer may be NULL; pass `(NULL, 0, &n)` to
+/// query the count, then call again with a larger buffer.
+///
+/// Features the library does not recognise are silently skipped at
+/// handshake parse time, so the returned count covers only known
+/// `ADB_FEATURE_*` values.
+///
+/// Does not take the read lock — safe to call while another thread is
+/// blocked in [`adb_read_channel`].
+///
+/// [`adb_read_channel`]: crate::adb_read_channel
+///
+/// # Safety
+/// `conn` must be NULL or a valid handle. `buf` must be NULL or
+/// point to at least `buf_cap` writable `uint32_t` slots.
+/// `out_len` must be NULL or point to a writable `usize`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn adb_connection_features(
+    conn: *const adb_connection_t,
+    buf: *mut u32,
+    buf_cap: usize,
+    out_len: *mut usize,
+) -> AdbStatus {
+    error::clear_last_error();
+    if conn.is_null() {
+        return error::fail_invalid_arg("null handle");
+    }
+    let features = (*conn)
+        .writer
+        .device_banner_parsed()
+        .map_or(&[][..], |b| b.features());
+    if !out_len.is_null() {
+        *out_len = features.len();
+    }
+    if !buf.is_null() && buf_cap > 0 {
+        let n = features.len().min(buf_cap);
+        for (slot, f) in features.iter().take(n).enumerate() {
+            *buf.add(slot) = FfiFeature::from_feature(f) as u32;
+        }
+    }
+    AdbStatus::Ok
 }
 
 #[cfg(test)]
