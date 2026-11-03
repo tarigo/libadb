@@ -96,6 +96,7 @@
 //! * [`abb`]      — Android Binder Bridge (Android 10+)
 //! * [`logcat`]   — parsed binary logcat stream
 //! * [`sync`]     — file transfer (`STAT` / `LIST` / `SEND` / `RECV`, v1 + v2)
+//! * [`reverse`]  — `adb reverse` rules: the device listens and opens channels to the host
 //! * [`track_app`] — streaming debuggable/profileable process list
 //!
 //! # Transports
