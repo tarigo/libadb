@@ -114,11 +114,18 @@ pub unsafe extern "C" fn adb_reverse_list(
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let mut g = unsafe { &*conn }.lock_reader();
     let rules = ffi_try!(reverse::list(&mut *g));
-    let listing: alloc::string::String = rules
-        .iter()
-        .map(|rule| alloc::format!("{} {} {}\n", rule.serial, rule.remote, rule.local))
-        .collect();
+    let mut listing = alloc::vec::Vec::new();
+    for rule in &rules {
+        for (field, end) in [
+            (&rule.serial, b' '),
+            (&rule.remote, b' '),
+            (&rule.local, b'\n'),
+        ] {
+            listing.extend_from_slice(field);
+            listing.push(end);
+        }
+    }
     // SAFETY: `buf` and `out_len` are NULL or writable as sized, per `# Safety`.
-    unsafe { copy_out(listing.as_bytes(), buf, buf_len, out_len) };
+    unsafe { copy_out(&listing, buf, buf_len, out_len) };
     AdbStatus::Ok
 }

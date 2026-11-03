@@ -181,7 +181,7 @@ fn rule_service_adbd() -> (String, std::thread::JoinHandle<()>) {
             &mut s,
             702,
             b"reverse:list-forward\0",
-            b"001ahost-19 tcp:6100 tcp:6100\n",
+            b"0038host-19 tcp:6100 tcp:6100\nhost-19 localabstract:\xff tcp:7\n",
         );
         serve_service(&mut s, 703, b"reverse:killforward:tcp:6100\0", b"OKAY");
         serve_service(&mut s, 704, b"reverse:killforward-all\0", b"OKAY");
@@ -246,7 +246,11 @@ fn reverse_rules_flow_through_the_split_adapter() {
     let mut len = 0usize;
     let st = unsafe { adb::adb_reverse_list(conn, listing.as_mut_ptr(), listing.len(), &mut len) };
     assert_eq!(st, adb::AdbStatus::Ok, "reverse_list");
-    assert_eq!(&listing[..len], b"host-19 tcp:6100 tcp:6100\n");
+    assert_eq!(
+        &listing[..len],
+        b"host-19 tcp:6100 tcp:6100\nhost-19 localabstract:\xff tcp:7\n",
+        "the device's text, a spec that is not UTF-8 included"
+    );
 
     let rule = CString::new("tcp:6100").unwrap();
     let st = unsafe { adb::adb_reverse_remove(conn, rule.as_ptr()) };

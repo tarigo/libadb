@@ -185,9 +185,9 @@ async fn list_parses_each_rule() {
     assert_eq!(
         listing,
         [ReverseRule {
-            serial: "host-19".into(),
-            remote: "tcp:6100".into(),
-            local: "tcp:6100".into(),
+            serial: b"host-19".to_vec(),
+            remote: b"tcp:6100".to_vec(),
+            local: b"tcp:6100".to_vec(),
         }]
     );
 

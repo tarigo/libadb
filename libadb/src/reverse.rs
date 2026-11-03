@@ -26,7 +26,6 @@
 //!   `<serial> <remote> <local>\n`;
 //! * any failure → `FAIL` + `%04x` + message.
 
-use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -77,16 +76,19 @@ impl<E> From<ReverseError> for Error<E> {
 }
 
 /// One rule in the device's listing, as [`list`] reads it.
+///
+/// The fields are the bytes the device sent: adbd prints its specs as
+/// they were given, and nothing makes them UTF-8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReverseRule {
     /// The name adbd files the rule under, e.g. `host-19`: the
     /// connection that established it, as the device sees it.
-    pub serial: String,
+    pub serial: Vec<u8>,
     /// The spec the device listens on, e.g. `tcp:6100`.
-    pub remote: String,
+    pub remote: Vec<u8>,
     /// The spec each connection is opened toward on the host, e.g.
     /// `tcp:6100`.
-    pub local: String,
+    pub local: Vec<u8>,
 }
 
 /// Ask the device to listen on `device_spec` and forward every
@@ -140,8 +142,9 @@ pub async fn remove_all<C: ServiceChannel>(conn: &mut C) -> Result<(), Error<C::
 ///
 /// adbd prints each rule as a `<serial> <remote> <local>` line and
 /// separates the fields with a bare space, so a space inside `local`
-/// survives and one inside `remote` does not. A listing that is not
-/// UTF-8, or a line with fewer than three fields, is
+/// survives and one inside `remote` does not. The fields are kept as
+/// bytes, so a spec that is not UTF-8 comes back like any other; a
+/// line with fewer than three fields is
 /// [`ReverseError::UnexpectedReply`].
 pub async fn list<C: ServiceChannel>(conn: &mut C) -> Result<Vec<ReverseRule>, Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:list-forward\0").await?;
@@ -233,15 +236,20 @@ fn parse_port(data: &[u8]) -> Result<Option<u16>, ReverseError> {
 
 /// The rules in a listing: one `<serial> <remote> <local>` per line.
 fn parse_listing(block: &[u8]) -> Result<Vec<ReverseRule>, ReverseError> {
-    let text = core::str::from_utf8(block).map_err(|_| ReverseError::UnexpectedReply)?;
-    text.split_terminator('\n')
+    if block.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The last line's `\n` ends it rather than opening another.
+    let lines = block.strip_suffix(b"\n").unwrap_or(block);
+    lines
+        .split(|&b| b == b'\n')
         .map(|line| {
-            let mut fields = line.splitn(3, ' ');
+            let mut fields = line.splitn(3, |&b| b == b' ');
             match (fields.next(), fields.next(), fields.next()) {
                 (Some(serial), Some(remote), Some(local)) => Ok(ReverseRule {
-                    serial: serial.to_string(),
-                    remote: remote.to_string(),
-                    local: local.to_string(),
+                    serial: serial.to_vec(),
+                    remote: remote.to_vec(),
+                    local: local.to_vec(),
                 }),
                 _ => Err(ReverseError::UnexpectedReply),
             }
@@ -339,11 +347,11 @@ mod tests {
         );
     }
 
-    fn rule(serial: &str, remote: &str, local: &str) -> ReverseRule {
+    fn rule(serial: &[u8], remote: &[u8], local: &[u8]) -> ReverseRule {
         ReverseRule {
-            serial: serial.into(),
-            remote: remote.into(),
-            local: local.into(),
+            serial: serial.to_vec(),
+            remote: remote.to_vec(),
+            local: local.to_vec(),
         }
     }
 
@@ -353,24 +361,45 @@ mod tests {
         assert_eq!(
             parse_listing(listing).unwrap(),
             [
-                rule("host-19", "tcp:6100", "tcp:6100"),
-                rule("host-19", "localabstract:a", "tcp:7"),
+                rule(b"host-19", b"tcp:6100", b"tcp:6100"),
+                rule(b"host-19", b"localabstract:a", b"tcp:7"),
             ]
         );
         assert_eq!(parse_listing(b"").unwrap(), []);
+        assert_eq!(
+            parse_listing(b"host-19 tcp:1 tcp:1").unwrap(),
+            [rule(b"host-19", b"tcp:1", b"tcp:1")],
+            "a last line without its newline"
+        );
     }
 
     #[test]
     fn a_space_in_the_last_field_stays_in_it() {
         assert_eq!(
             parse_listing(b"host-19 tcp:1 localabstract:a b\n").unwrap(),
-            [rule("host-19", "tcp:1", "localabstract:a b")]
+            [rule(b"host-19", b"tcp:1", b"localabstract:a b")]
+        );
+    }
+
+    #[test]
+    fn a_spec_that_is_not_utf8_comes_back_as_its_bytes() {
+        // One such rule used to fail the whole listing.
+        assert_eq!(
+            parse_listing(b"host-19 tcp:1 localabstract:\xff\nhost-19 tcp:2 tcp:2\n").unwrap(),
+            [
+                rule(b"host-19", b"tcp:1", b"localabstract:\xff"),
+                rule(b"host-19", b"tcp:2", b"tcp:2"),
+            ]
         );
     }
 
     #[test]
     fn a_listing_that_is_not_rules_is_an_unexpected_reply() {
-        for listing in [&b"host-19 tcp:1\n"[..], b"\n", b"host-19 tcp:1 \xff\n"] {
+        for listing in [
+            &b"host-19 tcp:1\n"[..],
+            b"\n",
+            b"host-19 tcp:1 tcp:1\n\nhost-19 tcp:2 tcp:2\n",
+        ] {
             assert_eq!(
                 parse_listing(listing),
                 Err(ReverseError::UnexpectedReply),
