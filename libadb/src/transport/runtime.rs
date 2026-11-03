@@ -7,19 +7,20 @@
 //! now chosen per call site through [`Runtime`], so enabling both
 //! features compiles and each caller says which one it means.
 //!
-//! [`Inline`] covers builds with no runtime at all: it runs blocking
-//! work on the calling thread and cannot dial TCP.
+//! [`Inline`] covers builds with no runtime at all: it dials TCP and
+//! runs blocking work on the calling thread.
 
 use core::future::Future;
 
+use crate::transport::tcp::BlockingTcp;
 use crate::transport::Splittable;
 
 /// An async runtime libadb can drive TCP and blocking work on.
 ///
-/// Implemented by the zero-sized markers `Tokio` and `Smol`, each
-/// behind its own feature. Plain code spans rather than links on
-/// purpose: a doc build with only one runtime enabled cannot resolve
-/// the other.
+/// Implemented by [`Inline`], which needs no runtime, and by the
+/// zero-sized markers `Tokio` and `Smol`, each behind its own feature.
+/// Plain code spans rather than links on purpose: a doc build with
+/// only one runtime enabled cannot resolve the other.
 ///
 /// Every method returns `impl Future + Send` rather than being an
 /// `async fn`, so generic callers keep the `Send` bound they need to
@@ -62,26 +63,31 @@ impl core::fmt::Display for BlockingError {
 
 impl core::error::Error for BlockingError {}
 
-/// Runs blocking work on the calling thread.
+/// Runs blocking work, and dials TCP, on the calling thread.
 ///
 /// The fallback for builds with no async runtime — `libadb-ffi` drives
 /// its transports on a blocking executor, where offloading would be
-/// pointless. A `rusb` transport can name it the same way
+/// pointless. Its TCP transport is [`BlockingTcp`], whose reads and
+/// writes block as well. A `rusb` transport can name it the same way
 /// (`UsbTransport<Inline>`); nothing defaults to it.
 pub struct Inline;
 
 #[allow(clippy::manual_async_fn)]
 impl Runtime for Inline {
-    type Tcp = NoTcp;
+    type Tcp = BlockingTcp;
 
     fn connect_tcp(
-        _host: &str,
-        _port: u16,
+        host: &str,
+        port: u16,
     ) -> impl Future<Output = Result<Self::Tcp, std::io::Error>> + Send {
-        core::future::ready(Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "Inline cannot dial TCP: pick a runtime such as Tokio or Smol",
-        )))
+        let host = alloc::string::String::from(host);
+        // Deferred like the other runtimes: a future nobody polls must
+        // not have dialled.
+        async move {
+            let stream = std::net::TcpStream::connect((host.as_str(), port))?;
+            stream.set_nodelay(true)?;
+            Ok(BlockingTcp::new(stream))
+        }
     }
 
     fn run_blocking<T, F>(f: F) -> impl Future<Output = Result<T, BlockingError>> + Send
@@ -92,46 +98,6 @@ impl Runtime for Inline {
         // Deferred like the other runtimes: a future nobody polls must
         // not have run the closure.
         async move { Ok(f()) }
-    }
-}
-
-/// TCP half of [`Inline`]: no values, so it can never be dialled.
-#[derive(Debug)]
-pub enum NoTcp {}
-
-impl embedded_io::ErrorType for NoTcp {
-    type Error = crate::transport::common::NoUsbError;
-}
-
-impl embedded_io_async::Read for NoTcp {
-    async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, Self::Error> {
-        match *self {}
-    }
-}
-
-impl embedded_io_async::Write for NoTcp {
-    async fn write(&mut self, _buf: &[u8]) -> Result<usize, Self::Error> {
-        match *self {}
-    }
-
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        match *self {}
-    }
-}
-
-impl Splittable for NoTcp {
-    type ReadHalf = NoTcp;
-    type WriteHalf = NoTcp;
-    fn split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self::Error> {
-        match self {}
-    }
-}
-
-// `Transport<T, U>` asks both alternatives, so a USB-only build needs
-// this the same way NoUsb provides it for the TCP-only one.
-impl crate::transport::ReadCancelSafety for NoTcp {
-    fn read_cancel_safe(&self) -> bool {
-        match *self {}
     }
 }
 
@@ -260,9 +226,40 @@ mod tests {
     }
 
     #[test]
-    fn inline_cannot_dial_tcp() {
-        let err = block_on(Inline::connect_tcp("127.0.0.1", 5555)).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+    fn inline_dials_tcp_with_nagle_off() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tcp = block_on(Inline::connect_tcp("127.0.0.1", port)).unwrap();
+        assert_eq!(tcp.get_ref().peer_addr().unwrap().port(), port);
+        assert!(
+            tcp.get_ref().nodelay().unwrap(),
+            "Nagle would hold every small packet back for an ACK"
+        );
+    }
+
+    #[test]
+    fn inline_reports_a_refused_dial() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let err = block_on(Inline::connect_tcp("127.0.0.1", port)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn inline_defers_the_dial_until_the_future_is_polled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let fut = Inline::connect_tcp("127.0.0.1", port);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "dialled before the first poll"
+        );
+        let _tcp = block_on(fut).unwrap();
+        assert!(listener.accept().is_ok());
     }
 
     #[cfg(all(feature = "tokio", feature = "smol"))]

@@ -7,9 +7,11 @@
 //!
 //! # Submodules
 //!
-//! * [`tcp`] — `TokioTcp` / `SmolTcp` aliases (features `tokio` / `smol`).
-//! * `runtime` — the [`Runtime`](runtime::Runtime) trait and its `Tokio`
-//!   / `Smol` markers, so both runtimes can be compiled in at once.
+//! * [`tcp`] — `TokioTcp` / `SmolTcp` aliases (features `tokio` / `smol`)
+//!   and `BlockingTcp`, the socket `Inline` dials (feature `split`).
+//! * `runtime` — the [`Runtime`](runtime::Runtime) trait, its `Tokio` /
+//!   `Smol` markers, so both runtimes can be compiled in at once, and
+//!   `Inline` for a build with neither.
 //! * `nusb` — `UsbTransport` and the [`UsbBackend`] marker `Nusb`
 //!   (feature `nusb`, also enabled by the `usb` convenience alias).
 //! * `rusb` — the same via libusb (feature `rusb`). Both backends can be

@@ -160,10 +160,12 @@ features = ["std"]
 [features]
 default = ["tokio"]
 # Full-duplex Reader/Writer support (the `split` module) with no
-# bundled async runtime. Pulls in `std` for its sync primitives.
+# bundled async runtime. Pulls in `std` for its sync primitives and for
+# the blocking socket the runtime-less `Inline` dials, whose errors are
+# `std::io::Error` — hence `embedded-io/std`.
 # Implied by every runtime feature below; enable it directly only for
 # runtime-less consumers (e.g. `libadb-ffi`'s blocking executor).
-split = ["dep:async-lock", "dep:event-listener", "event-listener/std"]
+split = ["dep:async-lock", "dep:event-listener", "event-listener/std", "embedded-io/std"]
 # Set by the runtimes below, never by hand: `required-features` can ask
 # for a feature but not for a choice between two, so the examples —
 # which work with either runtime — have nothing else to name.

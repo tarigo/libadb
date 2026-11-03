@@ -1,11 +1,11 @@
 use embedded_io::ErrorType;
-use embedded_io_async::{Read, Write};
 use std::io;
 use std::net::TcpStream;
 
 use libadb::transport::common::Transport;
+use libadb::transport::runtime::{Inline, Runtime};
+use libadb::transport::tcp::BlockingTcp;
 use libadb::uri::{self, Uri};
-use libadb::Splittable;
 
 // The C ABI has a single `adb_connect(uri)`, so when both backends are
 // compiled in one of them has to win: nusb, matching the `usb` alias.
@@ -23,37 +23,6 @@ type Usb = libadb::transport::rusb::UsbTransport<libadb::transport::runtime::Inl
 
 #[cfg(not(any(feature = "nusb", feature = "rusb")))]
 type Usb = libadb::transport::common::NoUsb;
-
-pub(crate) struct BlockingTcp(TcpStream);
-
-impl ErrorType for BlockingTcp {
-    type Error = io::Error;
-}
-
-impl Read for BlockingTcp {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
-        io::Read::read(&mut self.0, buf)
-    }
-}
-
-impl Write for BlockingTcp {
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
-        io::Write::write(&mut self.0, buf)
-    }
-
-    async fn flush(&mut self) -> Result<(), io::Error> {
-        io::Write::flush(&mut self.0)
-    }
-}
-
-impl Splittable for BlockingTcp {
-    type ReadHalf = BlockingTcp;
-    type WriteHalf = BlockingTcp;
-    fn split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), io::Error> {
-        let clone = self.0.try_clone()?;
-        Ok((BlockingTcp(self.0), BlockingTcp(clone)))
-    }
-}
 
 /// The TCP half: able to start TLS when the build can answer STLS.
 #[cfg(feature = "tls")]
@@ -97,12 +66,10 @@ impl core::fmt::Display for FfiConnectError {
     }
 }
 
-/// Open the socket a `tcp://` URI names, Nagle off: ADB paces itself
-/// by acknowledgements, and Nagle would hold each one back.
+/// Open the socket a `tcp://` URI names, on this thread and with Nagle
+/// off, as [`Inline`] dials it.
 pub(crate) fn connect_tcp(host: &str, port: u16) -> Result<BlockingTcp, io::Error> {
-    let stream = TcpStream::connect((host, port))?;
-    stream.set_nodelay(true)?;
-    Ok(BlockingTcp(stream))
+    crate::block_on::block_on(Inline::connect_tcp(host, port))
 }
 
 /// Open the transport `uri` names. Over `tcp://` a second handle to the
@@ -115,7 +82,7 @@ pub(crate) fn connect(uri_str: &str) -> Result<(FfiTransport, Option<TcpStream>)
     match uri {
         Uri::Tcp { host, port } => {
             let plain = connect_tcp(host, port).map_err(FfiConnectError::Tcp)?;
-            let socket = plain.0.try_clone().map_err(FfiConnectError::Tcp)?;
+            let socket = plain.get_ref().try_clone().map_err(FfiConnectError::Tcp)?;
             Ok((FfiTransport::Tcp(tcp(plain)), Some(socket)))
         }
         Uri::Usb(selector) => {
