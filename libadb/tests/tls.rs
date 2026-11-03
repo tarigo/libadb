@@ -1426,7 +1426,7 @@ async fn a_device_that_demands_tls_ends_up_connected() {
         .expect("a device that offers TLS and trusts the key connects");
 
     assert!(conn.transport().is_tls(), "the session is running");
-    assert_eq!(conn.device_banner(), Some(DEVICE_BANNER));
+    assert_eq!(conn.device_banner(), DEVICE_BANNER);
 
     let report = device.join().unwrap();
     assert_eq!(report.host_stls, (STLS_VERSION, 0), "the host mirrors the offer");

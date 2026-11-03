@@ -87,22 +87,17 @@ where
     }
 
     /// Raw device banner bytes from the CNXN handshake.
-    pub fn device_banner(&self) -> Option<&[u8]> {
-        self.shared
-            .negotiated
-            .device_banner
-            .as_ref()
-            .map(|b| b.raw())
+    pub fn device_banner(&self) -> &[u8] {
+        self.shared.negotiated.device_banner.raw()
     }
 
     /// Parsed device banner from the CNXN handshake.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.shared.negotiated.device_banner.as_ref()
+    pub fn device_banner_parsed(&self) -> &DeviceBanner {
+        &self.shared.negotiated.device_banner
     }
 
-    /// Fail with [`Error::MissingFeature`] if the device banner was
-    /// parsed and does not list `feature`. Permissive when no banner
-    /// is available.
+    /// Fail with [`Error::MissingFeature`] unless the device banner
+    /// lists `feature`.
     pub fn require_feature(
         &self,
         feature: crate::protocol::features::Feature,

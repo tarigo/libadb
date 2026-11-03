@@ -97,7 +97,7 @@ async fn a_real_key_completes_the_pubkey_handshake_with_a_verifiable_signature()
         .await
         .unwrap();
 
-    assert_eq!(conn.device_banner(), Some(DEFAULT_BANNER));
+    assert_eq!(conn.device_banner(), DEFAULT_BANNER);
 
     let session = rt::join(device).await;
     let auth = session.auth_payloads();

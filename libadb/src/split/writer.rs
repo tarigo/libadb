@@ -81,20 +81,16 @@ where
     ///
     /// Lock-free connection metadata — available even while the
     /// [`Reader`] is blocked in a read on another thread.
-    pub fn device_banner(&self) -> Option<&[u8]> {
-        self.shared
-            .negotiated
-            .device_banner
-            .as_ref()
-            .map(|b| b.raw())
+    pub fn device_banner(&self) -> &[u8] {
+        self.shared.negotiated.device_banner.raw()
     }
 
     /// Parsed device banner from the CNXN handshake.
     ///
     /// Lock-free connection metadata — available even while the
     /// [`Reader`] is blocked in a read on another thread.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.shared.negotiated.device_banner.as_ref()
+    pub fn device_banner_parsed(&self) -> &DeviceBanner {
+        &self.shared.negotiated.device_banner
     }
 
     /// Everything the handshake settled, for the crate's own helpers.

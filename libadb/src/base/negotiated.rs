@@ -44,8 +44,9 @@ pub(crate) struct Negotiated {
     pub(crate) config: ConnectionConfig,
     /// Whether both banners named delayed ACK.
     pub(crate) delayed_ack: bool,
-    /// The device's banner, parsed.
-    pub(crate) device_banner: Option<DeviceBanner>,
+    /// The device's banner, parsed: a CNXN whose banner does not parse
+    /// fails the handshake, so every connection has one.
+    pub(crate) device_banner: DeviceBanner,
 }
 
 impl Negotiated {
@@ -64,7 +65,7 @@ impl Negotiated {
             protocol_version: cnxn.arg0.min(command::ADB_VERSION),
             config,
             delayed_ack,
-            device_banner: Some(device_banner),
+            device_banner,
         })
     }
 
@@ -98,18 +99,18 @@ impl Negotiated {
         self.delayed_ack.then(|| self.config.advertised_ack_bytes())
     }
 
-    /// Whether the device listed `feature` in its banner, or `None`
-    /// when no banner was parsed.
-    pub(crate) fn advertises(&self, feature: &Feature) -> Option<bool> {
-        self.device_banner.as_ref().map(|b| b.has_feature(feature))
+    /// Whether the device listed `feature` in its banner.
+    pub(crate) fn advertises(&self, feature: &Feature) -> bool {
+        self.device_banner.has_feature(feature)
     }
 
-    /// Fail with [`Error::MissingFeature`] if the banner was parsed and
-    /// does not list `feature`; a connection without one passes.
+    /// Fail with [`Error::MissingFeature`] unless the device's banner
+    /// lists `feature`.
     pub(crate) fn require_feature<E>(&self, feature: Feature) -> Result<(), Error<E>> {
-        match self.advertises(&feature) {
-            Some(false) => Err(Error::MissingFeature(feature)),
-            _ => Ok(()),
+        if self.advertises(&feature) {
+            Ok(())
+        } else {
+            Err(Error::MissingFeature(feature))
         }
     }
 }

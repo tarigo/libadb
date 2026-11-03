@@ -197,10 +197,7 @@ async fn open_connection(
 
     eprintln!(
         "[*] connected, device: {}",
-        conn.device_banner()
-            .map(String::from_utf8_lossy)
-            .unwrap_or_default()
-            .escape_debug()
+        String::from_utf8_lossy(conn.device_banner()).escape_debug()
     );
     Ok(conn)
 }

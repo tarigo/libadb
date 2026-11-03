@@ -64,10 +64,7 @@ async fn connect(addr: &str) -> Result<Connection<Tcp>, Box<dyn std::error::Erro
     .await
     .map_err(|e| format!("connect: {e}"))?;
 
-    let banner = conn
-        .device_banner()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_default();
+    let banner = String::from_utf8_lossy(conn.device_banner());
     eprintln!("[*] connected, banner: {}", banner.escape_debug());
     Ok(conn)
 }

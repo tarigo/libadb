@@ -33,7 +33,7 @@ rt_test! {
 async fn connect_no_auth() {
     let (conn, device) = session(FakeDevice::new(), b"host::features=test", |_| async {}).await;
 
-    assert_eq!(conn.device_banner(), Some(DEFAULT_BANNER));
+    assert_eq!(conn.device_banner(), DEFAULT_BANNER);
     assert_eq!(conn.max_payload(), DEFAULT_MAX_PAYLOAD);
 
     rt::join(device).await;
@@ -47,7 +47,7 @@ async fn connect_auth_signature() {
     });
     let (conn, device) = session(dev, b"host::", |_| async {}).await;
 
-    assert_eq!(conn.device_banner(), Some(DEFAULT_BANNER));
+    assert_eq!(conn.device_banner(), DEFAULT_BANNER);
     rt::join(device).await;
 }
 }
@@ -164,7 +164,7 @@ async fn connect_auth_pubkey() {
     });
     let (conn, device) = session(dev, b"host::", |_| async {}).await;
 
-    assert_eq!(conn.device_banner(), Some(DEFAULT_BANNER));
+    assert_eq!(conn.device_banner(), DEFAULT_BANNER);
     rt::join(device).await;
 }
 }

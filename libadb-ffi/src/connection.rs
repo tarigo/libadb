@@ -420,7 +420,7 @@ pub unsafe extern "C" fn adb_connection_device_banner(
         return error::fail_invalid_arg("null handle");
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    let banner = unsafe { &*conn }.writer.device_banner().unwrap_or(&[]);
+    let banner = unsafe { &*conn }.writer.device_banner();
     // SAFETY: `buf` and `out_len` are NULL or writable as sized, per
     // `# Safety`, and `buf` cannot overlap the handle's own banner.
     unsafe { copy_out(banner, buf, buf_len, out_len) };

@@ -72,9 +72,8 @@ features! {
 
 /// Whether the device advertises `feature`.
 ///
-/// Returns `false` if `conn` is NULL, if the handshake did not
-/// produce a parseable banner, or if `feature` is not one of the
-/// `ADB_FEATURE_*` constants defined in `libadb.h`.
+/// Returns `false` if `conn` is NULL, or if `feature` is not one of
+/// the `ADB_FEATURE_*` constants defined in `libadb.h`.
 ///
 /// Does not take the read lock — safe to call while another thread is
 /// blocked in [`adb_read_channel`].
@@ -98,7 +97,7 @@ pub unsafe extern "C" fn adb_connection_has_feature(
     unsafe { &*conn }
         .writer
         .device_banner_parsed()
-        .is_some_and(|b| b.has_feature(&ff.to_feature()))
+        .has_feature(&ff.to_feature())
 }
 
 /// Wire-format name of `feature` (e.g. `"shell_v2"`) as a static
@@ -142,10 +141,7 @@ pub unsafe extern "C" fn adb_connection_features(
         return error::fail_invalid_arg("null handle");
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    let features = unsafe { &*conn }
-        .writer
-        .device_banner_parsed()
-        .map_or(&[][..], |b| b.features());
+    let features = unsafe { &*conn }.writer.device_banner_parsed().features();
     if !out_len.is_null() {
         // SAFETY: non-null, so writable per `# Safety`.
         unsafe { *out_len = features.len() };

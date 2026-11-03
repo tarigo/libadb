@@ -340,8 +340,7 @@ typedef uint32_t adb_feature_t;
 
 /*
  * Whether the device advertises `feature`. Returns false if `conn` is
- * NULL, the handshake did not yield a parseable banner, or `feature`
- * is not one of the ADB_FEATURE_* constants above.
+ * NULL or `feature` is not one of the ADB_FEATURE_* constants above.
  */
 bool adb_connection_has_feature(
     const adb_connection_t *conn,

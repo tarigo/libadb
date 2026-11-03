@@ -545,7 +545,7 @@ fn the_banner_property_cap_comes_from_the_config() {
     );
 
     let conn = connect(2).unwrap();
-    let parsed = conn.device_banner_parsed().unwrap();
+    let parsed = conn.device_banner_parsed();
     assert_eq!(parsed.product_model(), Some("b"));
 }
 

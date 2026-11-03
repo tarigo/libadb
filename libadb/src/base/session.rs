@@ -28,18 +28,18 @@ pub trait Session {
     /// Transport error carried by this session's [`Error`].
     type IoError;
 
-    /// Whether the device listed `feature` in its banner, or `None`
-    /// when no banner was parsed.
-    fn advertises(&self, feature: &Feature) -> Option<bool>;
+    /// Whether the device listed `feature` in its banner.
+    fn advertises(&self, feature: &Feature) -> bool;
 
-    /// Fail with [`Error::MissingFeature`] if the device banner was
-    /// parsed and does not list `feature`. A session without a banner
-    /// passes, as with
-    /// [`Connection::require_feature`](crate::Connection::require_feature).
+    /// Fail with [`Error::MissingFeature`] unless the device banner
+    /// lists `feature`, as
+    /// [`Connection::require_feature`](crate::Connection::require_feature)
+    /// does.
     fn require_feature(&self, feature: Feature) -> Result<(), Error<Self::IoError>> {
-        match self.advertises(&feature) {
-            Some(false) => Err(Error::MissingFeature(feature)),
-            _ => Ok(()),
+        if self.advertises(&feature) {
+            Ok(())
+        } else {
+            Err(Error::MissingFeature(feature))
         }
     }
 
@@ -102,7 +102,7 @@ where
 {
     type IoError = <T as embedded_io::ErrorType>::Error;
 
-    fn advertises(&self, feature: &Feature) -> Option<bool> {
+    fn advertises(&self, feature: &Feature) -> bool {
         self.negotiated().advertises(feature)
     }
 
@@ -150,7 +150,7 @@ where
 {
     type IoError = <WH as embedded_io::ErrorType>::Error;
 
-    fn advertises(&self, feature: &Feature) -> Option<bool> {
+    fn advertises(&self, feature: &Feature) -> bool {
         self.negotiated().advertises(feature)
     }
 

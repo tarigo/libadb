@@ -58,14 +58,13 @@ async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::E
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 
-    if let Some(banner) = conn.device_banner_parsed() {
-        if !banner.has_feature(&Feature::AbbExec) {
-            return Err(format!(
-                "device does not advertise abb_exec (features: {:?})",
-                banner.features()
-            )
-            .into());
-        }
+    let banner = conn.device_banner_parsed();
+    if !banner.has_feature(&Feature::AbbExec) {
+        return Err(format!(
+            "device does not advertise abb_exec (features: {:?})",
+            banner.features()
+        )
+        .into());
     }
 
     let mut rx = [0u8; 64 * 1024];
@@ -107,14 +106,13 @@ async fn run_stream(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error:
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 
-    if let Some(banner) = conn.device_banner_parsed() {
-        if !banner.has_feature(&Feature::Abb) {
-            return Err(format!(
-                "device does not advertise abb (features: {:?})",
-                banner.features()
-            )
-            .into());
-        }
+    let banner = conn.device_banner_parsed();
+    if !banner.has_feature(&Feature::Abb) {
+        return Err(format!(
+            "device does not advertise abb (features: {:?})",
+            banner.features()
+        )
+        .into());
     }
 
     let mut rx = [0u8; 64 * 1024];

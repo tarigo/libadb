@@ -97,23 +97,19 @@ where
     }
 
     /// Raw device banner bytes received during CNXN handshake.
-    pub fn device_banner(&self) -> Option<&[u8]> {
-        self.negotiated.device_banner.as_ref().map(|v| v.raw())
+    pub fn device_banner(&self) -> &[u8] {
+        self.negotiated.device_banner.raw()
     }
 
-    /// Parsed device banner received during CNXN handshake.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.negotiated.device_banner.as_ref()
+    /// Parsed device banner received during CNXN handshake. Every
+    /// connection has one: a banner that does not parse fails the
+    /// handshake.
+    pub fn device_banner_parsed(&self) -> &DeviceBanner {
+        &self.negotiated.device_banner
     }
 
-    /// Fail with [`Error::MissingFeature`] if the device banner was
-    /// parsed and does not list `feature`.
-    ///
-    /// Returns `Ok(())` when the device advertises `feature` or when
-    /// no parseable banner is available (e.g. custom transports that
-    /// skip the handshake) — the latter is permissive by design so
-    /// that feature checks never block a connection that lacks a
-    /// banner altogether.
+    /// Fail with [`Error::MissingFeature`] unless the device banner
+    /// lists `feature`.
     pub fn require_feature(&self, feature: Feature) -> Result<(), Error<<T as ErrorType>::Error>> {
         self.negotiated.require_feature(feature)
     }

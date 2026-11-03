@@ -63,7 +63,7 @@ pub async fn exec<S: Session>(
     args: &[&str],
     rx: &mut [u8],
 ) -> Result<Vec<u8>, Error<S::IoError>> {
-    if session.advertises(&Feature::AbbExec) == Some(true) {
+    if session.advertises(&Feature::AbbExec) {
         return abb::exec(session, args, rx).await;
     }
 
@@ -89,7 +89,7 @@ pub async fn open<'a, 'b, S: Session>(
     args: &[&str],
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
-    if session.advertises(&Feature::Abb) == Some(true) {
+    if session.advertises(&Feature::Abb) {
         return abb::open(session, args, rx).await;
     }
 
