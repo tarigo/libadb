@@ -160,7 +160,7 @@ where
         let delayed_ack = features::has_feature(banner, features::DELAYED_ACK)
             && features::has_feature(&cnxn.data, features::DELAYED_ACK);
 
-        let device_banner = Some(DeviceBanner::from_bytes(cnxn.data)?);
+        let device_banner = Some(DeviceBanner::from_bytes(cnxn.data, MAX_PROPERTIES)?);
 
         Ok(Self {
             transport,

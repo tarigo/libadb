@@ -116,7 +116,7 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) protocol_version: u32,
     pub(crate) config: ConnectionConfig,
     pub(crate) delayed_ack: bool,
-    pub(crate) device_banner: Option<DeviceBanner<MP, MF>>,
+    pub(crate) device_banner: Option<DeviceBanner>,
     pub(crate) local_id_counter: AtomicU32,
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
@@ -646,7 +646,7 @@ where
     }
 
     /// Parsed device banner from the CNXN handshake.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner<MP, MF>> {
+    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
         self.shared.device_banner.as_ref()
     }
 
@@ -1337,7 +1337,7 @@ where
     ///
     /// Lock-free connection metadata — available even while the
     /// [`Reader`] is blocked in a read on another thread.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner<MP, MF>> {
+    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
         self.shared.device_banner.as_ref()
     }
 

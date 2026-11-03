@@ -23,7 +23,6 @@ crate-type = ["rlib"]
 bytes = { version = "1", default-features = false }
 embedded-io = "0.6"
 embedded-io-async = "0.6"
-heapless = "0.9"
 log = "0.4"
 
 # Only required by the full-duplex `split` module (the `split`

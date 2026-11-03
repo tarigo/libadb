@@ -38,7 +38,7 @@ pub struct Connection<
     max_payload: u32,
     protocol_version: u32,
     config: ConnectionConfig,
-    device_banner: Option<DeviceBanner<MAX_PROPERTIES, MAX_FEATURES>>,
+    device_banner: Option<DeviceBanner>,
     local_id_counter: u32,
     delayed_ack: bool,
     recv_buf: BytesMut,
@@ -293,7 +293,7 @@ where
     }
 
     /// Parsed device banner received during CNXN handshake.
-    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner<MAX_PROPERTIES, MAX_FEATURES>> {
+    pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
         self.device_banner.as_ref()
     }
 

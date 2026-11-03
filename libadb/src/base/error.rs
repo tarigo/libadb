@@ -117,8 +117,6 @@ pub enum ProtocolError {
     InvalidBannerKeyValue,
     /// Too many properties in the device banner.
     TooManyBannerProperties,
-    /// Too many features in the device banner.
-    TooManyBannerFeatures,
     /// The device answered the handshake with `STLS`: it speaks nothing
     /// but TLS from here on.
     ///
@@ -233,7 +231,6 @@ impl fmt::Display for ProtocolError {
             Self::TooManyBannerProperties => {
                 f.write_str("too many properties in the device banner")
             }
-            Self::TooManyBannerFeatures => f.write_str("too many features in the device banner"),
         }
     }
 }
@@ -534,10 +531,6 @@ mod tests {
         assert_eq!(
             show(&ProtocolError::TooManyBannerProperties),
             "too many properties in the device banner"
-        );
-        assert_eq!(
-            show(&ProtocolError::TooManyBannerFeatures),
-            "too many features in the device banner"
         );
     }
 
