@@ -245,7 +245,7 @@ pub enum UsbConnectError {
     NoAdbInterface,
     /// Opening the device failed.
     Open(rusb::Error),
-    /// Reading a configuration descriptor failed.
+    /// Reading a device or configuration descriptor failed.
     Descriptor(rusb::Error),
     /// Reading the serial-number string descriptor failed during a
     /// [`UsbSelector::Serial`] probe.
@@ -311,11 +311,11 @@ pub fn connect_by_selector<R: Runtime>(
 ) -> Result<UsbTransport<R>, UsbConnectError> {
     let context = Context::new().map_err(UsbConnectError::Context)?;
     let devices = context.devices().map_err(UsbConnectError::Enumerate)?;
-    // libusb has kept the device descriptor in memory since 1.0.16 and
-    // no longer fails to hand it out.
-    let candidates = devices.iter().filter_map(|device| {
-        let descriptor = device.device_descriptor().ok()?;
-        Some(Candidate {
+    let candidates = devices.iter().map(|device| {
+        let descriptor = device
+            .device_descriptor()
+            .map_err(UsbConnectError::Descriptor)?;
+        Ok(Candidate {
             device,
             descriptor,
             handle: None,

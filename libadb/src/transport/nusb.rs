@@ -214,7 +214,7 @@ impl<R> crate::transport::UsbBackend<R> for Nusb {
 /// Synchronous: `nusb` enumerate/open/claim are all blocking calls.
 pub fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, UsbConnectError> {
     let devices = nusb::list_devices().map_err(UsbConnectError::Enumerate)?;
-    scan(devices, selector, |info, iface_num| {
+    scan(devices.map(Ok), selector, |info, iface_num| {
         let device = info.open().map_err(UsbConnectError::Open)?;
         let interface = device
             .claim_interface(iface_num)

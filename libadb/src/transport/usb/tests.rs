@@ -9,6 +9,7 @@ use super::*;
 enum Fail {
     NotFound,
     NoAdbInterface,
+    Ids,
     Interfaces,
     Serial,
     Open,
@@ -89,6 +90,14 @@ impl Enumerated for Dev {
 
 /// Scan that reports which device was picked, by pid.
 fn pick(devices: Vec<Dev>, selector: UsbSelector<'_>) -> Result<(u16, u8), Fail> {
+    pick_among(devices.into_iter().map(Ok).collect(), selector)
+}
+
+/// [`pick`] among devices some of which could not be read.
+fn pick_among(
+    devices: Vec<Result<Dev, Fail>>,
+    selector: UsbSelector<'_>,
+) -> Result<(u16, u8), Fail> {
     scan(devices, selector, |d, iface| Ok((d.pid, iface)))
 }
 
@@ -219,11 +228,46 @@ fn unreadable_interfaces_fail_only_a_named_device() {
     assert_eq!(pick(devices(), selector), Err(Fail::Interfaces));
 }
 
+/// A device whose IDs cannot be read could be the one wanted or any
+/// other, so no selector stops at it, a VID:PID included.
+#[test]
+fn an_unreadable_device_ends_no_scan() {
+    let devices = || {
+        vec![
+            Err(Fail::Ids),
+            Ok(Dev::new(0xbeef, 0x0001, Some(1)).with_serial("WANTED")),
+        ]
+    };
+    let named = UsbSelector::VidPid {
+        vid: 0xbeef,
+        pid: 0x0001,
+    };
+    for selector in [UsbSelector::Any, named, UsbSelector::Serial("WANTED")] {
+        assert_eq!(pick_among(devices(), selector), Ok((0x0001, 1)));
+    }
+}
+
+/// When nothing else matches, the device that could not be read is
+/// reported: it may have been the named one, so "not found" would be
+/// a guess.
+#[test]
+fn a_vid_pid_that_matches_nothing_reports_an_unreadable_device() {
+    let devices = vec![Err(Fail::Ids), Ok(Dev::new(0xf00d, 0x0002, Some(0)))];
+    let selector = UsbSelector::VidPid {
+        vid: 0xbeef,
+        pid: 0x0001,
+    };
+    assert_eq!(pick_among(devices, selector), Err(Fail::Ids));
+
+    let devices = vec![Err(Fail::Ids)];
+    assert_eq!(pick_among(devices, UsbSelector::Any), Err(Fail::Ids));
+}
+
 #[test]
 fn an_unclaimable_device_does_not_end_an_any_scan() {
     let devices = vec![
-        Dev::new(0xbeef, 0x0001, Some(0)),
-        Dev::new(0xbeef, 0x0002, Some(1)),
+        Ok(Dev::new(0xbeef, 0x0001, Some(0))),
+        Ok(Dev::new(0xbeef, 0x0002, Some(1))),
     ];
     let mut seen = 0;
     let picked = scan(devices, UsbSelector::Any, |d, iface| {
@@ -240,7 +284,7 @@ fn an_unclaimable_device_does_not_end_an_any_scan() {
 
 #[test]
 fn the_first_failure_is_reported_when_the_scan_finds_nothing_else() {
-    let devices = vec![Dev::new(0xbeef, 0x0001, Some(0))];
+    let devices = vec![Ok(Dev::new(0xbeef, 0x0001, Some(0)))];
     let picked: Result<(), _> = scan(devices, UsbSelector::Any, |_, _| Err(Fail::Open));
     assert_eq!(picked, Err(Fail::Open));
 }
@@ -248,8 +292,8 @@ fn the_first_failure_is_reported_when_the_scan_finds_nothing_else() {
 #[test]
 fn a_named_device_surfaces_its_failure_at_once() {
     let devices = vec![
-        Dev::new(0xbeef, 0x0001, Some(0)),
-        Dev::new(0xbeef, 0x0001, Some(1)),
+        Ok(Dev::new(0xbeef, 0x0001, Some(0))),
+        Ok(Dev::new(0xbeef, 0x0001, Some(1))),
     ];
     let selector = UsbSelector::VidPid {
         vid: 0xbeef,

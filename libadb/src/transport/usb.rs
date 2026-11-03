@@ -13,15 +13,16 @@ use crate::uri::UsbSelector;
 /// exercise those rules without a USB bus.
 ///
 /// The lookups grow costlier down the list, and `scan` stops at the
-/// first one that rules a device out. The IDs come with enumeration.
-/// The interfaces come from the configuration descriptor, which libusb
-/// may fail to read. The serial number is a string descriptor libusb
-/// can only read through an open handle, so [`serial`](Self::serial)
-/// takes `&mut self`: it may open the device, fail doing so, and keep
-/// the handle for `scan`'s `open` step. `scan` asks for it last, and
-/// only under [`UsbSelector::Serial`], so no other selector opens a
-/// device it will not use. A backend that has the serial from
-/// enumeration, as `nusb` does, just hands it over.
+/// first one that rules a device out. The IDs come with enumeration,
+/// and a device whose IDs could not be read reaches `scan` as an `Err`
+/// instead. The interfaces come from the configuration descriptor,
+/// which libusb may fail to read. The serial number is a string
+/// descriptor libusb can only read through an open handle, so
+/// [`serial`](Self::serial) takes `&mut self`: it may open the device,
+/// fail doing so, and keep the handle for `scan`'s `open` step. `scan`
+/// asks for it last, and only under [`UsbSelector::Serial`], so no
+/// other selector opens a device it will not use. A backend that has
+/// the serial from enumeration, as `nusb` does, just hands it over.
 pub(super) trait Enumerated {
     /// The backend's connect error, which a failed lookup reports.
     type Error: ScanError;
@@ -66,8 +67,13 @@ pub(super) fn speaks_adb(class: u8, subclass: u8, protocol: u8) -> bool {
 /// over, and the first failure is only reported if nothing else works
 /// out. Without that, a hub or a webcam enumerated ahead of the phone
 /// ends the search.
+///
+/// A device whose IDs could not be read may be any device, the one a
+/// VID:PID names included, so every selector passes it over and keeps
+/// its failure. A VID:PID that then matches nothing reports that
+/// failure rather than [`not_found`](ScanError::not_found).
 pub(super) fn scan<D, T, F>(
-    devices: impl IntoIterator<Item = D>,
+    devices: impl IntoIterator<Item = Result<D, D::Error>>,
     selector: UsbSelector<'_>,
     mut open: F,
 ) -> Result<T, D::Error>
@@ -78,7 +84,14 @@ where
     let named = matches!(selector, UsbSelector::VidPid { .. });
     let mut first_err = None;
 
-    for mut device in devices {
+    for device in devices {
+        let mut device = match device {
+            Ok(device) => device,
+            Err(e) => {
+                first_err.get_or_insert(e);
+                continue;
+            }
+        };
         let attempt = match admit(&mut device, selector) {
             Ok(Some(iface)) => open(device, iface),
             Ok(None) => continue,
