@@ -156,7 +156,7 @@ where
             self.shared.lock_channels().free(ch);
         }
         // Unregister and requeue under both locks at once, in the same
-        // staged-then-incoming order the cancel dispatch takes: a
+        // staged-then-incoming order `Shared::withdraw_open` takes: a
         // withdrawal must find the request in one collection or the
         // other, never in the gap between them.
         let mut staged = self.shared.lock_staged();

@@ -63,7 +63,8 @@ pub(crate) struct Shared<WH> {
     pub(super) signals: Box<[FlowSignal]>,
     pub(super) negotiated: Negotiated,
     pub(super) desync: DesyncFlag,
-    /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
+    /// Device-initiated OPENs awaiting [`Reader::accept_incoming`] or
+    /// [`IncomingListener::accept`], which take from the same queue.
     incoming: Mutex<IncomingQueue>,
     /// Requests staged out of the queue in an owned [`SplitIncoming`],
     /// by remote id — the only place a device cancellation can still
@@ -281,10 +282,10 @@ impl<WH> Shared<WH> {
     /// and staged requests together exceed `cap`.
     ///
     /// Popped and registered under the staged-then-incoming locks at
-    /// once, the order `Drop` and the cancel dispatch take them: a
-    /// device withdrawal racing this — `run` handles them while a
-    /// listener accepts from another task — finds the request in one
-    /// place or the other, never in between.
+    /// once, the order `Drop` and [`withdraw_open`](Self::withdraw_open)
+    /// take them: a device withdrawal racing this — `run` handles them
+    /// while a listener accepts from another task — finds the request
+    /// in one place or the other, never in between.
     pub(super) fn take_incoming_past(self: &Arc<Self>, cap: usize) -> Option<SplitIncoming<WH>>
     where
         WH: Write,
