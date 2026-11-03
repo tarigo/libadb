@@ -1,7 +1,7 @@
 //! A transport that can start TLS on itself, for ADB's `STLS`.
 //!
 //! [`MaybeTls`] sits in the TCP slot of
-//! [`Transport`], so a connection
+//! [`Transport`](crate::transport::common::Transport), so a connection
 //! keeps the same type whether or not the device asked for TLS. Before
 //! [`StartTls::start_tls`] it passes bytes straight through; after it,
 //! everything goes through `rustls`.
@@ -26,7 +26,6 @@ use core::future::Future;
 use embedded_io_async::{Read, Write};
 
 use crate::tls::TlsClientConfig;
-use crate::transport::common::Transport;
 
 mod sealed {
     pub trait Sealed {}
@@ -36,7 +35,7 @@ mod sealed {
 ///
 /// It is what [`Connection::connect_tls`](crate::Connection::connect_tls)
 /// asks of its transport: a [`MaybeTls`], or a
-/// [`Transport`] whose TCP side
+/// [`Transport`](crate::transport::common::Transport) whose TCP side
 /// is one, as
 /// [`tls_ready`](crate::transport::common::Transport::tls_ready)
 /// makes it.
@@ -57,7 +56,7 @@ pub trait StartTls: Read + Write + sealed::Sealed {
     /// the handshake, [`TlsError::Tls`] if `rustls` fails it or will
     /// not start one, and [`TlsError::Io`] or [`TlsError::WriteZero`]
     /// from the socket. Through a
-    /// [`Transport`] each comes
+    /// [`Transport`](crate::transport::common::Transport) each comes
     /// wrapped in `TransportError::Tcp`.
     ///
     /// # Cancellation
@@ -78,18 +77,4 @@ pub trait StartTls: Read + Write + sealed::Sealed {
     /// arrives as an alert on the first read. Without this, that
     /// reads as an ordinary transport failure.
     fn is_key_rejected(error: &Self::Error) -> bool;
-}
-
-impl<T: Read + Write, U> Transport<T, U> {
-    /// Wrap a TCP transport in [`MaybeTls`] so that it can start TLS
-    /// later, starting none now. A USB transport passes through as it
-    /// is: adbd never offers TLS there, and `start_tls` on it fails
-    /// with [`TlsError::NotAvailable`], wrapped in `TransportError::Tcp`
-    /// as every TLS error is.
-    pub fn tls_ready(self) -> Transport<MaybeTls<T>, U> {
-        match self {
-            Self::Tcp(t) => Transport::Tcp(MaybeTls::plain(t)),
-            Self::Usb(u) => Transport::Usb(u),
-        }
-    }
 }

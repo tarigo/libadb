@@ -1,6 +1,8 @@
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
+#[cfg(feature = "tls")]
+use crate::transport::tls::MaybeTls;
 use crate::transport::Splittable;
 
 /// A transport that is either TCP or USB.
@@ -186,6 +188,23 @@ impl<T: Splittable, U: Splittable> Splittable for Transport<T, U> {
                 let (r, w) = t.split().map_err(TransportError::Usb)?;
                 Ok((Transport::Usb(r), Transport::Usb(w)))
             }
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+impl<T: Read + Write, U> Transport<T, U> {
+    /// Wrap a TCP transport in [`MaybeTls`] so that it can start TLS
+    /// later, starting none now. A USB transport passes through as it
+    /// is: adbd never offers TLS there, and `start_tls` on it fails
+    /// with [`TlsError::NotAvailable`], wrapped in `TransportError::Tcp`
+    /// as every TLS error is.
+    ///
+    /// [`TlsError::NotAvailable`]: crate::transport::tls::TlsError::NotAvailable
+    pub fn tls_ready(self) -> Transport<MaybeTls<T>, U> {
+        match self {
+            Self::Tcp(t) => Transport::Tcp(MaybeTls::plain(t)),
+            Self::Usb(u) => Transport::Usb(u),
         }
     }
 }
