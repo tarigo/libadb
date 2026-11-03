@@ -152,7 +152,7 @@ pub use transport::uri;
 // Core types used in every non-trivial caller.
 pub use base::connection::{Connection, ConnectionConfig, HostBanner, Incoming};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
-pub use base::session::Session;
+pub use base::session::{ServiceChannel, Session};
 pub use error::{Error, ProtocolError};
 pub use transport::Splittable;
 
@@ -175,8 +175,8 @@ pub use transport::{UsbBackend, ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 /// Common vocabulary for `use libadb::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        Connection, ConnectionConfig, Error, Feature, HostBanner, ProtocolError, Session,
-        Splittable, DEFAULT_HOST_FEATURES,
+        Connection, ConnectionConfig, Error, Feature, HostBanner, ProtocolError, ServiceChannel,
+        Session, Splittable, DEFAULT_HOST_FEATURES,
     };
 
     #[cfg(feature = "keys")]

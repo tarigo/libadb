@@ -18,6 +18,7 @@ use crate::base::ids::{ChannelIds, RemoteId};
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
+use crate::base::session::ServiceChannel;
 use crate::base::slot::ChannelFault;
 use crate::base::wire::{recv_pkt, send_pkt};
 use crate::device_banner::DeviceBanner;
@@ -433,5 +434,32 @@ where
 {
     fn drop(&mut self) {
         self.shared.stop();
+    }
+}
+
+impl<RH, WH> ServiceChannel for Reader<RH, WH>
+where
+    RH: Read,
+    WH: Write<Error = <RH as ErrorType>::Error>,
+{
+    type IoError = <RH as ErrorType>::Error;
+
+    async fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> Result<ChannelId, Error<Self::IoError>> {
+        self.open_channel(dest).await
+    }
+
+    async fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<usize, Error<Self::IoError>> {
+        self.read_channel(ch, buf).await
+    }
+
+    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
+        self.close_channel(ch).await
     }
 }

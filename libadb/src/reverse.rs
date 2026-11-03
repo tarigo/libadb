@@ -28,10 +28,8 @@
 
 use alloc::vec::Vec;
 use core::fmt;
-use core::future::Future;
 
-use crate::base::channel::ChannelId;
-use crate::base::session::Session;
+use crate::base::session::ServiceChannel;
 use crate::error::{Error, ProtocolError};
 
 /// Replies are tiny (a port number, a listing); anything past this is
@@ -76,99 +74,13 @@ impl<E> From<ReverseError> for Error<E> {
     }
 }
 
-/// A connection the reverse service can drive: open a service channel,
-/// read it to close, close it back to free the slot. Implemented for
-/// every [`Session`] and for the split [`Reader`] driving its own
-/// reads, so the FFI's split halves reach it too.
-///
-/// [`Reader`]: crate::Reader
-pub trait ReverseChannel {
-    /// Transport error carried by this connection's [`Error`].
-    type IoError;
-
-    /// Open a channel to `dest` (a NUL-terminated service string).
-    fn open_service_channel(
-        &mut self,
-        dest: &[u8],
-    ) -> impl Future<Output = Result<ChannelId, Error<Self::IoError>>>;
-
-    /// Read from a channel opened by [`open_service_channel`].
-    ///
-    /// [`open_service_channel`]: Self::open_service_channel
-    fn read_service_channel(
-        &mut self,
-        ch: ChannelId,
-        buf: &mut [u8],
-    ) -> impl Future<Output = Result<usize, Error<Self::IoError>>>;
-
-    /// Send CLSE for a channel opened by [`open_service_channel`] and
-    /// free its slot.
-    ///
-    /// [`open_service_channel`]: Self::open_service_channel
-    fn close_service_channel(
-        &mut self,
-        ch: ChannelId,
-    ) -> impl Future<Output = Result<(), Error<Self::IoError>>>;
-}
-
-impl<S: Session> ReverseChannel for S {
-    type IoError = S::IoError;
-
-    async fn open_service_channel(
-        &mut self,
-        dest: &[u8],
-    ) -> Result<ChannelId, Error<Self::IoError>> {
-        self.open_channel(dest).await
-    }
-
-    async fn read_service_channel(
-        &mut self,
-        ch: ChannelId,
-        buf: &mut [u8],
-    ) -> Result<usize, Error<Self::IoError>> {
-        self.read_channel(ch, buf).await
-    }
-
-    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
-        self.close_channel(ch).await
-    }
-}
-
-#[cfg(feature = "split")]
-impl<RH, WH> ReverseChannel for crate::split::Reader<RH, WH>
-where
-    RH: embedded_io_async::Read,
-    WH: embedded_io_async::Write<Error = <RH as embedded_io::ErrorType>::Error>,
-{
-    type IoError = <RH as embedded_io::ErrorType>::Error;
-
-    async fn open_service_channel(
-        &mut self,
-        dest: &[u8],
-    ) -> Result<ChannelId, Error<Self::IoError>> {
-        self.open_channel(dest).await
-    }
-
-    async fn read_service_channel(
-        &mut self,
-        ch: ChannelId,
-        buf: &mut [u8],
-    ) -> Result<usize, Error<Self::IoError>> {
-        self.read_channel(ch, buf).await
-    }
-
-    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
-        self.close_channel(ch).await
-    }
-}
-
 /// Ask the device to listen on `device_spec` and forward every
 /// connection to a channel opened toward the host with `host_spec` as
 /// its destination.
 ///
 /// Returns the service's data bytes: for `tcp:` device specs this is
 /// the bound port in decimal (useful with `tcp:0`), empty otherwise.
-pub async fn establish<C: ReverseChannel>(
+pub async fn establish<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
     host_spec: &str,
@@ -185,7 +97,7 @@ pub async fn establish<C: ReverseChannel>(
 }
 
 /// Remove the rule listening on `device_spec`.
-pub async fn remove<C: ReverseChannel>(
+pub async fn remove<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
 ) -> Result<(), Error<C::IoError>> {
@@ -200,7 +112,7 @@ pub async fn remove<C: ReverseChannel>(
 }
 
 /// Remove every rule this connection established.
-pub async fn remove_all<C: ReverseChannel>(conn: &mut C) -> Result<(), Error<C::IoError>> {
+pub async fn remove_all<C: ServiceChannel>(conn: &mut C) -> Result<(), Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:killforward-all\0").await?;
     parse_status(&reply).map_err(Error::Reverse)?;
     Ok(())
@@ -208,7 +120,7 @@ pub async fn remove_all<C: ReverseChannel>(conn: &mut C) -> Result<(), Error<C::
 
 /// The device's current rules, as adbd prints them: lines of
 /// `<serial> <remote> <local>\n`.
-pub async fn list<C: ReverseChannel>(conn: &mut C) -> Result<Vec<u8>, Error<C::IoError>> {
+pub async fn list<C: ServiceChannel>(conn: &mut C) -> Result<Vec<u8>, Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:list-forward\0").await?;
     // The listing skips OKAY: it is just a hex4-prefixed block. A
     // failure still arrives as FAIL + hex4 + message, and the two
@@ -230,7 +142,7 @@ fn check_specs<E>(specs: &[&str]) -> Result<(), Error<E>> {
 }
 
 /// Open the service channel, read until the device closes it.
-async fn exchange<C: ReverseChannel>(
+async fn exchange<C: ServiceChannel>(
     conn: &mut C,
     dest: &[u8],
 ) -> Result<Vec<u8>, Error<C::IoError>> {

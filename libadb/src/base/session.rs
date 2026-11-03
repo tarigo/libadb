@@ -1,4 +1,6 @@
-//! [`Session`]: what the protocol helpers open their channels on.
+//! [`Session`]: what the protocol helpers open their channels on, and
+//! [`ServiceChannel`], the open-read-close part of it a one-shot
+//! service exchange needs.
 
 use core::future::Future;
 
@@ -186,5 +188,66 @@ where
 
     async fn close_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
         Self::close_channel(self, ch).await
+    }
+}
+
+/// A connection a one-shot service exchange can run on: open a service
+/// channel, read it to close, close it back to free the slot.
+///
+/// Implemented for every [`Session`], and for the split [`Reader`],
+/// which is not one: it opens, reads and closes channels but has no
+/// `write_channel`. So [`reverse`] reaches the FFI's split halves too.
+///
+/// [`Reader`]: crate::Reader
+/// [`reverse`]: crate::reverse
+pub trait ServiceChannel {
+    /// Transport error carried by this connection's [`Error`].
+    type IoError;
+
+    /// Open a channel to `dest` (a NUL-terminated service string).
+    fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> impl Future<Output = Result<ChannelId, Error<Self::IoError>>>;
+
+    /// Read from a channel opened by [`open_service_channel`].
+    ///
+    /// [`open_service_channel`]: Self::open_service_channel
+    fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> impl Future<Output = Result<usize, Error<Self::IoError>>>;
+
+    /// Send CLSE for a channel opened by [`open_service_channel`] and
+    /// free its slot.
+    ///
+    /// [`open_service_channel`]: Self::open_service_channel
+    fn close_service_channel(
+        &mut self,
+        ch: ChannelId,
+    ) -> impl Future<Output = Result<(), Error<Self::IoError>>>;
+}
+
+impl<S: Session> ServiceChannel for S {
+    type IoError = S::IoError;
+
+    async fn open_service_channel(
+        &mut self,
+        dest: &[u8],
+    ) -> Result<ChannelId, Error<Self::IoError>> {
+        self.open_channel(dest).await
+    }
+
+    async fn read_service_channel(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<usize, Error<Self::IoError>> {
+        self.read_channel(ch, buf).await
+    }
+
+    async fn close_service_channel(&mut self, ch: ChannelId) -> Result<(), Error<Self::IoError>> {
+        self.close_channel(ch).await
     }
 }
