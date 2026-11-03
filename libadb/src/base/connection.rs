@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 
 use super::channel::{
-    channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
+    channel_ids_of, dispatch_packet, slot_for_mut, Channel, ChannelId, ChannelSlot,
     DispatchOutcome, PendingAck, PendingOpen, SelectResult,
 };
 use super::device_banner::DeviceBanner;
@@ -101,15 +101,12 @@ where
             return Err(Error::NoFreeChannels);
         };
 
-        let local_id = self.conn.next_local_id();
-        let mut slot = ChannelSlot::new(local_id, self.conn.negotiated.rx_policy());
-        slot.remote_id = Some(remote);
-        slot.state = ChannelState::Open;
-        if self.conn.negotiated.delayed_ack {
-            // OPEN's arg1 is the device's receive credit — our budget.
-            slot.send_budget = i64::from(credit);
-        }
-        self.conn.channels[slot_idx] = Some(slot);
+        let ids = ChannelIds {
+            local: self.conn.next_local_id(),
+            remote,
+        };
+        let policy = self.conn.negotiated.rx_policy();
+        self.conn.channels[slot_idx] = Some(ChannelSlot::accepted(ids, credit, policy));
         // Armed for rollback until READY is committed.
         self.reserved = Some(slot_idx);
 
@@ -120,7 +117,7 @@ where
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::new(Command::Ready, local_id.raw(), remote.raw(), payload),
+            &Packet::new(Command::Ready, ids.local.raw(), ids.remote.raw(), payload),
             checksum,
         )
         .await?;
@@ -130,7 +127,7 @@ where
         self.pending.take();
         Ok(ChannelId {
             slot: slot_idx,
-            local: local_id,
+            local: ids.local,
         })
     }
 
@@ -427,7 +424,7 @@ where
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id.raw() => {
                     let remote = RemoteId::from(pkt.arg0);
-                    let mut slot = ChannelSlot::new(local_id, self.negotiated.rx_policy());
+                    let mut slot = ChannelSlot::opening(local_id, self.negotiated.rx_policy());
                     if let Err(e) = slot.accept_open_ready(remote, &pkt.data) {
                         // The device holds an end it takes for open:
                         // close it by its id.
@@ -518,20 +515,15 @@ where
         }
 
         let max = (self.negotiated.max_payload as usize).max(1);
-        let delayed_ack = self.negotiated.delayed_ack;
         let checksum = self.negotiated.checksum();
 
         let mut offset = 0;
         while offset < data.len() {
             self.wait_ack(ch).await?;
 
-            let mut n = (data.len() - offset).min(max);
-            if delayed_ack {
-                let slot = self.slot_mut(ch)?;
-                let budget = slot.send_budget.max(0) as usize;
-                n = n.min(budget);
-                debug_assert!(n > 0, "wait_ack returned with zero budget");
-            }
+            let budget = self.slot_mut(ch)?.budget().unwrap_or(0);
+            let n = (data.len() - offset).min(max).min(budget);
+            debug_assert!(n > 0, "wait_ack returned with nothing to send");
 
             let ids = self.channel_ids(ch)?;
             send_raw(
@@ -544,12 +536,7 @@ where
             )
             .await?;
 
-            let slot = self.slot_mut(ch)?;
-            if delayed_ack {
-                slot.send_budget -= n as i64;
-            } else {
-                slot.wrte_acked = false;
-            }
+            self.slot_mut(ch)?.spend(n);
             offset += n;
         }
 
@@ -730,11 +717,7 @@ where
         &mut self,
         ch: ChannelId,
     ) -> Result<&mut ChannelSlot, Error<<T as ErrorType>::Error>> {
-        self.channels
-            .get_mut(ch.slot)
-            .and_then(|s| s.as_mut())
-            .filter(|s| s.local_id == ch.local)
-            .ok_or(Error::ChannelClosed)
+        slot_for_mut(&mut self.channels, ch).ok_or(Error::ChannelClosed)
     }
 
     pub(crate) fn channel_ids(
@@ -766,15 +749,10 @@ where
     }
 
     async fn wait_ack(&mut self, ch: ChannelId) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let delayed_ack = self.negotiated.delayed_ack;
         loop {
             {
                 let slot = self.slot_mut(ch)?;
-                if delayed_ack {
-                    if slot.send_budget > 0 {
-                        return Ok(());
-                    }
-                } else if slot.wrte_acked {
+                if slot.budget().is_some() {
                     return Ok(());
                 }
                 if slot.is_closed() {
@@ -794,9 +772,6 @@ where
                 Command::Ready if pkt.arg1 == ids.local.raw() => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
                         slot.apply_ready(&pkt.data)?;
-                        if !delayed_ack {
-                            return Ok(());
-                        }
                     }
                 }
                 Command::Close if ids.closed_by(&pkt) => {

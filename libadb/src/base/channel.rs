@@ -162,21 +162,15 @@ pub(crate) fn dispatch_packet(
         // has to close like any remote CLSE — the cancel handlers only
         // reach requests still awaiting a verdict.
         let remote = RemoteId::from(pkt.arg0);
-        if pkt.arg0 != 0 {
-            for (idx, slot_opt) in channels.iter_mut().enumerate() {
-                let Some(slot) = slot_opt else { continue };
-                if slot.remote_id == Some(remote) {
-                    slot.apply_close();
-                    return DispatchOutcome::SlotClosed { idx };
-                }
-            }
+        if let Some(idx) = close_remote(channels, remote) {
+            return DispatchOutcome::SlotClosed { idx };
         }
         return DispatchOutcome::CancelPendingOpen { remote };
     }
     let remote = RemoteId::from(pkt.arg0);
     for (idx, slot_opt) in channels.iter_mut().enumerate() {
         let Some(slot) = slot_opt else { continue };
-        let ours = pkt.arg1 == slot.local_id.raw();
+        let ours = pkt.arg1 == slot.local.raw();
         match pkt.command {
             // A channel closed for a fault takes nothing more: data that
             // was still in flight would read as if no gap came before it.
@@ -217,6 +211,22 @@ pub(crate) fn dispatch_packet(
         };
     }
     DispatchOutcome::Unmatched
+}
+
+/// Close the channel whose device end is `remote`, and say which slot
+/// it was in. A zero id names no end, so it closes nothing.
+pub(crate) fn close_remote(
+    channels: &mut [Option<ChannelSlot>],
+    remote: RemoteId,
+) -> Option<usize> {
+    if remote.raw() == 0 {
+        return None;
+    }
+    let idx = channels
+        .iter()
+        .position(|s| s.as_ref().is_some_and(|s| s.remote == Some(remote)))?;
+    channels[idx].as_mut()?.apply_close();
+    Some(idx)
 }
 
 /// Result of [`Channel::select`] / [`Session::select_channel`].
@@ -274,43 +284,49 @@ pub(crate) enum ChannelState {
     Closed,
 }
 
+/// One channel's entry in the table: its ids, its state, what it has
+/// received and not handed out, and what it may still send.
 pub(crate) struct ChannelSlot {
-    pub local_id: LocalId,
+    local: LocalId,
     /// The device's end, named by the READY that opened the channel:
     /// `None` while our OPEN waits for an answer, and for good if the
     /// device refused it.
-    pub remote_id: Option<RemoteId>,
-    pub state: ChannelState,
+    remote: Option<RemoteId>,
+    state: ChannelState,
     /// How the channel acknowledges and how much it may buffer.
-    pub policy: RxPolicy,
-    pub rx_buf: BytesMut,
-    pub wrte_acked: bool,
-    pub send_budget: i64,
+    policy: RxPolicy,
+    rx_buf: BytesMut,
+    /// Without delayed ACK: whether our last WRTE has its OKAY, which
+    /// is what lets the next one go.
+    wrte_acked: bool,
+    /// With delayed ACK: the credit left to send on.
+    send_budget: i64,
     /// Bytes received for this channel that the peer has not been
     /// acknowledged for yet — the backpressure the device feels.
-    pub unacked: usize,
+    unacked: usize,
     /// Send-queue place currently allowed to reserve credit. The queue
     /// keeps concurrent `split::Writer`s in arrival order: places are
     /// handed out by [`send_enqueue`](Self::send_enqueue) and only the
     /// holder of `send_q_head` may take budget.
-    pub send_q_head: u64,
-    pub send_q_tail: u64,
+    send_q_head: u64,
+    send_q_tail: u64,
     /// Places whose writer left the queue unserved; skipped when the
     /// head reaches them. Bounded: a hole is only recorded below a
     /// place still occupied — a leaving tail reclaims itself and any
     /// holes adjacent to it — so cancellation churn cannot grow this
     /// past the caller's own peak of concurrent writers.
-    pub send_q_gone: BTreeSet<u64>,
+    send_q_gone: BTreeSet<u64>,
     /// What broke this channel, once [`fail`](Self::fail) closed it for
     /// that: its calls then fail with this rather than `ChannelClosed`.
-    pub failed: Option<ChannelFault>,
+    failed: Option<ChannelFault>,
 }
 
 impl ChannelSlot {
-    pub fn new(local_id: LocalId, policy: RxPolicy) -> Self {
+    /// A channel we opened as `local`, waiting for the device's READY.
+    pub fn opening(local: LocalId, policy: RxPolicy) -> Self {
         Self {
-            local_id,
-            remote_id: None,
+            local,
+            remote: None,
             state: ChannelState::Opening,
             policy,
             rx_buf: BytesMut::new(),
@@ -324,11 +340,24 @@ impl ChannelSlot {
         }
     }
 
+    /// A channel the device opened, which we took: open from the start.
+    /// `credit` is OPEN's `arg1`, the device's receive credit, and so
+    /// our send budget under delayed ACK.
+    pub fn accepted(ids: ChannelIds, credit: u32, policy: RxPolicy) -> Self {
+        let mut slot = Self::opening(ids.local, policy);
+        slot.remote = Some(ids.remote);
+        slot.state = ChannelState::Open;
+        if policy.ack == AckMode::Delayed {
+            slot.send_budget = i64::from(credit);
+        }
+        slot
+    }
+
     /// Both ends of the channel, once the device named its own.
     pub fn ids(&self) -> Option<ChannelIds> {
         Some(ChannelIds {
-            local: self.local_id,
-            remote: self.remote_id?,
+            local: self.local,
+            remote: self.remote?,
         })
     }
 
@@ -342,22 +371,13 @@ impl ChannelSlot {
             .map_or(Error::ChannelClosed, ChannelFault::error)
     }
 
-    /// Close this channel for `fault`. Nothing is acknowledged after
-    /// it, so the device gets no OKAY for a channel we are closing.
-    #[allow(dead_code)] // used only by split::Reader::run
-    pub fn fail(&mut self, fault: ChannelFault) {
-        self.failed = Some(fault);
-        self.state = ChannelState::Closed;
-        self.unacked = 0;
-    }
-
     /// `remote` comes from the packet: a slot still opening has none of
     /// its own yet.
     fn fault(&self, idx: usize, remote: RemoteId, fault: ChannelFault) -> DispatchOutcome {
         DispatchOutcome::ChannelFault {
             idx,
             ids: ChannelIds {
-                local: self.local_id,
+                local: self.local,
                 remote,
             },
             opening: self.state == ChannelState::Opening,
@@ -367,7 +387,7 @@ impl ChannelSlot {
 
     pub fn accept_open_ready(
         &mut self,
-        remote_id: RemoteId,
+        remote: RemoteId,
         payload: &[u8],
     ) -> Result<(), ProtocolError> {
         // Parsed first: a READY the slot cannot take leaves it as it
@@ -375,7 +395,7 @@ impl ChannelSlot {
         if self.policy.ack == AckMode::Delayed {
             self.send_budget = parse_ready_credit(payload)? as i64;
         }
-        self.remote_id = Some(remote_id);
+        self.remote = Some(remote);
         self.state = ChannelState::Open;
         Ok(())
     }
@@ -456,16 +476,6 @@ impl ChannelSlot {
         })
     }
 
-    /// Whether taking up to `want` buffered bytes now would owe the
-    /// device an OKAY — what [`take_buffered`](Self::take_buffered)
-    /// would answer, without taking anything.
-    #[allow(dead_code)] // used only by split::Shared
-    pub fn take_acks(&self, want: usize) -> bool {
-        let n = want.min(self.rx_buf.len());
-        let remaining = self.rx_buf.len() - n;
-        self.ack_len(n, remaining).is_some()
-    }
-
     /// How much taking `n` bytes acknowledges, `remaining` being what
     /// the buffer holds once they are gone. With delayed ACK, the bytes
     /// taken; without it, everything held back, once the buffer is
@@ -504,7 +514,7 @@ impl ChannelSlot {
         Ok(Some((n, self.consume(n))))
     }
 
-    pub fn push_rx(&mut self, payload: &[u8]) -> Result<(), RxOverflow> {
+    fn push_rx(&mut self, payload: &[u8]) -> Result<(), RxOverflow> {
         if self.rx_buf.len().saturating_add(payload.len()) > self.policy.rx_cap {
             return Err(RxOverflow);
         }
@@ -516,27 +526,22 @@ impl ChannelSlot {
         self.state = ChannelState::Closed;
     }
 
-    #[allow(dead_code)] // used only by split::Writer
-    pub fn try_reserve_send(&mut self, want: usize) -> Option<usize> {
+    /// How much may be sent now: `None` while we wait for the device's
+    /// OKAY; otherwise the credit left under delayed ACK, and without
+    /// it no bound but the packet size.
+    pub fn budget(&self) -> Option<usize> {
         match self.policy.ack {
-            AckMode::Delayed if self.send_budget > 0 => {
-                let n = (self.send_budget as usize).min(want);
-                self.send_budget -= n as i64;
-                Some(n)
-            }
-            AckMode::Classic if self.wrte_acked => {
-                self.wrte_acked = false;
-                Some(want)
-            }
-            _ => None,
+            AckMode::Delayed => (self.send_budget > 0).then_some(self.send_budget as usize),
+            AckMode::Classic => self.wrte_acked.then_some(usize::MAX),
         }
     }
 
-    #[allow(dead_code)] // used only by split::Writer's CreditGuard
-    pub fn refund(&mut self, n: usize) {
+    /// Account for `n` bytes sent: they come off the credit, or, without
+    /// delayed ACK, the next WRTE waits for this one's OKAY.
+    pub fn spend(&mut self, n: usize) {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget += n as i64,
-            AckMode::Classic => self.wrte_acked = true,
+            AckMode::Delayed => self.send_budget -= n as i64,
+            AckMode::Classic => self.wrte_acked = false,
         }
     }
 
@@ -593,19 +598,76 @@ impl ChannelSlot {
     }
 }
 
+/// What only the split halves ask of a slot: credit spent ahead of the
+/// send it pays for, a channel closed for a fault, and how an open that
+/// someone else dispatched went.
+#[cfg_attr(not(feature = "split"), allow(dead_code))]
+impl ChannelSlot {
+    /// Where the channel stands.
+    pub fn state(&self) -> ChannelState {
+        self.state
+    }
+
+    /// Whether a fault closed the channel, its CLSE sent with it.
+    pub fn is_failed(&self) -> bool {
+        self.failed.is_some()
+    }
+
+    /// Whether taking up to `want` buffered bytes now would owe the
+    /// device an OKAY — what [`take_buffered`](Self::take_buffered)
+    /// would answer, without taking anything.
+    pub fn take_acks(&self, want: usize) -> bool {
+        if self.rx_buf.is_empty() {
+            return false;
+        }
+        let n = want.min(self.rx_buf.len());
+        let remaining = self.rx_buf.len() - n;
+        self.ack_len(n, remaining).is_some()
+    }
+
+    /// Spend up to `want` bytes of [`budget`](Self::budget) ahead of
+    /// sending them, if there is any.
+    pub fn try_reserve_send(&mut self, want: usize) -> Option<usize> {
+        let n = self.budget()?.min(want);
+        self.spend(n);
+        Some(n)
+    }
+
+    /// Give back `n` bytes reserved for a send that never went out.
+    pub fn refund(&mut self, n: usize) {
+        match self.policy.ack {
+            AckMode::Delayed => self.send_budget += n as i64,
+            AckMode::Classic => self.wrte_acked = true,
+        }
+    }
+
+    /// Close this channel for `fault`. Nothing is acknowledged after
+    /// it, so the device gets no OKAY for a channel we are closing.
+    pub fn fail(&mut self, fault: ChannelFault) {
+        self.failed = Some(fault);
+        self.state = ChannelState::Closed;
+        self.unacked = 0;
+    }
+}
+
 pub(crate) fn channel_ids_of<E>(
     channels: &[Option<ChannelSlot>],
     ch: ChannelId,
 ) -> Result<ChannelIds, Error<E>> {
-    channels
-        .get(ch.slot)
-        .and_then(|s| s.as_ref())
-        .filter(|s| s.local_id == ch.local)
+    slot_for(channels, ch)
         .and_then(ChannelSlot::ids)
         .ok_or(Error::ChannelClosed)
 }
 
-#[allow(dead_code)] // used only by split::{CreditGuard, Reader, Writer}
+/// The slot `ch` names, unless it has been freed or reused since.
+pub(crate) fn slot_for(channels: &[Option<ChannelSlot>], ch: ChannelId) -> Option<&ChannelSlot> {
+    channels
+        .get(ch.slot)
+        .and_then(|s| s.as_ref())
+        .filter(|s| s.local == ch.local)
+}
+
+/// [`slot_for`], to change.
 pub(crate) fn slot_for_mut(
     channels: &mut [Option<ChannelSlot>],
     ch: ChannelId,
@@ -613,7 +675,20 @@ pub(crate) fn slot_for_mut(
     channels
         .get_mut(ch.slot)
         .and_then(|s| s.as_mut())
-        .filter(|s| s.local_id == ch.local)
+        .filter(|s| s.local == ch.local)
+}
+
+#[cfg(all(test, feature = "split"))]
+impl ChannelSlot {
+    /// Bytes waiting to be read.
+    pub fn buffered(&self) -> usize {
+        self.rx_buf.len()
+    }
+
+    /// Bytes the device has had no OKAY for yet.
+    pub fn unacked(&self) -> usize {
+        self.unacked
+    }
 }
 
 /// An open ADB channel tied to a [`Session`].
@@ -710,7 +785,7 @@ mod tests {
             rx_cap: usize::MAX,
             watermark: 0,
         };
-        let mut slot = ChannelSlot::new(LocalId::from(1), policy);
+        let mut slot = ChannelSlot::opening(LocalId::from(1), policy);
         let _head = slot.send_enqueue();
 
         for _ in 0..1_000 {

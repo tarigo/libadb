@@ -69,8 +69,8 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use crate::base::channel::{
-    channel_ids_of, dispatch_packet, slot_for_mut, ChannelFault, ChannelId, ChannelSlot,
-    ChannelState, DispatchOutcome, PendingAck, PendingOpen, SelectResult,
+    channel_ids_of, close_remote, dispatch_packet, slot_for, slot_for_mut, ChannelFault, ChannelId,
+    ChannelSlot, ChannelState, DispatchOutcome, PendingAck, PendingOpen, SelectResult,
 };
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
@@ -179,7 +179,7 @@ impl<WH> Shared<WH> {
                 .position(|s| s.is_none())
                 .ok_or(Error::NoFreeChannels)?;
             let id = self.next_local_id();
-            chs[idx] = Some(ChannelSlot::new(id, self.negotiated.rx_policy()));
+            chs[idx] = Some(ChannelSlot::opening(id, self.negotiated.rx_policy()));
             (idx, id)
         };
         let guard = SlotGuard::new(Arc::clone(self), slot);
@@ -220,8 +220,11 @@ impl<WH> Shared<WH> {
     {
         let found = {
             let mut chs = self.lock_channels();
-            let slot = chs[idx].as_mut().filter(|s| s.local_id == ids.local);
-            slot.map(|s| s.fail(fault)).is_some()
+            let ch = ChannelId {
+                slot: idx,
+                local: ids.local,
+            };
+            slot_for_mut(&mut chs, ch).map(|s| s.fail(fault)).is_some()
         };
         if found {
             self.signals[idx].wake();
@@ -255,7 +258,7 @@ impl<WH> Shared<WH> {
             let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
             // Nothing to take, or nothing this take acknowledges: no
             // OKAY to send, so no lock to wait for.
-            if slot.rx_buf.is_empty() || !slot.take_acks(buf.len()) {
+            if !slot.take_acks(buf.len()) {
                 let taken = slot.take_buffered(buf)?;
                 return Ok(taken.map(|(n, _)| n));
             }
@@ -466,7 +469,7 @@ impl<WH> Drop for SlotGuard<WH> {
         };
         // The device accepted before the opener gave up: its end is
         // open, and the CLSE for it is owed to whoever writes next.
-        if let Some(ids) = slot.ids().filter(|_| slot.failed.is_none()) {
+        if let Some(ids) = slot.ids().filter(|_| !slot.is_failed()) {
             self.shared.lock_owed().push(ids);
         }
     }
@@ -941,17 +944,7 @@ where
                 let mut chs = self.shared.lock_channels();
                 let staged = self.shared.lock_staged();
                 let mut incoming = self.shared.lock_incoming();
-                let mut closed = None;
-                if remote.raw() != 0 {
-                    for (idx, slot_opt) in chs.iter_mut().enumerate() {
-                        let Some(slot) = slot_opt else { continue };
-                        if slot.remote_id == Some(remote) {
-                            slot.apply_close();
-                            closed = Some(idx);
-                            break;
-                        }
-                    }
-                }
+                let closed = close_remote(&mut chs, remote);
                 if closed.is_none() {
                     incoming.retain(|p| p.remote != remote);
                     // A request staged out of the queue is cancelled
@@ -1086,16 +1079,13 @@ where
                 return Err(Error::ChannelClosed);
             }
             chs.iter().position(|s| s.is_none()).map(|idx| {
-                let local_id = shared.next_local_id();
-                let mut slot = ChannelSlot::new(local_id, shared.negotiated.rx_policy());
-                slot.remote_id = Some(remote);
-                slot.state = ChannelState::Open;
-                if shared.negotiated.delayed_ack {
-                    // OPEN's arg1 is the device's receive credit — our budget.
-                    slot.send_budget = i64::from(credit);
-                }
-                chs[idx] = Some(slot);
-                (idx, local_id)
+                let ids = ChannelIds {
+                    local: shared.next_local_id(),
+                    remote,
+                };
+                let policy = shared.negotiated.rx_policy();
+                chs[idx] = Some(ChannelSlot::accepted(ids, credit, policy));
+                (idx, ids.local)
             })
         };
         let Some((slot_idx, local_id)) = reserved else {
@@ -1310,15 +1300,15 @@ where
             let listener = signal.listen();
             {
                 let chs = self.shared.lock_channels();
-                match chs[ch.slot].as_ref() {
-                    Some(slot) if slot.local_id == ch.local => match slot.state {
+                match slot_for(&chs, ch) {
+                    Some(slot) => match slot.state() {
                         ChannelState::Opening => {}
                         // A remote id comes only with a READY the slot
                         // took: without one the device refused the OPEN,
                         // or answered it with a READY that failed the
                         // slot. With one the channel was opened, even if
                         // it has been closed since.
-                        ChannelState::Closed if slot.remote_id.is_none() => {
+                        ChannelState::Closed if slot.ids().is_none() => {
                             return Err(slot.closed_error())
                         }
                         ChannelState::Open | ChannelState::Closed => {
@@ -1326,7 +1316,7 @@ where
                             return Ok(ch);
                         }
                     },
-                    _ => return Err(Error::ChannelClosed),
+                    None => return Err(Error::ChannelClosed),
                 }
             }
             self.shared.check_live()?;
@@ -1565,7 +1555,7 @@ where
         }
         slot.try_reserve_send(want).map(|n| {
             slot.send_advance();
-            Ok((n, slot.send_budget > 0))
+            Ok((n, slot.budget().is_some()))
         })
     }
 }
@@ -1646,10 +1636,8 @@ where
     }
     {
         let mut chs = shared.lock_channels();
-        if let Some(slot) = chs.get_mut(ch.slot) {
-            if slot.as_ref().is_some_and(|s| s.local_id == ch.local) {
-                *slot = None;
-            }
+        if slot_for(&chs, ch).is_some() {
+            chs[ch.slot] = None;
         }
     }
     if let Some(signal) = shared.signals.get(ch.slot) {
@@ -1661,6 +1649,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::channel::AckDecision;
     use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
     use crate::base::mock::{
         abandon, now, okay, split_with_channel, withdraw, Mock, NoAuth, SharedMock,
@@ -2096,8 +2085,7 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(b"hello").unwrap();
-            slot.unacked = 5;
+            assert!(matches!(slot.apply_write(b"hello"), Ok(AckDecision::Hold)));
         }
         // Another task is mid-packet, so the read's OKAY has to wait.
         let wh = now(writer.shared.write_half.lock());
@@ -2113,7 +2101,7 @@ mod tests {
             let chs = writer.shared.lock_channels();
             let slot = chs[ch.slot].as_ref().unwrap();
             assert_eq!(
-                (slot.rx_buf.len(), slot.unacked),
+                (slot.buffered(), slot.unacked()),
                 (5, 5),
                 "a read dropped while waiting took the bytes"
             );
@@ -2201,8 +2189,10 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(&[0xEE; 2000]).unwrap();
-            slot.unacked = 1000;
+            // The first is acknowledged on arrival, the second takes the
+            // channel past the watermark and is held.
+            slot.apply_write(&[0xEE; 1000]).unwrap();
+            slot.apply_write(&[0xEE; 1000]).unwrap();
         }
 
         // Another task holds the write half; a small read leaves the
@@ -2211,7 +2201,7 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(now(writer.read_channel(ch, &mut buf)).unwrap(), 8);
         let chs = writer.shared.lock_channels();
-        assert_eq!(chs[ch.slot].as_ref().unwrap().unacked, 1000);
+        assert_eq!(chs[ch.slot].as_ref().unwrap().unacked(), 1000);
     }
 
     #[test]
@@ -2231,7 +2221,7 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(b"hi").unwrap();
+            slot.apply_write(b"hi").unwrap();
         }
         abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
 
