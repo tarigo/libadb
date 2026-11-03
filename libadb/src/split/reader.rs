@@ -9,7 +9,8 @@ use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
 use super::shared::{Shared, SlotGuard};
-use super::{close_channel_via, SplitIncoming};
+use super::writer::close_channel_via;
+use super::SplitIncoming;
 use crate::base::channel::{ChannelFault, ChannelId};
 use crate::base::channel_table::DispatchOutcome;
 use crate::base::connection::ConnectionConfig;
