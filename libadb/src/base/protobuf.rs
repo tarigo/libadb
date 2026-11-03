@@ -1,11 +1,21 @@
+//! The protobuf `track-app` needs: the hex length in front of each
+//! message, then varints, field keys and length-delimited fields, read
+//! straight out of a byte slice.
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
+/// Why a hex-framed protobuf message did not decode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DecodeError {
+    /// The length in front of a message is not four hex digits.
     InvalidLengthPrefix,
+    /// The message is not protobuf this reader can walk: a varint is
+    /// cut short or overlong, a length runs past the message, or a field
+    /// has a wire type it does not know.
     InvalidProtobuf,
+    /// A string field is not UTF-8.
     InvalidUtf8,
 }
 
@@ -21,6 +31,8 @@ impl core::fmt::Display for DecodeError {
 
 impl core::error::Error for DecodeError {}
 
+/// The four hex digits, of either case, that `buf` starts with, as a
+/// number; `None` if `buf` is shorter or they are not all hex.
 pub fn parse_hex4(buf: &[u8]) -> Option<u32> {
     if buf.len() < 4 {
         return None;
@@ -38,6 +50,8 @@ pub fn parse_hex4(buf: &[u8]) -> Option<u32> {
     Some(value)
 }
 
+/// The base-128 varint `buf` starts with, and the bytes it took; `None`
+/// if it is cut short or longer than ten bytes.
 pub fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
     let mut value: u64 = 0;
     let mut shift = 0;
@@ -59,6 +73,10 @@ const WIRE_FIXED64: u64 = 1;
 const WIRE_LEN_DELIMITED: u64 = 2;
 const WIRE_FIXED32: u64 = 5;
 
+/// How many bytes the body of a `wire_type` field at the start of `buf`
+/// takes, to step over a field the caller does not read; `None` if it
+/// is cut short or the wire type is not varint, 64-bit,
+/// length-delimited or 32-bit.
 pub fn skip_field(buf: &[u8], wire_type: u64) -> Option<usize> {
     match wire_type {
         WIRE_VARINT => decode_varint(buf).map(|(_, c)| c),
@@ -74,6 +92,8 @@ pub fn skip_field(buf: &[u8], wire_type: u64) -> Option<usize> {
     }
 }
 
+/// The length-delimited body `buf` starts with, and the bytes it took
+/// with its length.
 pub fn read_bytes(buf: &[u8]) -> Result<(&[u8], usize), DecodeError> {
     let (len, c) = decode_varint(buf).ok_or(DecodeError::InvalidProtobuf)?;
     let len = usize::try_from(len).map_err(|_| DecodeError::InvalidProtobuf)?;
@@ -84,26 +104,34 @@ pub fn read_bytes(buf: &[u8]) -> Result<(&[u8], usize), DecodeError> {
     Ok((&buf[c..end], end))
 }
 
+/// [`read_bytes`], checked to be UTF-8.
 pub fn read_str(buf: &[u8]) -> Result<(&str, usize), DecodeError> {
     let (bytes, consumed) = read_bytes(buf)?;
     let s = core::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)?;
     Ok((s, consumed))
 }
 
+/// [`read_str`], copied into a `String`.
 pub fn read_string(buf: &[u8]) -> Result<(String, usize), DecodeError> {
     let (s, consumed) = read_str(buf)?;
     Ok((s.into(), consumed))
 }
 
+/// [`decode_varint`], with [`DecodeError::InvalidProtobuf`] for `None`.
 pub fn read_varint(buf: &[u8]) -> Result<(u64, usize), DecodeError> {
     decode_varint(buf).ok_or(DecodeError::InvalidProtobuf)
 }
 
+/// The field key `buf` starts with: its field number, its wire type,
+/// and the bytes it took.
 pub fn read_tag(buf: &[u8]) -> Result<(u64, u64, usize), DecodeError> {
     let (tag, consumed) = decode_varint(buf).ok_or(DecodeError::InvalidProtobuf)?;
     Ok((tag >> 3, tag & 0x07, consumed))
 }
 
+/// Every length-delimited field 1 of the message `buf` holds, each
+/// decoded by `decode_entry`, with all other fields skipped: a message
+/// that is one repeated submessage, as `track-app`'s process list is.
 pub fn decode_repeated_field1<T>(
     buf: &[u8],
     mut decode_entry: impl FnMut(&[u8]) -> Result<T, DecodeError>,
