@@ -86,9 +86,31 @@ pub enum LogId {
     Security,
     Kernel,
     /// A buffer this version of libadb does not know, such as one a
-    /// newer Android added, with the number its entry header carried.
-    Unknown(u32),
+    /// newer Android added. Compare `u32::from(id)` rather than this
+    /// variant: a later libadb may name the buffer.
+    ///
+    /// ```
+    /// use libadb::logcat::LogId;
+    ///
+    /// let id = LogId::from(8);
+    /// assert!(matches!(id, LogId::Unknown(_)));
+    /// assert_eq!(u32::from(id), 8);
+    /// ```
+    ///
+    /// The number inside is private, so a known number cannot pose as an
+    /// unknown buffer, and no pattern can pick out one unknown number:
+    ///
+    /// ```compile_fail,E0423
+    /// use libadb::logcat::{LogId, UnknownLogId};
+    ///
+    /// let system = LogId::Unknown(UnknownLogId(3));
+    /// ```
+    Unknown(UnknownLogId),
 }
+
+/// The number of a buffer behind [`LogId::Unknown`], kept private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownLogId(u32);
 
 impl From<u32> for LogId {
     fn from(number: u32) -> Self {
@@ -101,7 +123,7 @@ impl From<u32> for LogId {
             5 => Self::Stats,
             6 => Self::Security,
             7 => Self::Kernel,
-            other => Self::Unknown(other),
+            _ => Self::Unknown(UnknownLogId(number)),
         }
     }
 }
@@ -117,7 +139,7 @@ impl From<LogId> for u32 {
             LogId::Stats => 5,
             LogId::Security => 6,
             LogId::Kernel => 7,
-            LogId::Unknown(other) => other,
+            LogId::Unknown(UnknownLogId(other)) => other,
         }
     }
 }
@@ -133,7 +155,7 @@ impl fmt::Display for LogId {
             Self::Stats => "stats",
             Self::Security => "security",
             Self::Kernel => "kernel",
-            Self::Unknown(other) => return write!(f, "unknown({other})"),
+            Self::Unknown(UnknownLogId(other)) => return write!(f, "unknown({other})"),
         };
         f.write_str(name)
     }
