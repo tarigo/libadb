@@ -7,6 +7,30 @@ use super::protocol::command;
 use super::protocol::features::{self, Feature};
 use super::protocol::{Checksum, Packet};
 
+/// How inbound data is acknowledged, fixed by the handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AckMode {
+    /// A window of one packet: every WRTE is answered with an empty
+    /// OKAY.
+    Classic,
+    /// Credit-based: each OKAY hands back the bytes it acknowledges.
+    Delayed,
+}
+
+/// What a channel's receive side goes by: how it acknowledges and how
+/// much unread data it may hold.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RxPolicy {
+    /// How inbound writes are acknowledged.
+    pub(crate) ack: AckMode,
+    /// Unread data a channel may hold; a WRTE past it is an overflow
+    /// rather than a bigger buffer.
+    pub(crate) rx_cap: usize,
+    /// Unread data past which a classic acknowledgement waits for a
+    /// read; see [`ConnectionConfig::rx_watermark`].
+    pub(crate) watermark: usize,
+}
+
 /// What the CNXN exchange settled: fixed once the device's CNXN is in,
 /// and the same for a [`Connection`](crate::Connection) and both of its
 /// split halves.
@@ -42,6 +66,24 @@ impl Negotiated {
             delayed_ack,
             device_banner: Some(device_banner),
         })
+    }
+
+    /// How this connection acknowledges inbound data.
+    pub(crate) fn ack_mode(&self) -> AckMode {
+        if self.delayed_ack {
+            AckMode::Delayed
+        } else {
+            AckMode::Classic
+        }
+    }
+
+    /// What every channel's receive side goes by on this connection.
+    pub(crate) fn rx_policy(&self) -> RxPolicy {
+        RxPolicy {
+            ack: self.ack_mode(),
+            rx_cap: self.config.rx_cap(),
+            watermark: self.config.rx_watermark(),
+        }
     }
 
     /// Whether outgoing packets carry a payload checksum.

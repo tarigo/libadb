@@ -15,7 +15,7 @@ use super::channel::{
 use super::device_banner::DeviceBanner;
 use super::error::Error;
 use super::ids::{ChannelIds, LocalId, RemoteId};
-use super::negotiated::Negotiated;
+use super::negotiated::{AckMode, Negotiated};
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::Checksum;
@@ -102,7 +102,7 @@ where
         };
 
         let local_id = self.conn.next_local_id();
-        let mut slot = ChannelSlot::new(local_id);
+        let mut slot = ChannelSlot::new(local_id, self.conn.negotiated.rx_policy());
         slot.remote_id = remote;
         slot.state = ChannelState::Open;
         if self.conn.negotiated.delayed_ack {
@@ -173,21 +173,18 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn dispatch_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
     channels: &mut [Option<ChannelSlot>],
     incoming: &mut VecDeque<PendingOpen>,
-    delayed_ack: bool,
-    rx_cap: usize,
-    watermark: usize,
+    mode: AckMode,
     checksum: Checksum,
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
-    match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark) {
+    match dispatch_packet(channels, &pkt) {
         DispatchOutcome::AckWrite { ack, .. } => {
-            send_okay_to(transport, desync, ack, delayed_ack, checksum).await?;
+            send_okay_to(transport, desync, ack, mode, checksum).await?;
         }
         DispatchOutcome::IncomingOpen {
             remote,
@@ -430,10 +427,8 @@ where
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id.raw() => {
                     let remote = RemoteId::from(pkt.arg0);
-                    let mut slot = ChannelSlot::new(local_id);
-                    if let Err(e) =
-                        slot.accept_open_ready(remote, &pkt.data, self.negotiated.delayed_ack)
-                    {
+                    let mut slot = ChannelSlot::new(local_id, self.negotiated.rx_policy());
+                    if let Err(e) = slot.accept_open_ready(remote, &pkt.data) {
                         // The device holds an end it takes for open:
                         // close it by its id.
                         let checksum = self.negotiated.checksum();
@@ -671,11 +666,7 @@ where
         race: bool,
     ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        let delayed_ack = self.negotiated.delayed_ack;
-        let watermark = self.negotiated.config.rx_watermark();
-        let buffered = self
-            .slot_mut(ch)?
-            .take_buffered(buf, delayed_ack, watermark)?;
+        let buffered = self.slot_mut(ch)?.take_buffered(buf)?;
         if let Some((n, ack)) = buffered {
             if let Some(ack) = ack {
                 self.send_okay(ack).await?;
@@ -684,7 +675,6 @@ where
         }
 
         let ids = self.channel_ids(ch)?;
-        let rx_cap = self.negotiated.config.rx_cap();
         let mut interrupt = pin!(interrupt);
 
         loop {
@@ -705,7 +695,7 @@ where
                     let n = buf.len().min(pkt.data.len());
                     buf[..n].copy_from_slice(&pkt.data[..n]);
                     let ack = match self.channels[ch.slot].as_mut() {
-                        Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
+                        Some(slot) => slot.deliver(&pkt.data, n)?,
                         None => None,
                     };
                     if let Some(ack) = ack {
@@ -755,31 +745,20 @@ where
     }
 
     async fn send_okay(&mut self, ack: PendingAck) -> Result<(), Error<<T as ErrorType>::Error>> {
+        let mode = self.negotiated.ack_mode();
         let checksum = self.negotiated.checksum();
-        let delayed_ack = self.negotiated.delayed_ack;
-        send_okay_to(
-            &mut self.transport,
-            &self.desync,
-            ack,
-            delayed_ack,
-            checksum,
-        )
-        .await
+        send_okay_to(&mut self.transport, &self.desync, ack, mode, checksum).await
     }
 
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let watermark = self.negotiated.config.rx_watermark();
-        let delayed_ack = self.negotiated.delayed_ack;
-        let rx_cap = self.negotiated.config.rx_cap();
+        let mode = self.negotiated.ack_mode();
         let checksum = self.negotiated.checksum();
         dispatch_to(
             &mut self.transport,
             &self.desync,
             &mut self.channels,
             &mut self.incoming,
-            delayed_ack,
-            rx_cap,
-            watermark,
+            mode,
             checksum,
             pkt,
         )
@@ -814,7 +793,7 @@ where
             match pkt.command {
                 Command::Ready if pkt.arg1 == ids.local.raw() => {
                     if let Some(slot) = self.channels[ch.slot].as_mut() {
-                        slot.apply_ready(&pkt.data, delayed_ack)?;
+                        slot.apply_ready(&pkt.data)?;
                         if !delayed_ack {
                             return Ok(());
                         }

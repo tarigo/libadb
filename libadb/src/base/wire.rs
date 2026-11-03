@@ -10,6 +10,7 @@ use embedded_io_async::{Read, Write};
 use super::channel::PendingAck;
 use super::error::{Error, ProtocolError};
 use super::ids::ChannelIds;
+use super::negotiated::AckMode;
 use super::protocol::command::Command;
 use super::protocol::constant::MAX_PAYLOAD;
 use super::protocol::Packet;
@@ -289,11 +290,14 @@ pub(crate) async fn send_okay_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
     ack: PendingAck,
-    delayed_ack: bool,
+    mode: AckMode,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
     let credit = (ack.len as u32).to_le_bytes();
-    let payload: &[u8] = if delayed_ack { &credit } else { &[] };
+    let payload: &[u8] = match mode {
+        AckMode::Delayed => &credit,
+        AckMode::Classic => &[],
+    };
     send_raw(
         transport,
         desync,

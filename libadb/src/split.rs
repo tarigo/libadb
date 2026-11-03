@@ -179,7 +179,7 @@ impl<WH> Shared<WH> {
                 .position(|s| s.is_none())
                 .ok_or(Error::NoFreeChannels)?;
             let id = self.next_local_id();
-            chs[idx] = Some(ChannelSlot::new(id));
+            chs[idx] = Some(ChannelSlot::new(id, self.negotiated.rx_policy()));
             (idx, id)
         };
         let guard = SlotGuard::new(Arc::clone(self), slot);
@@ -250,16 +250,13 @@ impl<WH> Shared<WH> {
     where
         WH: Write,
     {
-        let watermark = self.negotiated.config.rx_watermark();
         {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
             // Nothing to take, or nothing this take acknowledges: no
             // OKAY to send, so no lock to wait for.
-            if slot.rx_buf.is_empty()
-                || !slot.take_acks(buf.len(), self.negotiated.delayed_ack, watermark)
-            {
-                let taken = slot.take_buffered(buf, self.negotiated.delayed_ack, watermark)?;
+            if slot.rx_buf.is_empty() || !slot.take_acks(buf.len()) {
+                let taken = slot.take_buffered(buf)?;
                 return Ok(taken.map(|(n, _)| n));
             }
         }
@@ -267,7 +264,7 @@ impl<WH> Shared<WH> {
         let taken = {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
-            slot.take_buffered(buf, self.negotiated.delayed_ack, watermark)?
+            slot.take_buffered(buf)?
         };
         let Some((n, ack)) = taken else {
             return Ok(None);
@@ -277,7 +274,7 @@ impl<WH> Shared<WH> {
                 &mut *wh,
                 &self.desync,
                 ack,
-                self.negotiated.delayed_ack,
+                self.negotiated.ack_mode(),
                 self.negotiated.checksum(),
             )
             .await?;
@@ -294,7 +291,7 @@ impl<WH> Shared<WH> {
             &mut *wh,
             &self.desync,
             ack,
-            self.negotiated.delayed_ack,
+            self.negotiated.ack_mode(),
             self.negotiated.checksum(),
         )
         .await
@@ -505,7 +502,7 @@ impl<WH> Drop for CreditGuard<'_, WH> {
         {
             let mut chs = self.shared.lock_channels();
             if let Some(slot) = slot_for_mut(&mut chs, self.ch) {
-                slot.refund(self.n, self.shared.negotiated.delayed_ack);
+                slot.refund(self.n);
             }
         }
         if let Some(signal) = self.shared.signals.get(self.ch.slot) {
@@ -681,11 +678,7 @@ where
                     let accepted = {
                         let mut chs = self.shared.lock_channels();
                         match chs[ch.slot].as_mut() {
-                            Some(slot) => slot.accept_open_ready(
-                                remote,
-                                &pkt.data,
-                                self.shared.negotiated.delayed_ack,
-                            ),
+                            Some(slot) => slot.accept_open_ready(remote, &pkt.data),
                             None => Ok(()),
                         }
                     };
@@ -782,8 +775,6 @@ where
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
-        let delayed_ack = self.shared.negotiated.delayed_ack;
-        let watermark = self.shared.negotiated.config.rx_watermark();
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
         }
@@ -805,13 +796,7 @@ where
                     let ack = {
                         let mut chs = self.shared.lock_channels();
                         match slot_for_mut(&mut chs, ch) {
-                            Some(slot) => slot.deliver(
-                                &pkt.data,
-                                n,
-                                self.shared.negotiated.config.rx_cap(),
-                                delayed_ack,
-                                watermark,
-                            )?,
+                            Some(slot) => slot.deliver(&pkt.data, n)?,
                             None => None,
                         }
                     };
@@ -890,13 +875,7 @@ where
     ) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let outcome = {
             let mut chs = self.shared.lock_channels();
-            dispatch_packet(
-                &mut chs,
-                &pkt,
-                self.shared.negotiated.delayed_ack,
-                self.shared.negotiated.config.rx_cap(),
-                self.shared.negotiated.config.rx_watermark(),
-            )
+            dispatch_packet(&mut chs, &pkt)
         };
 
         match outcome {
@@ -1108,7 +1087,7 @@ where
             }
             chs.iter().position(|s| s.is_none()).map(|idx| {
                 let local_id = shared.next_local_id();
-                let mut slot = ChannelSlot::new(local_id);
+                let mut slot = ChannelSlot::new(local_id, shared.negotiated.rx_policy());
                 slot.remote_id = remote;
                 slot.state = ChannelState::Open;
                 if shared.negotiated.delayed_ack {
@@ -1584,11 +1563,10 @@ where
         if slot.send_turn() != place {
             return None;
         }
-        slot.try_reserve_send(want, self.shared.negotiated.delayed_ack)
-            .map(|n| {
-                slot.send_advance();
-                Ok((n, slot.send_budget > 0))
-            })
+        slot.try_reserve_send(want).map(|n| {
+            slot.send_advance();
+            Ok((n, slot.send_budget > 0))
+        })
     }
 }
 
@@ -2118,7 +2096,7 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(b"hello", usize::MAX).unwrap();
+            slot.push_rx(b"hello").unwrap();
             slot.unacked = 5;
         }
         // Another task is mid-packet, so the read's OKAY has to wait.
@@ -2223,7 +2201,7 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(&[0xEE; 2000], usize::MAX).unwrap();
+            slot.push_rx(&[0xEE; 2000]).unwrap();
             slot.unacked = 1000;
         }
 
@@ -2253,7 +2231,7 @@ mod tests {
         {
             let mut chs = writer.shared.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).unwrap();
-            slot.push_rx(b"hi", usize::MAX).unwrap();
+            slot.push_rx(b"hi").unwrap();
         }
         abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
 
@@ -2309,7 +2287,7 @@ mod send_queue_tests {
             let mut chs = writer.shared.lock_channels();
             slot_for_mut(&mut chs, ch)
                 .unwrap()
-                .apply_ready(&credit.to_le_bytes(), true)
+                .apply_ready(&credit.to_le_bytes())
                 .unwrap();
         }
         writer.shared.signals[ch.slot].wake();

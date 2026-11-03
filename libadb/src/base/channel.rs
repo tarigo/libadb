@@ -4,6 +4,7 @@ use core::future::Future;
 
 use super::error::{Error, ProtocolError, RxOverflow};
 use super::ids::{ChannelIds, LocalId, RemoteId};
+use super::negotiated::{AckMode, RxPolicy};
 use super::protocol::command::Command;
 use super::protocol::Packet;
 use super::session::Session;
@@ -129,15 +130,11 @@ pub(crate) struct PendingOpen {
     pub destination: Bytes,
 }
 
-/// `rx_cap` bounds how much unread data a single channel may accumulate;
-/// a WRTE that would push it past the cap is a
-/// [`ChannelFault::RxOverflow`] instead of growing the buffer.
+/// A WRTE that would push a channel past its receive cap is a
+/// [`ChannelFault::RxOverflow`] instead of a bigger buffer.
 pub(crate) fn dispatch_packet(
     channels: &mut [Option<ChannelSlot>],
     pkt: &Packet,
-    delayed_ack: bool,
-    rx_cap: usize,
-    watermark: usize,
 ) -> DispatchOutcome {
     // The handshake is over, so a device that opens it again, or asks
     // for TLS now, is out of turn. It is dropped like any packet nobody
@@ -187,7 +184,7 @@ pub(crate) fn dispatch_packet(
                 return DispatchOutcome::Unmatched;
             }
             Command::Write if ours => {
-                return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
+                return match slot.apply_write(&pkt.data) {
                     Ok(AckDecision::Now(ack)) => DispatchOutcome::AckWrite { idx, ack },
                     Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
                     Err(RxOverflow) => slot.fault(idx, remote, ChannelFault::RxOverflow),
@@ -195,9 +192,9 @@ pub(crate) fn dispatch_packet(
             }
             Command::Ready if ours => {
                 let granted = if slot.state == ChannelState::Opening {
-                    slot.accept_open_ready(remote, &pkt.data, delayed_ack)
+                    slot.accept_open_ready(remote, &pkt.data)
                 } else {
-                    slot.apply_ready(&pkt.data, delayed_ack)
+                    slot.apply_ready(&pkt.data)
                 };
                 return match granted {
                     Ok(()) => DispatchOutcome::CreditGranted { idx },
@@ -281,6 +278,8 @@ pub(crate) struct ChannelSlot {
     pub local_id: LocalId,
     pub remote_id: RemoteId,
     pub state: ChannelState,
+    /// How the channel acknowledges and how much it may buffer.
+    pub policy: RxPolicy,
     pub rx_buf: BytesMut,
     pub wrte_acked: bool,
     pub send_budget: i64,
@@ -305,11 +304,12 @@ pub(crate) struct ChannelSlot {
 }
 
 impl ChannelSlot {
-    pub fn new(local_id: LocalId) -> Self {
+    pub fn new(local_id: LocalId, policy: RxPolicy) -> Self {
         Self {
             local_id,
             remote_id: RemoteId::from(0),
             state: ChannelState::Opening,
+            policy,
             rx_buf: BytesMut::new(),
             wrte_acked: true,
             send_budget: 0,
@@ -365,11 +365,10 @@ impl ChannelSlot {
         &mut self,
         remote_id: RemoteId,
         payload: &[u8],
-        delayed_ack: bool,
     ) -> Result<(), ProtocolError> {
         // Parsed first: a READY the slot cannot take leaves it as it
         // was, still opening, rather than open with no budget.
-        if delayed_ack {
+        if self.policy.ack == AckMode::Delayed {
             self.send_budget = parse_ready_credit(payload)? as i64;
         }
         self.remote_id = remote_id;
@@ -377,11 +376,10 @@ impl ChannelSlot {
         Ok(())
     }
 
-    pub fn apply_ready(&mut self, payload: &[u8], delayed_ack: bool) -> Result<(), ProtocolError> {
-        if delayed_ack {
-            self.send_budget += parse_ready_credit(payload)? as i64;
-        } else {
-            self.wrte_acked = true;
+    pub fn apply_ready(&mut self, payload: &[u8]) -> Result<(), ProtocolError> {
+        match self.policy.ack {
+            AckMode::Delayed => self.send_budget += parse_ready_credit(payload)? as i64,
+            AckMode::Classic => self.wrte_acked = true,
         }
         Ok(())
     }
@@ -397,18 +395,12 @@ impl ChannelSlot {
     /// bounds what can pile up meanwhile. Without it the window is a
     /// single packet, so waiting for the read on every packet would turn
     /// the channel into a ping-pong; the acknowledgement goes out at
-    /// once while little is buffered, and is held back once `watermark`
-    /// bytes are waiting to be read.
-    pub fn apply_write(
-        &mut self,
-        payload: &[u8],
-        cap: usize,
-        delayed_ack: bool,
-        watermark: usize,
-    ) -> Result<AckDecision, RxOverflow> {
-        self.push_rx(payload, cap)?;
+    /// once while little is buffered, and is held back once the
+    /// watermark's worth of bytes is waiting to be read.
+    pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, RxOverflow> {
+        self.push_rx(payload)?;
         self.unacked = self.unacked.saturating_add(payload.len());
-        if !delayed_ack && self.rx_buf.len() < watermark {
+        if self.policy.ack == AckMode::Classic && self.rx_buf.len() < self.policy.watermark {
             self.unacked = 0;
             return Ok(AckDecision::Now(self.ack(payload.len())));
         }
@@ -421,18 +413,15 @@ impl ChannelSlot {
         &mut self,
         payload: &[u8],
         taken: usize,
-        cap: usize,
-        delayed_ack: bool,
-        watermark: usize,
     ) -> Result<Option<PendingAck>, RxOverflow> {
         if taken < payload.len() {
-            self.push_rx(&payload[taken..], cap)?;
+            self.push_rx(&payload[taken..])?;
             self.unacked = self.unacked.saturating_add(payload.len() - taken);
         }
-        if delayed_ack {
+        if self.policy.ack == AckMode::Delayed {
             return Ok((taken > 0).then(|| self.ack(taken)));
         }
-        if self.rx_buf.len() >= watermark {
+        if self.rx_buf.len() >= self.policy.watermark {
             return Ok(None);
         }
         let len = core::mem::take(&mut self.unacked);
@@ -441,8 +430,8 @@ impl ChannelSlot {
 
     /// Record that the application took `n` bytes, and say what to
     /// acknowledge as a result.
-    pub fn consume(&mut self, n: usize, delayed_ack: bool, watermark: usize) -> Option<PendingAck> {
-        let len = self.ack_len(n, self.rx_buf.len(), delayed_ack, watermark)?;
+    pub fn consume(&mut self, n: usize) -> Option<PendingAck> {
+        let len = self.ack_len(n, self.rx_buf.len())?;
         self.unacked -= len;
         Some(self.ack(len))
     }
@@ -459,31 +448,27 @@ impl ChannelSlot {
     /// device an OKAY — what [`take_buffered`](Self::take_buffered)
     /// would answer, without taking anything.
     #[allow(dead_code)] // used only by split::Shared
-    pub fn take_acks(&self, want: usize, delayed_ack: bool, watermark: usize) -> bool {
+    pub fn take_acks(&self, want: usize) -> bool {
         let n = want.min(self.rx_buf.len());
         let remaining = self.rx_buf.len() - n;
-        self.ack_len(n, remaining, delayed_ack, watermark).is_some()
+        self.ack_len(n, remaining).is_some()
     }
 
     /// How much taking `n` bytes acknowledges, `remaining` being what
     /// the buffer holds once they are gone. With delayed ACK, the bytes
     /// taken; without it, everything held back, once the buffer is
-    /// below `watermark` again.
-    fn ack_len(
-        &self,
-        n: usize,
-        remaining: usize,
-        delayed_ack: bool,
-        watermark: usize,
-    ) -> Option<usize> {
+    /// below the watermark again.
+    fn ack_len(&self, n: usize, remaining: usize) -> Option<usize> {
         if self.unacked == 0 {
             return None;
         }
-        if delayed_ack {
-            let len = n.min(self.unacked);
-            return (len > 0).then_some(len);
+        match self.policy.ack {
+            AckMode::Delayed => {
+                let len = n.min(self.unacked);
+                (len > 0).then_some(len)
+            }
+            AckMode::Classic => (remaining < self.policy.watermark).then_some(self.unacked),
         }
-        (remaining < watermark).then_some(self.unacked)
     }
 
     /// Copy buffered bytes into `buf`, and say what to acknowledge for
@@ -493,8 +478,6 @@ impl ChannelSlot {
     pub fn take_buffered<E>(
         &mut self,
         buf: &mut [u8],
-        delayed_ack: bool,
-        watermark: usize,
     ) -> Result<Option<(usize, Option<PendingAck>)>, Error<E>> {
         if self.rx_buf.is_empty() {
             return if self.is_closed() {
@@ -506,11 +489,11 @@ impl ChannelSlot {
         let n = buf.len().min(self.rx_buf.len());
         buf[..n].copy_from_slice(&self.rx_buf[..n]);
         self.rx_buf.advance(n);
-        Ok(Some((n, self.consume(n, delayed_ack, watermark))))
+        Ok(Some((n, self.consume(n))))
     }
 
-    pub fn push_rx(&mut self, payload: &[u8], cap: usize) -> Result<(), RxOverflow> {
-        if self.rx_buf.len().saturating_add(payload.len()) > cap {
+    pub fn push_rx(&mut self, payload: &[u8]) -> Result<(), RxOverflow> {
+        if self.rx_buf.len().saturating_add(payload.len()) > self.policy.rx_cap {
             return Err(RxOverflow);
         }
         self.rx_buf.extend_from_slice(payload);
@@ -522,26 +505,26 @@ impl ChannelSlot {
     }
 
     #[allow(dead_code)] // used only by split::Writer
-    pub fn try_reserve_send(&mut self, want: usize, delayed_ack: bool) -> Option<usize> {
-        if delayed_ack {
-            if self.send_budget > 0 {
+    pub fn try_reserve_send(&mut self, want: usize) -> Option<usize> {
+        match self.policy.ack {
+            AckMode::Delayed if self.send_budget > 0 => {
                 let n = (self.send_budget as usize).min(want);
                 self.send_budget -= n as i64;
-                return Some(n);
+                Some(n)
             }
-        } else if self.wrte_acked {
-            self.wrte_acked = false;
-            return Some(want);
+            AckMode::Classic if self.wrte_acked => {
+                self.wrte_acked = false;
+                Some(want)
+            }
+            _ => None,
         }
-        None
     }
 
     #[allow(dead_code)] // used only by split::Writer's CreditGuard
-    pub fn refund(&mut self, n: usize, delayed_ack: bool) {
-        if delayed_ack {
-            self.send_budget += n as i64;
-        } else {
-            self.wrte_acked = true;
+    pub fn refund(&mut self, n: usize) {
+        match self.policy.ack {
+            AckMode::Delayed => self.send_budget += n as i64,
+            AckMode::Classic => self.wrte_acked = true,
         }
     }
 
@@ -706,10 +689,16 @@ impl<S: Session> Channel<'_, S> {
 mod tests {
     use super::ChannelSlot;
     use crate::base::ids::LocalId;
+    use crate::base::negotiated::{AckMode, RxPolicy};
 
     #[test]
     fn cancellation_churn_behind_a_blocked_head_does_not_accumulate() {
-        let mut slot = ChannelSlot::new(LocalId::from(1));
+        let policy = RxPolicy {
+            ack: AckMode::Delayed,
+            rx_cap: usize::MAX,
+            watermark: 0,
+        };
+        let mut slot = ChannelSlot::new(LocalId::from(1), policy);
         let _head = slot.send_enqueue();
 
         for _ in 0..1_000 {
