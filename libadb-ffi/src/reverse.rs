@@ -5,8 +5,8 @@ use core::ffi::{c_char, CStr};
 use libadb::reverse;
 
 use crate::connection::adb_connection_t;
-use crate::copy_out;
 use crate::error::{self, AdbStatus};
+use crate::slice::copy_out;
 
 /// Establish a reverse forward: the device listens on `device_spec`
 /// and opens a channel toward the host for each connection, with

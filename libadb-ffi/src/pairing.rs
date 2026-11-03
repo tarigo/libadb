@@ -140,6 +140,6 @@ pub unsafe extern "C" fn adb_pair(
     // The device has the key and is closing its port; a close_notify
     // is a courtesy, and nothing here depends on it going out.
     let _ = crate::block_on::block_on(transport.shutdown());
-    crate::copy_out(paired.guid.as_bytes(), guid, guid_cap, out_guid_len);
+    crate::slice::copy_out(paired.guid.as_bytes(), guid, guid_cap, out_guid_len);
     AdbStatus::Ok
 }

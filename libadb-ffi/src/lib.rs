@@ -56,8 +56,6 @@ mod shell;
 mod slice;
 mod transport;
 
-use core::ptr;
-
 pub use auth::{adb_authenticator_t, AdbSignFn};
 // Also reachable through the C ABI; re-exported so Rust consumers of the
 // rlib — the crate's own integration tests among them — can name them.
@@ -82,16 +80,3 @@ pub use shell::{
     adb_shell_close, adb_shell_close_stdin, adb_shell_free, adb_shell_open, adb_shell_read_frame,
     adb_shell_set_window_size, adb_shell_t, adb_shell_write_stdin,
 };
-
-/// Copy `src` into `(buf, buf_len)`, truncating, and report the full
-/// length through `out_len`. The buffer-only conventions match
-/// [`adb_connection_features`].
-unsafe fn copy_out(src: &[u8], buf: *mut u8, buf_len: usize, out_len: *mut usize) {
-    if !out_len.is_null() {
-        *out_len = src.len();
-    }
-    if !buf.is_null() && buf_len > 0 {
-        let n = src.len().min(buf_len);
-        ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
-    }
-}

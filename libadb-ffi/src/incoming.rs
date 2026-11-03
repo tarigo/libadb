@@ -3,8 +3,8 @@
 
 use crate::channel::encode_channel_id;
 use crate::connection::{adb_connection_t, lock_poisoned};
-use crate::copy_out;
 use crate::error::{self, AdbStatus};
+use crate::slice::copy_out;
 
 /// Report the staged device-initiated channel (`adb reverse` traffic),
 /// waiting for one to arrive if none is staged, and copy its

@@ -36,3 +36,18 @@ pub(crate) unsafe fn from_mut_ptr<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] 
         unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 }
+
+/// Copy `src` into `(buf, buf_len)`, truncating, and report the full
+/// length through `out_len`. The buffer-only conventions match
+/// [`adb_connection_features`].
+///
+/// [`adb_connection_features`]: crate::adb_connection_features
+pub(crate) unsafe fn copy_out(src: &[u8], buf: *mut u8, buf_len: usize, out_len: *mut usize) {
+    if !out_len.is_null() {
+        *out_len = src.len();
+    }
+    if !buf.is_null() && buf_len > 0 {
+        let n = src.len().min(buf_len);
+        core::ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
+    }
+}
