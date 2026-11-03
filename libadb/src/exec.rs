@@ -23,7 +23,7 @@
 //!
 //! Zero-alloc: [`Exec`] wraps an open [`Channel`](crate::channel::Channel)
 //! and all destination strings and output bytes land in caller-provided
-//! byte slices. Use [`open`] for streaming use and [`run`] for a
+//! byte slices. Use [`open`] for streaming use and [`exec()`] for a
 //! one-shot command that collects output into a single caller-owned
 //! buffer.
 
@@ -77,7 +77,7 @@ pub async fn open<'a, S: Session>(
 /// Note: `exec:` provides no exit code. If the caller needs one, use
 /// [`shell::v2::exec`](crate::shell::v2::exec) on devices that advertise
 /// the `shell_v2` feature.
-pub async fn run<S: Session>(
+pub async fn exec<S: Session>(
     session: &mut S,
     command: &str,
     buf: &mut [u8],

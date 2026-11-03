@@ -331,7 +331,7 @@ async fn read_partial_buffer() {
 // ---------------------------------------------------------------------------
 
 rt_test! {
-async fn exec_run_collects_output_until_channel_close() {
+async fn exec_exec_collects_output_until_channel_close() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"exec:cat /data/file\0").await;
         ch.send_write(b"hello ").await;
@@ -343,7 +343,7 @@ async fn exec_run_collects_output_until_channel_close() {
     .await;
 
     let mut buf = [0u8; 128];
-    let n = exec::run(&mut conn, "cat /data/file", &mut buf).await.unwrap();
+    let n = exec::exec(&mut conn, "cat /data/file", &mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"hello world");
 
     rt::join(device).await;
@@ -351,7 +351,7 @@ async fn exec_run_collects_output_until_channel_close() {
 }
 
 rt_test! {
-async fn exec_run_with_empty_command_opens_default_shell() {
+async fn exec_exec_with_empty_command_opens_default_shell() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"exec:\0").await;
         ch.send_close().await;
@@ -359,7 +359,7 @@ async fn exec_run_with_empty_command_opens_default_shell() {
     .await;
 
     let mut buf = [0u8; 64];
-    let n = exec::run(&mut conn, "", &mut buf).await.unwrap();
+    let n = exec::exec(&mut conn, "", &mut buf).await.unwrap();
     assert_eq!(n, 0);
 
     rt::join(device).await;
@@ -367,7 +367,7 @@ async fn exec_run_with_empty_command_opens_default_shell() {
 }
 
 rt_test! {
-async fn exec_run_returns_buffer_full_when_output_exceeds_capacity() {
+async fn exec_exec_returns_buffer_full_when_output_exceeds_capacity() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"exec:yes\0").await;
         ch.send_write(&[b'y'; 16]).await;
@@ -383,7 +383,7 @@ async fn exec_run_returns_buffer_full_when_output_exceeds_capacity() {
     .await;
 
     let mut buf = [0u8; 32];
-    let err = exec::run(&mut conn, "yes", &mut buf).await.unwrap_err();
+    let err = exec::exec(&mut conn, "yes", &mut buf).await.unwrap_err();
     assert!(matches!(err, Error::ReceiveBufferFull));
 
     rt::within("the device waiting for our CLSE", rt::join(device)).await;

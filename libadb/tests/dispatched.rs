@@ -238,7 +238,7 @@ async fn exec_select_reports_the_interrupt_and_then_the_data() {
 }
 
 rt_test! {
-async fn exec_run_collects_output_over_the_writer() {
+async fn exec_exec_collects_output_over_the_writer() {
     let (conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"exec:cat /data/file\0").await;
         ch.send_write(b"hello").await;
@@ -250,7 +250,7 @@ async fn exec_run_collects_output_over_the_writer() {
     let _driver = rt::spawn(reader.run());
 
     let mut buf = [0u8; 64];
-    let n = exec::run(&mut writer, "cat /data/file", &mut buf).await.unwrap();
+    let n = exec::exec(&mut writer, "cat /data/file", &mut buf).await.unwrap();
     assert_eq!(&buf[..n], b"hello");
     rt::join(device).await;
 }
@@ -354,7 +354,7 @@ async fn a_helper_fails_with_disconnected_once_reception_ends() {
     rt::join(rt::spawn(reader.run())).await.unwrap_err();
 
     let mut buf = [0u8; 16];
-    let err = exec::run(&mut writer, "true", &mut buf).await.unwrap_err();
+    let err = exec::exec(&mut writer, "true", &mut buf).await.unwrap_err();
     assert!(matches!(err, Error::Disconnected), "got {err:?}");
 }
 }
