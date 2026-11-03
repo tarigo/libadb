@@ -132,6 +132,35 @@ fn an_interrupt_that_is_already_due_wins_on_either_transport() {
     }
 }
 
+#[test]
+fn a_read_after_an_interrupt_mid_packet_finishes_that_packet() {
+    // Seven bytes a read: four reads bring the header and "hell", and
+    // the interrupt comes due before the fifth.
+    for lossy in [false, true] {
+        let (mut conn, ch) = connected_for_select(|m| {
+            m.drips(7);
+            if lossy {
+                m.loses_cancelled_reads();
+            }
+        });
+
+        let out = now(conn.select_channel(ch, &mut [0u8; 32], ready_on_poll(5))).unwrap();
+        assert!(
+            matches!(out, SelectResult::Interrupted("interrupted")),
+            "lossy={lossy}: expected the interrupt, got {out:?}"
+        );
+        let held = conn.recv_buf.len();
+        assert!(
+            0 < held && held < 24 + 5,
+            "lossy={lossy}: the interrupt has to land mid-packet, {held} bytes were in"
+        );
+
+        let mut buf = [0u8; 32];
+        let n = now(conn.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello", "lossy={lossy}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Acknowledging what was consumed, not what arrived
 // ---------------------------------------------------------------------------
