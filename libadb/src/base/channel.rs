@@ -165,7 +165,7 @@ pub(crate) fn dispatch_packet(
         if pkt.arg0 != 0 {
             for (idx, slot_opt) in channels.iter_mut().enumerate() {
                 let Some(slot) = slot_opt else { continue };
-                if slot.remote_id == remote {
+                if slot.remote_id == Some(remote) {
                     slot.apply_close();
                     return DispatchOutcome::SlotClosed { idx };
                 }
@@ -276,7 +276,10 @@ pub(crate) enum ChannelState {
 
 pub(crate) struct ChannelSlot {
     pub local_id: LocalId,
-    pub remote_id: RemoteId,
+    /// The device's end, named by the READY that opened the channel:
+    /// `None` while our OPEN waits for an answer, and for good if the
+    /// device refused it.
+    pub remote_id: Option<RemoteId>,
     pub state: ChannelState,
     /// How the channel acknowledges and how much it may buffer.
     pub policy: RxPolicy,
@@ -307,7 +310,7 @@ impl ChannelSlot {
     pub fn new(local_id: LocalId, policy: RxPolicy) -> Self {
         Self {
             local_id,
-            remote_id: RemoteId::from(0),
+            remote_id: None,
             state: ChannelState::Opening,
             policy,
             rx_buf: BytesMut::new(),
@@ -321,11 +324,12 @@ impl ChannelSlot {
         }
     }
 
-    pub fn channel_ids(&self) -> ChannelIds {
-        ChannelIds {
+    /// Both ends of the channel, once the device named its own.
+    pub fn ids(&self) -> Option<ChannelIds> {
+        Some(ChannelIds {
             local: self.local_id,
-            remote: self.remote_id,
-        }
+            remote: self.remote_id?,
+        })
     }
 
     pub fn is_closed(&self) -> bool {
@@ -371,7 +375,7 @@ impl ChannelSlot {
         if self.policy.ack == AckMode::Delayed {
             self.send_budget = parse_ready_credit(payload)? as i64;
         }
-        self.remote_id = remote_id;
+        self.remote_id = Some(remote_id);
         self.state = ChannelState::Open;
         Ok(())
     }
@@ -401,8 +405,10 @@ impl ChannelSlot {
         self.push_rx(payload)?;
         self.unacked = self.unacked.saturating_add(payload.len());
         if self.policy.ack == AckMode::Classic && self.rx_buf.len() < self.policy.watermark {
-            self.unacked = 0;
-            return Ok(AckDecision::Now(self.ack(payload.len())));
+            if let Some(ack) = self.ack(payload.len()) {
+                self.unacked = 0;
+                return Ok(AckDecision::Now(ack));
+            }
         }
         Ok(AckDecision::Hold)
     }
@@ -419,29 +425,35 @@ impl ChannelSlot {
             self.unacked = self.unacked.saturating_add(payload.len() - taken);
         }
         if self.policy.ack == AckMode::Delayed {
-            return Ok((taken > 0).then(|| self.ack(taken)));
+            return Ok(self.ack(taken).filter(|ack| ack.len > 0));
         }
         if self.rx_buf.len() >= self.policy.watermark {
             return Ok(None);
         }
-        let len = core::mem::take(&mut self.unacked);
-        Ok(Some(self.ack(len)))
+        let Some(ack) = self.ack(self.unacked) else {
+            return Ok(None);
+        };
+        self.unacked = 0;
+        Ok(Some(ack))
     }
 
     /// Record that the application took `n` bytes, and say what to
     /// acknowledge as a result.
     pub fn consume(&mut self, n: usize) -> Option<PendingAck> {
         let len = self.ack_len(n, self.rx_buf.len())?;
+        let ack = self.ack(len)?;
         self.unacked -= len;
-        Some(self.ack(len))
+        Some(ack)
     }
 
-    /// The OKAY for `len` bytes on this channel.
-    fn ack(&self, len: usize) -> PendingAck {
-        PendingAck {
-            ids: self.channel_ids(),
+    /// The OKAY for `len` bytes on this channel. `None` until the
+    /// device has named its end: the acknowledgement waits until there
+    /// is one to address it to.
+    fn ack(&self, len: usize) -> Option<PendingAck> {
+        Some(PendingAck {
+            ids: self.ids()?,
             len,
-        }
+        })
     }
 
     /// Whether taking up to `want` buffered bytes now would owe the
@@ -589,7 +601,7 @@ pub(crate) fn channel_ids_of<E>(
         .get(ch.slot)
         .and_then(|s| s.as_ref())
         .filter(|s| s.local_id == ch.local)
-        .map(ChannelSlot::channel_ids)
+        .and_then(ChannelSlot::ids)
         .ok_or(Error::ChannelClosed)
 }
 

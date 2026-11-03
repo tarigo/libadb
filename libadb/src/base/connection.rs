@@ -103,7 +103,7 @@ where
 
         let local_id = self.conn.next_local_id();
         let mut slot = ChannelSlot::new(local_id, self.conn.negotiated.rx_policy());
-        slot.remote_id = remote;
+        slot.remote_id = Some(remote);
         slot.state = ChannelState::Open;
         if self.conn.negotiated.delayed_ack {
             // OPEN's arg1 is the device's receive credit — our budget.

@@ -466,8 +466,8 @@ impl<WH> Drop for SlotGuard<WH> {
         };
         // The device accepted before the opener gave up: its end is
         // open, and the CLSE for it is owed to whoever writes next.
-        if slot.remote_id.raw() != 0 && slot.failed.is_none() {
-            self.shared.lock_owed().push(slot.channel_ids());
+        if let Some(ids) = slot.ids().filter(|_| slot.failed.is_none()) {
+            self.shared.lock_owed().push(ids);
         }
     }
 }
@@ -945,7 +945,7 @@ where
                 if remote.raw() != 0 {
                     for (idx, slot_opt) in chs.iter_mut().enumerate() {
                         let Some(slot) = slot_opt else { continue };
-                        if slot.remote_id == remote {
+                        if slot.remote_id == Some(remote) {
                             slot.apply_close();
                             closed = Some(idx);
                             break;
@@ -1088,7 +1088,7 @@ where
             chs.iter().position(|s| s.is_none()).map(|idx| {
                 let local_id = shared.next_local_id();
                 let mut slot = ChannelSlot::new(local_id, shared.negotiated.rx_policy());
-                slot.remote_id = remote;
+                slot.remote_id = Some(remote);
                 slot.state = ChannelState::Open;
                 if shared.negotiated.delayed_ack {
                     // OPEN's arg1 is the device's receive credit — our budget.
@@ -1318,7 +1318,7 @@ where
                         // or answered it with a READY that failed the
                         // slot. With one the channel was opened, even if
                         // it has been closed since.
-                        ChannelState::Closed if slot.remote_id.raw() == 0 => {
+                        ChannelState::Closed if slot.remote_id.is_none() => {
                             return Err(slot.closed_error())
                         }
                         ChannelState::Open | ChannelState::Closed => {
