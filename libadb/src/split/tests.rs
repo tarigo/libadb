@@ -2,7 +2,6 @@
 //! channels and back-pressure each in a module of its own.
 
 use super::*;
-use crate::base::channel::{AckDecision, ChannelFault};
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::error::Error;
 use crate::base::ids::{ChannelIds, LocalId, RemoteId};
@@ -11,6 +10,7 @@ use crate::base::mock::{
 };
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
+use crate::base::slot::{AckDecision, ChannelFault};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;

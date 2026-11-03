@@ -46,4 +46,5 @@ pub mod protocol;
 pub(crate) mod recv_buf;
 pub(crate) mod send_queue;
 pub mod session;
+pub(crate) mod slot;
 pub(crate) mod wire;

@@ -5,7 +5,7 @@ use core::pin::pin;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
-use super::channel::{Channel, ChannelId, ChannelSlot, PendingAck, SelectResult};
+use super::channel::{Channel, ChannelId, SelectResult};
 use super::channel_table::{ChannelTable, DispatchOutcome};
 use super::device_banner::DeviceBanner;
 use super::error::Error;
@@ -15,6 +15,7 @@ use super::negotiated::Negotiated;
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::Packet;
+use super::slot::{ChannelSlot, PendingAck};
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
 pub use banner::HostBanner;
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};

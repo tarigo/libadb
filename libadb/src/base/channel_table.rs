@@ -4,12 +4,13 @@
 use alloc::boxed::Box;
 use bytes::Bytes;
 
-use super::channel::{AckDecision, ChannelFault, ChannelId, ChannelSlot, ChannelState, PendingAck};
+use super::channel::ChannelId;
 use super::error::{Error, NoFreeChannels, RxOverflow};
 use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::RxPolicy;
 use super::protocol::command::Command;
 use super::protocol::Packet;
+use super::slot::{AckDecision, ChannelFault, ChannelSlot, ChannelState, PendingAck};
 
 /// What a packet did to the channel table, and what is left for
 /// whoever dispatched it to do. The slot indices and a fault's ids are

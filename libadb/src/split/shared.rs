@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::SplitIncoming;
-use crate::base::channel::{ChannelFault, ChannelId, PendingAck};
+use crate::base::channel::ChannelId;
 use crate::base::channel_table::ChannelTable;
 use crate::base::error::Error;
 use crate::base::ids::{ChannelIds, RemoteId};
@@ -22,6 +22,7 @@ use crate::base::incoming::{IncomingQueue, PendingOpen};
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
+use crate::base::slot::{ChannelFault, PendingAck};
 use crate::base::wire::{send_okay_to, send_pkt, DesyncFlag};
 
 #[cfg(doc)]

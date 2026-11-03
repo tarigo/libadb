@@ -13,13 +13,14 @@ use event_listener::EventListener;
 
 use super::shared::{CreditGuard, QueueGuard, Shared, SlotGuard};
 use super::IncomingListener;
-use crate::base::channel::{ChannelId, ChannelState, SelectResult};
+use crate::base::channel::{ChannelId, SelectResult};
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
 use crate::base::ids::ChannelIds;
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
+use crate::base::slot::ChannelState;
 use crate::base::wire::{send_pkt, send_raw};
 use crate::device_banner::DeviceBanner;
 
