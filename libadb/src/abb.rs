@@ -71,18 +71,7 @@ pub async fn exec<S: Session>(
     args: &[&str],
     rx: &mut [u8],
 ) -> Result<Vec<u8>, Error<S::IoError>> {
-    let mut channel = open_exec(session, args).await?;
-    let mut output = Vec::new();
-    loop {
-        match channel.read(rx).await {
-            Ok(n) => output.extend_from_slice(&rx[..n]),
-            Err(Error::ChannelClosed) => break,
-            Err(e) => return Err(e),
-        }
-    }
-    // The device's CLSE only marks the slot closed; ours frees it.
-    let _ = channel.close().await;
-    Ok(output)
+    open_exec(session, args).await?.read_to_vec(rx).await
 }
 
 /// Open an interactive `abb:` channel for streaming or bidirectional
@@ -109,6 +98,7 @@ pub async fn open<'a, 'b, S: Session>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::mock::{now, okay, one_slot};
 
     #[test]
     fn destination_abb_exec_multiple_args() {
@@ -135,5 +125,18 @@ mod tests {
             build_nul_destination("abb_exec:", &["bad\0arg"]),
             Err(ProtocolError::InvalidDestination)
         );
+    }
+
+    #[test]
+    fn exec_frees_its_slot_when_a_read_fails() {
+        // Nothing follows the OKAY: the read runs into the end of the
+        // transport.
+        let mut conn = one_slot("abb_exec", &[]);
+        let mut rx = [0u8; 16];
+        let err = now(exec(&mut conn, &["package", "list"], &mut rx)).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+
+        conn.transport_mut().feed(&okay(2));
+        now(conn.open_channel(b"shell:\0")).expect("the failed exec kept its slot");
     }
 }

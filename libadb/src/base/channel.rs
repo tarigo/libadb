@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use core::future::Future;
 
 use super::ids::LocalId;
@@ -153,6 +154,23 @@ impl<S: Session> Channel<'_, S> {
             match self.read(&mut buf[tail..]).await {
                 Ok(n) => tail += n,
                 Err(Error::ChannelClosed) => break Ok(tail),
+                Err(e) => break Err(e),
+            }
+        };
+        let _ = self.close().await;
+        read
+    }
+
+    /// Read until the device closes the channel, appending each read to
+    /// a `Vec`, then close the channel — on every way out, as
+    /// [`read_to_end`](Self::read_to_end) does. `rx` is where each read
+    /// lands before it is appended.
+    pub(crate) async fn read_to_vec(mut self, rx: &mut [u8]) -> Result<Vec<u8>, Error<S::IoError>> {
+        let mut out = Vec::new();
+        let read = loop {
+            match self.read(rx).await {
+                Ok(n) => out.extend_from_slice(&rx[..n]),
+                Err(Error::ChannelClosed) => break Ok(out),
                 Err(e) => break Err(e),
             }
         };
