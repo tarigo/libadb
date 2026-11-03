@@ -16,9 +16,9 @@ use libadb::base::error::{Error, ProtocolError};
 use libadb::shell::v2::{FrameDecoder, CLOSE_STDIN, STDIN, WINDOW_SIZE_CHANGE};
 
 use crate::block_on;
+use crate::connection::{lock_poisoned, FfiReader, FfiWriter};
 use crate::error::{self, AdbStatus};
 use crate::transport::FfiTransportError;
-use crate::{lock_poisoned, FfiReader, FfiWriter};
 
 fn build_shell_v2_destination(
     pty: bool,
