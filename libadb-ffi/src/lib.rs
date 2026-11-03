@@ -15,8 +15,9 @@
 //!
 //! TCP support is always compiled in and needs no async runtime. USB
 //! support is opt-in: enable `usb` (alias for the pure-Rust `nusb`
-//! backend) or `rusb` (libusb); the two backends are mutually
-//! exclusive.
+//! backend) or `rusb` (libusb). Both may be on at once, and then
+//! `usb://` goes to `nusb`: there is one [`adb_connect`] and nothing in
+//! it to choose a backend with.
 //!
 //! `tls` answers a wireless-debugging device's `STLS` (Android 11+)
 //! from [`adb_connect`] with TLS 1.3, presenting the caller's key in a
