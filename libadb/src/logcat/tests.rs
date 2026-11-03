@@ -140,6 +140,15 @@ fn parse_events_buffer_raw_payload() {
 }
 
 #[test]
+fn an_unknown_buffer_keeps_its_number() {
+    let payload = text_payload(4, b"Tag", b"msg");
+    let data = make_v4_entry(1, 1, 0, 0, 8, 0, &payload);
+
+    let (entry, _) = parse_entry(&data).unwrap().unwrap();
+    assert_eq!(entry.log_id, LogId::Unknown(8));
+}
+
+#[test]
 fn parse_empty_payload() {
     let data = make_v4_entry(1, 1, 0, 0, 0, 0, &[]);
     let (entry, _) = parse_entry(&data).unwrap().unwrap();
@@ -199,6 +208,15 @@ fn priority_display_and_char() {
 fn log_id_display() {
     assert_eq!(format!("{}", LogId::Main), "main");
     assert_eq!(format!("{}", LogId::Crash), "crash");
+    assert_eq!(format!("{}", LogId::Unknown(9)), "unknown(9)");
+}
+
+#[test]
+fn log_id_converts_back_to_its_number() {
+    assert_eq!(u32::from(LogId::Main), 0);
+    assert_eq!(u32::from(LogId::Crash), 4);
+    assert_eq!(u32::from(LogId::Kernel), 7);
+    assert_eq!(u32::from(LogId::Unknown(9)), 9);
 }
 
 #[test]

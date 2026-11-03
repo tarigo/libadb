@@ -71,18 +71,22 @@ impl fmt::Display for Priority {
 ///
 /// Matches the `log_id` values in AOSP
 /// (`system/logging/liblog/include/android/log.h`).
+///
+/// `u32::from` gives back the number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u32)]
 #[non_exhaustive]
 pub enum LogId {
-    Main = 0,
-    Radio = 1,
-    Events = 2,
-    System = 3,
-    Crash = 4,
-    Stats = 5,
-    Security = 6,
-    Kernel = 7,
+    Main,
+    Radio,
+    Events,
+    System,
+    Crash,
+    Stats,
+    Security,
+    Kernel,
+    /// A buffer this version of libadb does not know, such as one a
+    /// newer Android added, with the number its entry header carried.
+    Unknown(u32),
 }
 
 impl LogId {
@@ -96,14 +100,30 @@ impl LogId {
             5 => Self::Stats,
             6 => Self::Security,
             7 => Self::Kernel,
-            _ => Self::Main,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<LogId> for u32 {
+    fn from(id: LogId) -> Self {
+        match id {
+            LogId::Main => 0,
+            LogId::Radio => 1,
+            LogId::Events => 2,
+            LogId::System => 3,
+            LogId::Crash => 4,
+            LogId::Stats => 5,
+            LogId::Security => 6,
+            LogId::Kernel => 7,
+            LogId::Unknown(other) => other,
         }
     }
 }
 
 impl fmt::Display for LogId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        let name = match self {
             Self::Main => "main",
             Self::Radio => "radio",
             Self::Events => "events",
@@ -112,7 +132,9 @@ impl fmt::Display for LogId {
             Self::Stats => "stats",
             Self::Security => "security",
             Self::Kernel => "kernel",
-        })
+            Self::Unknown(other) => return write!(f, "unknown({other})"),
+        };
+        f.write_str(name)
     }
 }
 
