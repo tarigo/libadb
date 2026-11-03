@@ -194,3 +194,23 @@ async fn list_parses_each_rule() {
     rt::join(device).await;
 }
 }
+
+rt_test! {
+async fn list_raw_hands_back_the_lines_unparsed() {
+    // The second line is no rule `list` would take; the raw listing
+    // passes it on with the rest.
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"reverse:list-forward\0").await;
+        ch.send_write(b"0028host-19 tcp:6100 tcp:6100\nhost-19 tcp:1\n").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let listing = reverse::list_raw(&mut conn).await.unwrap();
+    assert_eq!(listing, b"host-19 tcp:6100 tcp:6100\nhost-19 tcp:1\n");
+
+    rt::join(device).await;
+}
+}

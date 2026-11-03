@@ -450,7 +450,8 @@ adb_status_t adb_reverse_remove_all(adb_connection_t *conn);
 /*
  * List the device's reverse rules as "<serial> <remote> <local>\n"
  * lines into (buf, buf_len, out_len), same convention as
- * adb_connection_features().
+ * adb_connection_features(). The lines are the device's own bytes,
+ * passed on unparsed.
  */
 adb_status_t adb_reverse_list(
     adb_connection_t *conn,

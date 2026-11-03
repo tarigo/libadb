@@ -94,6 +94,7 @@ pub unsafe extern "C" fn adb_reverse_remove_all(conn: *mut adb_connection_t) -> 
 
 /// List the device's reverse rules, as `<serial> <remote> <local>\n`
 /// lines, into `(buf, buf_len, out_len)` per [`adb_connection_features`].
+/// The lines are the device's own bytes, passed on unparsed.
 ///
 /// [`adb_connection_features`]: crate::adb_connection_features
 ///
@@ -113,18 +114,7 @@ pub unsafe extern "C" fn adb_reverse_list(
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let mut g = unsafe { &*conn }.lock_reader();
-    let rules = ffi_try!(reverse::list(&mut *g));
-    let mut listing = alloc::vec::Vec::new();
-    for rule in &rules {
-        for (field, end) in [
-            (&rule.serial, b' '),
-            (&rule.remote, b' '),
-            (&rule.local, b'\n'),
-        ] {
-            listing.extend_from_slice(field);
-            listing.push(end);
-        }
-    }
+    let listing = ffi_try!(reverse::list_raw(&mut *g));
     // SAFETY: `buf` and `out_len` are NULL or writable as sized, per `# Safety`.
     unsafe { copy_out(&listing, buf, buf_len, out_len) };
     AdbStatus::Ok

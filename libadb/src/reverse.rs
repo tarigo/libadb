@@ -147,6 +147,19 @@ pub async fn remove_all<C: ServiceChannel>(conn: &mut C) -> Result<(), Error<C::
 /// line with fewer than three fields is
 /// [`ReverseError::UnexpectedReply`].
 pub async fn list<C: ServiceChannel>(conn: &mut C) -> Result<Vec<ReverseRule>, Error<C::IoError>> {
+    let listing = list_raw(conn).await?;
+    parse_listing(&listing).map_err(Error::Reverse)
+}
+
+/// The device's current rules as it sent them: the
+/// `<serial> <remote> <local>\n` lines [`list`] parses, without the
+/// reply's length prefix and unparsed, for a caller that passes the
+/// listing on as text.
+///
+/// A `FAIL` is [`ReverseError::Failed`], and a reply that is not one
+/// length-prefixed block is [`ReverseError::UnexpectedReply`]; the
+/// lines themselves are not checked.
+pub async fn list_raw<C: ServiceChannel>(conn: &mut C) -> Result<Vec<u8>, Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:list-forward\0").await?;
     // The listing skips OKAY: it is just a hex4-prefixed block. A
     // failure still arrives as FAIL + hex4 + message, and the two
@@ -154,8 +167,7 @@ pub async fn list<C: ServiceChannel>(conn: &mut C) -> Result<Vec<ReverseRule>, E
     if reply.starts_with(b"FAIL") {
         return Err(Error::Reverse(fail_message(&reply[4..])));
     }
-    let block = hex4_block(&reply).ok_or(Error::Reverse(ReverseError::UnexpectedReply))?;
-    parse_listing(&block).map_err(Error::Reverse)
+    hex4_block(&reply).ok_or(Error::Reverse(ReverseError::UnexpectedReply))
 }
 
 /// A NUL would cut the service string short on the device, making the
