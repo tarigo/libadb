@@ -121,13 +121,6 @@ pub(crate) fn fail_ffi_connect(e: FfiConnectError) -> AdbStatus {
         FfiConnectError::Uri(_) => AdbStatus::InvalidUri,
         _ => AdbStatus::Connect,
     };
-    // The core's message says no backend was chosen; here it was the
-    // build that left them out.
-    #[cfg(not(any(feature = "nusb", feature = "rusb")))]
-    if let FfiConnectError::Usb(_) = e {
-        set("usb: transport not compiled in");
-        return status;
-    }
     set(e);
     status
 }

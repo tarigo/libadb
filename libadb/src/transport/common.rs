@@ -84,14 +84,14 @@ where
 
 /// [`NoUsb`] was chosen as the backend, so `usb://` cannot be served.
 ///
-/// Says nothing about what the build contains: a call site may pick
-/// [`NoUsb`] with both backends compiled in.
+/// It cannot tell why: a build may carry no backend, or a call site may
+/// pick [`NoUsb`] with both compiled in. Its message names both causes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoBackend;
 
 impl core::fmt::Display for NoBackend {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("no usb backend selected")
+        f.write_str("no USB backend compiled in or selected")
     }
 }
 

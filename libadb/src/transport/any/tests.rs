@@ -124,7 +124,10 @@ fn connect_usb_without_a_backend_reports_it_at_runtime() {
             matches!(err, ConnectError::Usb(NoBackend)),
             "{uri}: got {err:?}",
         );
-        assert_eq!(format!("{}", err), "usb: no usb backend selected");
+        assert_eq!(
+            format!("{}", err),
+            "usb: no USB backend compiled in or selected"
+        );
     }
 }
 
