@@ -7,11 +7,12 @@ use core::ffi::{c_char, CStr};
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::{AdbKey, KeyError};
 use libadb::pairing::pair;
+use libadb::transport::runtime::{Inline, Runtime};
 use libadb::transport::tls::MaybeTls;
 use libadb::uri::{self, Uri};
 
 use crate::error::{self, AdbStatus};
-use crate::transport::{self, FfiConnectError};
+use crate::transport::FfiConnectError;
 
 /// Pair with a device: put the key in `priv_key_pem` into its trusted
 /// store through "Pair device with pairing code" on its Wireless
@@ -126,7 +127,7 @@ pub unsafe extern "C" fn adb_pair(
         Err(e) => return error::fail_internal(e),
     };
 
-    let socket = match transport::connect_tcp(host, port) {
+    let socket = match crate::block_on::block_on(Inline::connect_tcp(host, port)) {
         Ok(s) => s,
         Err(e) => return error::fail_ffi_connect(FfiConnectError::Tcp(e)),
     };

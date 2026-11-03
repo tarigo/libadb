@@ -53,9 +53,14 @@ impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ConnectErro
 /// Parse `uri_str` and open a transport, dialling with runtime `R` and
 /// serving `usb://` with backend `B`.
 ///
+/// Under [`Inline`](crate::transport::runtime::Inline) the future does
+/// all of its work, the dial and USB enumeration alike, on the thread
+/// that polls it, and is ready at the first poll.
+///
 /// ```ignore
 /// let t = any::connect::<Tokio, Nusb>("usb://18d1:4ee7").await?;
 /// let t = any::connect::<Smol, NoUsb>("tcp://127.0.0.1:5555").await?;
+/// let t = any::connect::<Inline, Rusb>("usb://serial/ABC123").await?;
 /// ```
 pub async fn connect<R, B>(
     uri_str: &str,

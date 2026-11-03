@@ -19,7 +19,7 @@
 //! * [`common`] — [`common::Transport`], a TCP-or-USB enum parameterised
 //!   over both halves, and [`common::NoUsb`] for builds with no backend.
 //! * [`any`] — [`any::AnyTransport`] and [`any::connect`] for URI-based
-//!   dispatch between `tcp://` and `usb://` (features `tokio` or `smol`).
+//!   dispatch between `tcp://` and `usb://` (feature `split`).
 //! * [`split`] — the [`Splittable`] trait itself.
 //! * [`uri`] — the parser for `tcp://` and `usb://` addresses; a `usb://`
 //!   one names the [`uri::UsbSelector`] a [`UsbBackend`] opens.
@@ -48,7 +48,7 @@ pub mod common;
 #[cfg(feature = "tls")]
 pub mod tls;
 
-#[cfg(any(feature = "tokio", feature = "smol"))]
+#[cfg(feature = "split")]
 pub mod any;
 
 pub use split::Splittable;

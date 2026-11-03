@@ -1,5 +1,6 @@
 use super::{connect, AnyTransport, ConnectError};
 use crate::transport::common::{NoBackend, NoUsb, Transport};
+use crate::transport::runtime::Inline;
 use crate::transport::uri::UriError;
 use alloc::format;
 use core::future::Future;
@@ -9,11 +10,14 @@ use std::io;
 /// TCP URIs never touch it.
 type NoBackendChosen = NoUsb;
 
-/// Whichever runtime this build has; the tests do not care which.
+/// Whichever runtime this build has; the tests do not care which. A
+/// build with neither still has `Inline`.
 #[cfg(feature = "tokio")]
 type TestRuntime = crate::transport::runtime::Tokio;
 #[cfg(all(feature = "smol", not(feature = "tokio")))]
 type TestRuntime = crate::transport::runtime::Smol;
+#[cfg(not(any(feature = "tokio", feature = "smol")))]
+type TestRuntime = Inline;
 
 fn block_on<F: Future>(fut: F) -> F::Output {
     #[cfg(feature = "tokio")]
@@ -28,19 +32,27 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     {
         smol::block_on(fut)
     }
+    #[cfg(not(any(feature = "tokio", feature = "smol")))]
+    {
+        poll_once(fut)
+    }
 }
 
-async fn reserve_free_port() -> u16 {
-    #[cfg(feature = "tokio")]
-    {
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap().port()
+/// Drive an `Inline` future, which is ready at its first poll.
+fn poll_once<F: Future>(fut: F) -> F::Output {
+    let mut fut = core::pin::pin!(fut);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    match fut.as_mut().poll(&mut cx) {
+        core::task::Poll::Ready(v) => v,
+        core::task::Poll::Pending => panic!("Inline never parks"),
     }
-    #[cfg(all(feature = "smol", not(feature = "tokio")))]
-    {
-        let l = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap().port()
-    }
+}
+
+/// A plain socket serves every runtime: nothing here accepts, the
+/// kernel completes the handshake on its own.
+fn reserve_free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    l.local_addr().unwrap().port()
 }
 
 fn assert_matches_tcp_transport(t: AnyTransport<TestRuntime>) {
@@ -130,26 +142,38 @@ fn both_usb_backends_can_be_selected_in_one_build() {
 
 #[test]
 fn connect_tcp_to_listening_port_returns_tcp_transport() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     block_on(async {
-        #[cfg(feature = "tokio")]
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        #[cfg(all(feature = "smol", not(feature = "tokio")))]
-        let listener = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-
         let port = listener.local_addr().unwrap().port();
         let uri = format!("tcp://127.0.0.1:{}", port);
         let transport = connect::<TestRuntime, NoBackendChosen>(&uri)
             .await
             .expect("connect to open port");
         assert_matches_tcp_transport(transport);
-        drop(listener);
     });
+}
+
+#[test]
+fn inline_connects_without_a_runtime() {
+    // The path libadb-ffi takes whatever else the build carries.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("tcp://{}", listener.local_addr().unwrap());
+    match poll_once(connect::<Inline, NoUsb>(&uri)) {
+        Ok(Transport::Tcp(tcp)) => assert!(tcp.get_ref().nodelay().unwrap()),
+        Ok(Transport::Usb(never)) => match never {},
+        Err(e) => panic!("connect to open port: {e}"),
+    }
+    let err = match poll_once(connect::<Inline, NoUsb>("usb://")) {
+        Ok(_) => panic!("NoUsb cannot serve usb://"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, ConnectError::Usb(NoBackend)), "got {err:?}");
 }
 
 #[test]
 fn connect_tcp_to_closed_port_returns_tcp_io_error() {
     block_on(async {
-        let port = reserve_free_port().await;
+        let port = reserve_free_port();
         let uri = format!("tcp://127.0.0.1:{}", port);
         let err = connect::<TestRuntime, NoBackendChosen>(&uri)
             .await

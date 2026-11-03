@@ -108,8 +108,9 @@
 //! [`Connection::split`] and the resulting `Reader` / `Writer` pair.
 //!
 //! To pick one from an address string, `transport::any::connect`
-//! (features `tokio` or `smol`) opens the transport a `tcp://` or
-//! `usb://` address names, as [`transport::uri`] parses it.
+//! (feature `split`) opens the transport a `tcp://` or `usb://` address
+//! names, as [`transport::uri`] parses it, on any runtime — `Inline`,
+//! with none at all, included.
 //!
 //! For Android 11+ wireless debugging (feature `tls`), wrap the TCP
 //! transport in `transport::tls::MaybeTls` and connect with
