@@ -123,23 +123,33 @@ pub unsafe extern "C" fn adb_connect(
         return error::fail_invalid_arg("null pointer");
     }
 
-    let uri = match CStr::from_ptr(uri).to_str() {
+    // SAFETY: all four are non-null, and C strings per `# Safety`.
+    let (uri, priv_key_pem, pub_key, banner) = unsafe {
+        (
+            CStr::from_ptr(uri),
+            CStr::from_ptr(priv_key_pem),
+            CStr::from_ptr(pub_key),
+            CStr::from_ptr(banner),
+        )
+    };
+    let uri = match uri.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let priv_pem = match CStr::from_ptr(priv_key_pem).to_str() {
+    let priv_pem = match priv_key_pem.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let pub_key_bytes = CStr::from_ptr(pub_key).to_bytes();
-    let banner_bytes = CStr::from_ptr(banner).to_bytes();
+    let pub_key_bytes = pub_key.to_bytes();
+    let banner_bytes = banner.to_bytes();
 
     let auth = match auth::FfiAuthenticator::from_pkcs8_pem(priv_pem, pub_key_bytes) {
         Ok(a) => a,
         Err(e) => return error::fail_auth(e),
     };
 
-    handshake(uri, out, |t| connect_with_key(t, auth, banner_bytes))
+    // SAFETY: `out` is non-null and writable, per `# Safety`.
+    unsafe { handshake(uri, out, |t| connect_with_key(t, auth, banner_bytes)) }
 }
 
 /// Like [`adb_connect`], but uses a caller-supplied [`adb_authenticator_t`]
@@ -175,22 +185,29 @@ pub unsafe extern "C" fn adb_connect_with_authenticator(
         return error::fail_invalid_arg("null pointer");
     }
 
-    let uri = match CStr::from_ptr(uri).to_str() {
+    // SAFETY: both are non-null, and C strings per `# Safety`.
+    let (uri, banner) = unsafe { (CStr::from_ptr(uri), CStr::from_ptr(banner)) };
+    let uri = match uri.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let banner_bytes = CStr::from_ptr(banner).to_bytes();
+    let banner_bytes = banner.to_bytes();
 
-    let auth = match auth::CallbackAuthenticator::from_ffi(&*authenticator) {
+    // SAFETY: non-null, and valid with a readable key and a live callback per `# Safety`.
+    let auth = match unsafe { auth::CallbackAuthenticator::from_ffi(&*authenticator) } {
         Ok(a) => a,
         Err(e) => return error::fail_invalid_arg(e),
     };
 
-    handshake(uri, out, |t| connect_plain(t, auth, banner_bytes))
+    // SAFETY: `out` is non-null and writable, per `# Safety`.
+    unsafe { handshake(uri, out, |t| connect_plain(t, auth, banner_bytes)) }
 }
 
 /// Open `uri`, run `connect` over the transport, and box the split
 /// result into a handle.
+///
+/// # Safety
+/// `out` must point to a writable `adb_connection_t*`.
 unsafe fn handshake(
     uri: &str,
     out: *mut *mut adb_connection_t,
@@ -217,7 +234,8 @@ unsafe fn handshake(
         tcp_socket,
         staged_incoming: Mutex::new(None),
     });
-    *out = Box::into_raw(boxed);
+    // SAFETY: writable, per `# Safety`.
+    unsafe { *out = Box::into_raw(boxed) };
     AdbStatus::Ok
 }
 
@@ -310,7 +328,9 @@ pub unsafe extern "C" fn adb_connection_set_io_timeout_ms(
     if conn.is_null() {
         return error::fail_invalid_arg("null pointer");
     }
-    let Some(socket) = &(*conn).tcp_socket else {
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    let Some(socket) = &conn.tcp_socket else {
         return error::fail_invalid_arg("timeouts apply to tcp:// transports only");
     };
     let as_duration = |ms: u32| (ms > 0).then(|| std::time::Duration::from_millis(u64::from(ms)));
@@ -336,7 +356,8 @@ pub unsafe extern "C" fn adb_connection_free(conn: *mut adb_connection_t) {
     if conn.is_null() {
         return;
     }
-    drop(Box::from_raw(conn));
+    // SAFETY: a live handle from `adb_connect`, which boxed it, per `# Safety`.
+    drop(unsafe { Box::from_raw(conn) });
 }
 
 /// Negotiated maximum payload size, in bytes.
@@ -350,7 +371,8 @@ pub unsafe extern "C" fn adb_connection_max_payload(conn: *const adb_connection_
     if conn.is_null() {
         return 0;
     }
-    (*conn).writer.max_payload()
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { &*conn }.writer.max_payload()
 }
 
 /// Whether delayed-ACK (credit-based flow control) was negotiated.
@@ -364,7 +386,8 @@ pub unsafe extern "C" fn adb_connection_delayed_ack(conn: *const adb_connection_
     if conn.is_null() {
         return false;
     }
-    (*conn).writer.delayed_ack()
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { &*conn }.writer.delayed_ack()
 }
 
 /// Copy the device banner bytes into `buf` (up to `buf_len` bytes) and
@@ -395,13 +418,16 @@ pub unsafe extern "C" fn adb_connection_device_banner(
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let banner = (*conn).writer.device_banner().unwrap_or(&[]);
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let banner = unsafe { &*conn }.writer.device_banner().unwrap_or(&[]);
     if !out_len.is_null() {
-        *out_len = banner.len();
+        // SAFETY: non-null, so writable per `# Safety`.
+        unsafe { *out_len = banner.len() };
     }
     if !buf.is_null() && buf_len > 0 {
         let n = banner.len().min(buf_len);
-        ptr::copy_nonoverlapping(banner.as_ptr(), buf, n);
+        // SAFETY: non-null, so writable for `buf_len >= n` bytes per `# Safety`.
+        unsafe { ptr::copy_nonoverlapping(banner.as_ptr(), buf, n) };
     }
     AdbStatus::Ok
 }

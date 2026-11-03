@@ -37,15 +37,16 @@ pub unsafe extern "C" fn adb_reverse_forward(
     if conn.is_null() || device_spec.is_null() || host_spec.is_null() {
         return error::fail_invalid_arg("null pointer");
     }
-    let (Ok(device), Ok(host)) = (
-        CStr::from_ptr(device_spec).to_str(),
-        CStr::from_ptr(host_spec).to_str(),
-    ) else {
+    // SAFETY: both are non-null, and C strings per `# Safety`.
+    let (device, host) = unsafe { (CStr::from_ptr(device_spec), CStr::from_ptr(host_spec)) };
+    let (Ok(device), Ok(host)) = (device.to_str(), host.to_str()) else {
         return error::fail_invalid_arg("spec is not valid UTF-8");
     };
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let mut g = unsafe { &*conn }.lock_reader();
     let bound = ffi_try!(reverse::establish(&mut *g, device, host));
-    copy_out(&bound, data, data_cap, out_data_len);
+    // SAFETY: `data` and `out_data_len` are NULL or writable as sized, per `# Safety`.
+    unsafe { copy_out(&bound, data, data_cap, out_data_len) };
     AdbStatus::Ok
 }
 
@@ -62,10 +63,12 @@ pub unsafe extern "C" fn adb_reverse_remove(
     if conn.is_null() || device_spec.is_null() {
         return error::fail_invalid_arg("null pointer");
     }
-    let Ok(device) = CStr::from_ptr(device_spec).to_str() else {
+    // SAFETY: non-null, and a C string per `# Safety`.
+    let Ok(device) = unsafe { CStr::from_ptr(device_spec) }.to_str() else {
         return error::fail_invalid_arg("spec is not valid UTF-8");
     };
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let mut g = unsafe { &*conn }.lock_reader();
     ffi_try!(reverse::remove(&mut *g, device));
     AdbStatus::Ok
 }
@@ -80,7 +83,8 @@ pub unsafe extern "C" fn adb_reverse_remove_all(conn: *mut adb_connection_t) -> 
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let mut g = unsafe { &*conn }.lock_reader();
     ffi_try!(reverse::remove_all(&mut *g));
     AdbStatus::Ok
 }
@@ -104,8 +108,10 @@ pub unsafe extern "C" fn adb_reverse_list(
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let mut g = unsafe { &*conn }.lock_reader();
     let listing = ffi_try!(reverse::list(&mut *g));
-    copy_out(&listing, buf, buf_len, out_len);
+    // SAFETY: `buf` and `out_len` are NULL or writable as sized, per `# Safety`.
+    unsafe { copy_out(&listing, buf, buf_len, out_len) };
     AdbStatus::Ok
 }

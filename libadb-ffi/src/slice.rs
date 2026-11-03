@@ -42,12 +42,19 @@ pub(crate) unsafe fn from_mut_ptr<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] 
 /// [`adb_connection_features`].
 ///
 /// [`adb_connection_features`]: crate::adb_connection_features
+///
+/// # Safety
+///
+/// `buf` must be NULL or valid for writes of `buf_len` bytes, not
+/// overlapping `src`; `out_len` must be NULL or valid for a write.
 pub(crate) unsafe fn copy_out(src: &[u8], buf: *mut u8, buf_len: usize, out_len: *mut usize) {
     if !out_len.is_null() {
-        *out_len = src.len();
+        // SAFETY: non-null, so writable per the contract above.
+        unsafe { *out_len = src.len() };
     }
     if !buf.is_null() && buf_len > 0 {
         let n = src.len().min(buf_len);
-        core::ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
+        // SAFETY: non-null, so writable for `buf_len >= n` bytes per the contract above.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), buf, n) };
     }
 }

@@ -71,19 +71,28 @@ pub unsafe extern "C" fn adb_pair(
     if uri.is_null() || priv_key_pem.is_null() || pub_key.is_null() || code.is_null() {
         return error::fail_invalid_arg("null pointer");
     }
-    let uri = match CStr::from_ptr(uri).to_str() {
+    // SAFETY: all four are non-null, and C strings per `# Safety`.
+    let (uri, priv_key_pem, pub_key, code) = unsafe {
+        (
+            CStr::from_ptr(uri),
+            CStr::from_ptr(priv_key_pem),
+            CStr::from_ptr(pub_key),
+            CStr::from_ptr(code),
+        )
+    };
+    let uri = match uri.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let priv_pem = match CStr::from_ptr(priv_key_pem).to_str() {
+    let priv_pem = match priv_key_pem.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let pub_key = match CStr::from_ptr(pub_key).to_str() {
+    let pub_key = match pub_key.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
-    let code = match CStr::from_ptr(code).to_str() {
+    let code = match code.to_str() {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
     };
@@ -141,6 +150,7 @@ pub unsafe extern "C" fn adb_pair(
     // The device has the key and is closing its port; a close_notify
     // is a courtesy, and nothing here depends on it going out.
     let _ = crate::block_on::block_on(transport.shutdown());
-    crate::slice::copy_out(paired.guid.as_bytes(), guid, guid_cap, out_guid_len);
+    // SAFETY: `guid` and `out_guid_len` are NULL or writable as sized, per `# Safety`.
+    unsafe { crate::slice::copy_out(paired.guid.as_bytes(), guid, guid_cap, out_guid_len) };
     AdbStatus::Ok
 }

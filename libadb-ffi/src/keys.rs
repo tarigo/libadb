@@ -55,7 +55,8 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         return error::fail_invalid_arg("null pointer");
     }
 
-    let dir = CStr::from_ptr(android_dir);
+    // SAFETY: non-null, and a C string per `# Safety`.
+    let dir = unsafe { CStr::from_ptr(android_dir) };
     // A Unix path is any byte string without a NUL, and a C caller may
     // well hand us one: insisting on UTF-8 would turn a directory that
     // `fopen` opens happily into an invalid argument.
@@ -72,7 +73,8 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
     let name = if name.is_null() {
         DEFAULT_NAME
     } else {
-        match CStr::from_ptr(name).to_str() {
+        // SAFETY: non-null, and a C string per `# Safety`.
+        match unsafe { CStr::from_ptr(name) }.to_str() {
             Ok(s) => s,
             Err(e) => return error::fail_invalid_arg(e),
         }
@@ -116,10 +118,12 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
     private_key_pem.extend_from_slice(pem.as_bytes());
     private_key_pem.push(0);
 
-    *out = Box::into_raw(Box::new(adb_key_t {
+    let handle = Box::into_raw(Box::new(adb_key_t {
         private_key_pem,
         public_key,
     }));
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out = handle };
     AdbStatus::Ok
 }
 
@@ -133,7 +137,8 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
 /// that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_key_private_key_pem(key: *const adb_key_t) -> *const c_char {
-    match key.as_ref() {
+    // SAFETY: NULL or a live handle, per `# Safety`.
+    match unsafe { key.as_ref() } {
         Some(k) => k.private_key_pem.as_ptr() as *const c_char,
         None => core::ptr::null(),
     }
@@ -150,7 +155,8 @@ pub unsafe extern "C" fn adb_key_private_key_pem(key: *const adb_key_t) -> *cons
 /// that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_key_public_key(key: *const adb_key_t) -> *const c_char {
-    match key.as_ref() {
+    // SAFETY: NULL or a live handle, per `# Safety`.
+    match unsafe { key.as_ref() } {
         Some(k) => k.public_key.as_ptr(),
         None => core::ptr::null(),
     }
@@ -164,6 +170,7 @@ pub unsafe extern "C" fn adb_key_public_key(key: *const adb_key_t) -> *const c_c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_key_free(key: *mut adb_key_t) {
     if !key.is_null() {
-        drop(Box::from_raw(key));
+        // SAFETY: a live handle from `adb_key_load_or_generate`, which boxed it, per `# Safety`.
+        drop(unsafe { Box::from_raw(key) });
     }
 }

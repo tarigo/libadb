@@ -123,6 +123,13 @@ pub(crate) struct CallbackAuthenticator {
 }
 
 impl CallbackAuthenticator {
+    /// Copy the key out of `a` and keep its callback.
+    ///
+    /// # Safety
+    ///
+    /// `a.public_key` must be readable for `a.public_key_len` bytes when
+    /// non-null, and `a.sign` must stay safe to call with `a.user_data`
+    /// for as long as the authenticator signs.
     pub(crate) unsafe fn from_ffi(a: &adb_authenticator_t) -> Result<Self, &'static str> {
         let Some(sign_fn) = a.sign else {
             return Err("sign callback is null");
@@ -131,7 +138,8 @@ impl CallbackAuthenticator {
             return Err("public_key is null but public_key_len > 0");
         }
         let pub_key_bytes = if a.public_key_len > 0 {
-            core::slice::from_raw_parts(a.public_key, a.public_key_len)
+            // SAFETY: non-null, as the length is not zero, and readable for it per `# Safety`.
+            unsafe { core::slice::from_raw_parts(a.public_key, a.public_key_len) }
         } else {
             &[]
         };
@@ -155,6 +163,7 @@ impl Authenticator for CallbackAuthenticator {
         }
         let mut buf = vec![0u8; MAX_SIGNATURE_LEN];
         let mut out_len: usize = 0;
+        // SAFETY: `from_ffi`'s contract covers the callback; the buffers are live locals.
         let status = unsafe {
             (self.sign_fn)(
                 self.user_data,

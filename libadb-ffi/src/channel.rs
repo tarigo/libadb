@@ -40,10 +40,14 @@ pub unsafe extern "C" fn adb_open_channel(
     if conn.is_null() || out_id.is_null() || (destination.is_null() && destination_len > 0) {
         return error::fail_invalid_arg("null pointer");
     }
-    let dest = slice::from_ptr(destination, destination_len);
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    // SAFETY: readable for `destination_len` bytes when non-null, per `# Safety`.
+    let dest = unsafe { slice::from_ptr(destination, destination_len) };
+    let mut g = conn.lock_reader();
     let id = ffi_try!(g.open_channel(dest));
-    *out_id = encode_channel_id(id);
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out_id = encode_channel_id(id) };
     AdbStatus::Ok
 }
 
@@ -77,8 +81,11 @@ pub unsafe extern "C" fn adb_read_channel(
     if buf_len == 0 {
         return error::fail_invalid_arg("buf_len is zero");
     }
-    let slice = slice::from_mut_ptr(buf, buf_len);
-    let mut g = (*conn).lock_reader();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    // SAFETY: non-null, as `buf_len` is not zero, and writable for it per `# Safety`.
+    let slice = unsafe { slice::from_mut_ptr(buf, buf_len) };
+    let mut g = conn.lock_reader();
     let ch = decode_channel_id(id);
     // The reader hands back Ok(0) for a zero-length WRTE; the C
     // contract above forbids returning it.
@@ -88,7 +95,8 @@ pub unsafe extern "C" fn adb_read_channel(
             break n;
         }
     };
-    *out_read = n;
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out_read = n };
     AdbStatus::Ok
 }
 
@@ -113,9 +121,12 @@ pub unsafe extern "C" fn adb_write_channel(
     if conn.is_null() || (buf.is_null() && buf_len > 0) {
         return error::fail_invalid_arg("null pointer");
     }
-    let slice = slice::from_ptr(buf, buf_len);
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    // SAFETY: readable for `buf_len` bytes when non-null, per `# Safety`.
+    let slice = unsafe { slice::from_ptr(buf, buf_len) };
     let ch = decode_channel_id(id);
-    ffi_try!((*conn).writer.write_channel(ch, slice));
+    ffi_try!(conn.writer.write_channel(ch, slice));
     AdbStatus::Ok
 }
 
@@ -130,7 +141,9 @@ pub unsafe extern "C" fn adb_close_channel(conn: *mut adb_connection_t, id: u64)
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
     let ch = decode_channel_id(id);
-    ffi_try!((*conn).writer.close_channel(ch));
+    ffi_try!(conn.writer.close_channel(ch));
     AdbStatus::Ok
 }

@@ -44,21 +44,25 @@ pub unsafe extern "C" fn adb_accept_channel(
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
     // The staged lock is held across the empty check, the dequeue and
     // the store: concurrent reports serialize on one staged request —
     // a re-report of the same holder, never two racing holders. The
     // reader lock nests inside it, in that order only.
-    let mut staged = lock_poisoned(&(*conn).staged_incoming);
+    let mut staged = lock_poisoned(&conn.staged_incoming);
     // A request already staged is re-reported, not displaced — that
     // keeps probe-allocate-copy sequences working on one request.
     if let Some(incoming) = staged.as_ref() {
-        copy_out(incoming.destination(), dest, dest_cap, out_dest_len);
+        // SAFETY: `dest` and `out_dest_len` are NULL or writable as sized, per `# Safety`.
+        unsafe { copy_out(incoming.destination(), dest, dest_cap, out_dest_len) };
         return AdbStatus::Ok;
     }
-    let mut g = (*conn).lock_reader();
+    let mut g = conn.lock_reader();
     let incoming = ffi_try!(g.accept_incoming());
     drop(g);
-    copy_out(incoming.destination(), dest, dest_cap, out_dest_len);
+    // SAFETY: `dest` and `out_dest_len` are NULL or writable as sized, per `# Safety`.
+    unsafe { copy_out(incoming.destination(), dest, dest_cap, out_dest_len) };
     // Stage the request itself: the verdict calls consume it, so they
     // cannot answer some other OPEN that queued up in the meantime.
     *staged = Some(incoming);
@@ -79,12 +83,15 @@ pub unsafe extern "C" fn adb_incoming_accept(
     if conn.is_null() || out_id.is_null() {
         return error::fail_invalid_arg("null pointer");
     }
-    let staged = lock_poisoned(&(*conn).staged_incoming).take();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    let staged = lock_poisoned(&conn.staged_incoming).take();
     let Some(incoming) = staged else {
         return error::fail_invalid_arg("no incoming channel is staged");
     };
     let ch = ffi_try!(incoming.accept());
-    *out_id = encode_channel_id(ch);
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out_id = encode_channel_id(ch) };
     AdbStatus::Ok
 }
 
@@ -98,7 +105,8 @@ pub unsafe extern "C" fn adb_incoming_reject(conn: *mut adb_connection_t) -> Adb
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let staged = lock_poisoned(&(*conn).staged_incoming).take();
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let staged = lock_poisoned(&unsafe { &*conn }.staged_incoming).take();
     let Some(incoming) = staged else {
         return error::fail_invalid_arg("no incoming channel is staged");
     };

@@ -94,7 +94,8 @@ pub unsafe extern "C" fn adb_connection_has_feature(
     let Some(ff) = FfiFeature::from_raw(feature) else {
         return false;
     };
-    (*conn)
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { &*conn }
         .writer
         .device_banner_parsed()
         .is_some_and(|b| b.has_feature(&ff.to_feature()))
@@ -140,17 +141,20 @@ pub unsafe extern "C" fn adb_connection_features(
     if conn.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let features = (*conn)
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let features = unsafe { &*conn }
         .writer
         .device_banner_parsed()
         .map_or(&[][..], |b| b.features());
     if !out_len.is_null() {
-        *out_len = features.len();
+        // SAFETY: non-null, so writable per `# Safety`.
+        unsafe { *out_len = features.len() };
     }
     if !buf.is_null() && buf_cap > 0 {
         let n = features.len().min(buf_cap);
         for (slot, f) in features.iter().take(n).enumerate() {
-            *buf.add(slot) = FfiFeature::from_feature(f) as u32;
+            // SAFETY: `slot < n <= buf_cap`, and `buf` has `buf_cap` writable slots per `# Safety`.
+            unsafe { *buf.add(slot) = FfiFeature::from_feature(f) as u32 };
         }
     }
     AdbStatus::Ok
@@ -182,9 +186,7 @@ mod tests {
             let ff = FfiFeature::from_raw(raw).unwrap();
             let ptr = ff.wire_name();
             assert!(!ptr.is_null());
-            // SAFETY: `wire_name()` returns a `&'static c_char` pointer
-            // into a statically built nul-terminated literal table (see
-            // the `c"..."` strings in `ffi_feature_enum!`).
+            // SAFETY: `wire_name` points into a `'static` literal `features!` ends with a NUL.
             let name = unsafe { core::ffi::CStr::from_ptr(ptr) }.to_str().unwrap();
             let roundtrip = Feature::try_from(name).expect("wire name parses");
             assert_eq!(roundtrip, ff.to_feature());

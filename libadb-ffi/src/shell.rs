@@ -163,7 +163,9 @@ async fn send_frame_async(
 ///
 /// # Safety
 /// `conn` must be a valid handle and must outlive the returned session.
-/// Pointers must be valid for the indicated lengths.
+/// `command` must be NULL or readable for `command_len` bytes, `term`
+/// NULL or a valid null-terminated C string, and `out_sh` must point to
+/// a writable `adb_shell_t*`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_shell_open(
     conn: *mut super::adb_connection_t,
@@ -180,7 +182,10 @@ pub unsafe extern "C" fn adb_shell_open(
         return error::fail_invalid_arg("null pointer");
     }
 
-    let cmd_bytes = super::slice::from_ptr(command, command_len);
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let conn = unsafe { &*conn };
+    // SAFETY: readable for `command_len` bytes when non-null, per `# Safety`.
+    let cmd_bytes = unsafe { super::slice::from_ptr(command, command_len) };
     let cmd_str = match core::str::from_utf8(cmd_bytes) {
         Ok(s) => s,
         Err(e) => return error::fail_invalid_arg(e),
@@ -188,7 +193,8 @@ pub unsafe extern "C" fn adb_shell_open(
     let term_str = if term.is_null() {
         ""
     } else {
-        match CStr::from_ptr(term).to_str() {
+        // SAFETY: non-null, and a C string per `# Safety`.
+        match unsafe { CStr::from_ptr(term) }.to_str() {
             Ok(s) => s,
             Err(e) => return error::fail_invalid_arg(e),
         }
@@ -199,8 +205,8 @@ pub unsafe extern "C" fn adb_shell_open(
         Err(e) => return error::fail_error::<FfiTransportError>(Error::Protocol(e)),
     };
 
-    let reader_arc = Arc::clone(&(*conn).reader);
-    let writer = (*conn).writer.clone();
+    let reader_arc = Arc::clone(&conn.reader);
+    let writer = conn.writer.clone();
 
     let channel_id = {
         let mut r = lock_poisoned(&reader_arc);
@@ -231,7 +237,8 @@ pub unsafe extern "C" fn adb_shell_open(
         send_lock,
         closed: AtomicBool::new(false),
     });
-    *out_sh = Box::into_raw(boxed);
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out_sh = Box::into_raw(boxed) };
     AdbStatus::Ok
 }
 
@@ -248,7 +255,8 @@ pub unsafe extern "C" fn adb_shell_free(sh: *mut adb_shell_t) {
     if sh.is_null() {
         return;
     }
-    drop(Box::from_raw(sh));
+    // SAFETY: a live handle from `adb_shell_open`, which boxed it, per `# Safety`.
+    drop(unsafe { Box::from_raw(sh) });
 }
 
 /// Read one decoded shell_v2 frame.
@@ -280,21 +288,22 @@ pub unsafe extern "C" fn adb_shell_read_frame(
     if sh.is_null() || out_id.is_null() || (buf.is_null() && buf_cap > 0) {
         return error::fail_invalid_arg("null pointer");
     }
-    if (*sh).closed.load(Ordering::Acquire) {
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let sh = unsafe { &*sh };
+    if sh.closed.load(Ordering::Acquire) {
         return AdbStatus::ChannelClosed;
     }
-    let (id, payload) = ffi_try!(read_frame_async(
-        &(*sh).reader,
-        &(*sh).parse_state,
-        (*sh).channel_id,
-    ));
-    *out_id = id;
+    let (id, payload) = ffi_try!(read_frame_async(&sh.reader, &sh.parse_state, sh.channel_id));
+    // SAFETY: non-null, and writable per `# Safety`.
+    unsafe { *out_id = id };
     if !out_len.is_null() {
-        *out_len = payload.len();
+        // SAFETY: non-null, so writable per `# Safety`.
+        unsafe { *out_len = payload.len() };
     }
     if !buf.is_null() && buf_cap > 0 {
         let n = payload.len().min(buf_cap);
-        ptr::copy_nonoverlapping(payload.as_ptr(), buf, n);
+        // SAFETY: non-null, so writable for `buf_cap >= n` bytes per `# Safety`.
+        unsafe { ptr::copy_nonoverlapping(payload.as_ptr(), buf, n) };
     }
     AdbStatus::Ok
 }
@@ -318,8 +327,10 @@ pub unsafe extern "C" fn adb_shell_write_stdin(
     if sh.is_null() || (data.is_null() && len > 0) {
         return error::fail_invalid_arg("null pointer");
     }
-    let payload = super::slice::from_ptr(data, len);
-    send_frame_payload(sh, STDIN, payload)
+    // SAFETY: readable for `len` bytes when non-null, per `# Safety`.
+    let payload = unsafe { super::slice::from_ptr(data, len) };
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { send_frame_payload(sh, STDIN, payload) }
 }
 
 /// Send a `CLOSE_STDIN` frame — no more stdin will follow.
@@ -332,7 +343,8 @@ pub unsafe extern "C" fn adb_shell_close_stdin(sh: *mut adb_shell_t) -> AdbStatu
     if sh.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    send_frame_payload(sh, CLOSE_STDIN, &[])
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { send_frame_payload(sh, CLOSE_STDIN, &[]) }
 }
 
 /// Send a `WINDOW_SIZE_CHANGE` frame.
@@ -350,7 +362,8 @@ pub unsafe extern "C" fn adb_shell_set_window_size(
         return error::fail_invalid_arg("null handle");
     }
     let payload = encode_window_size(rows, cols);
-    send_frame_payload(sh, WINDOW_SIZE_CHANGE, &payload)
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    unsafe { send_frame_payload(sh, WINDOW_SIZE_CHANGE, &payload) }
 }
 
 /// Close the underlying channel. Subsequent read/write ops on this
@@ -364,29 +377,29 @@ pub unsafe extern "C" fn adb_shell_close(sh: *mut adb_shell_t) -> AdbStatus {
     if sh.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    if (*sh)
+    // SAFETY: non-null, and a valid handle per `# Safety`.
+    let sh = unsafe { &*sh };
+    if sh
         .closed
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         return AdbStatus::Ok;
     }
-    let ch = (*sh).channel_id;
-    ffi_try!((*sh).writer.close_channel(ch));
+    let ch = sh.channel_id;
+    ffi_try!(sh.writer.close_channel(ch));
     AdbStatus::Ok
 }
 
+/// # Safety
+/// `sh` must be a valid handle.
 unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: u8, payload: &[u8]) -> AdbStatus {
-    if (*sh).closed.load(Ordering::Acquire) {
+    // SAFETY: a valid handle, per `# Safety`.
+    let sh = unsafe { &*sh };
+    if sh.closed.load(Ordering::Acquire) {
         return AdbStatus::ChannelClosed;
     }
-    let ch = (*sh).channel_id;
-    ffi_try!(send_frame_async(
-        &(*sh).writer,
-        &(*sh).send_lock,
-        ch,
-        id,
-        payload
-    ));
+    let ch = sh.channel_id;
+    ffi_try!(send_frame_async(&sh.writer, &sh.send_lock, ch, id, payload));
     AdbStatus::Ok
 }
