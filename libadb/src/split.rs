@@ -79,12 +79,12 @@ use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag};
 use crate::device_banner::DeviceBanner;
 
-pub(crate) struct FlowSignal {
+struct FlowSignal {
     event: Event,
 }
 
 impl FlowSignal {
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             event: Event::new(),
         }
@@ -106,34 +106,60 @@ impl FlowSignal {
     }
 }
 
+/// What the [`Reader`] and every [`Writer`] of one connection share.
 pub(crate) struct Shared<WH> {
-    pub(crate) write_half: AsyncMutex<WH>,
-    pub(crate) channels: Mutex<ChannelTable>,
+    write_half: AsyncMutex<WH>,
+    channels: Mutex<ChannelTable>,
     /// One per slot of `channels`.
-    pub(crate) signals: Box<[FlowSignal]>,
-    pub(crate) negotiated: Negotiated,
-    pub(crate) desync: DesyncFlag,
+    signals: Box<[FlowSignal]>,
+    negotiated: Negotiated,
+    desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
-    pub(crate) incoming: Mutex<IncomingQueue>,
+    incoming: Mutex<IncomingQueue>,
     /// Requests staged out of the queue in an owned [`SplitIncoming`],
     /// by remote id — the only place a device cancellation can still
     /// reach them once they have left `incoming`.
-    pub(crate) staged: Mutex<Vec<(RemoteId, Arc<AtomicBool>)>>,
+    staged: Mutex<Vec<(RemoteId, Arc<AtomicBool>)>>,
     /// Set once the [`Reader`] is gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
-    pub(crate) stopped: AtomicBool,
+    stopped: AtomicBool,
     /// Live [`IncomingListener`]s. While there is one, [`Reader::run`]
     /// keeps device-initiated OPENs for it instead of refusing them.
-    pub(crate) listeners: AtomicUsize,
+    listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
-    pub(crate) incoming_signal: Event,
+    incoming_signal: Event,
     /// CLSEs for channels the device accepted just as their opener gave
     /// up: `Drop` cannot send them, so whoever takes the write half
     /// next does.
-    pub(crate) owed_closes: Mutex<Vec<ChannelIds>>,
+    owed_closes: Mutex<Vec<ChannelIds>>,
 }
 
 impl<WH> Shared<WH> {
+    /// The shared half of a connection being split: its write half,
+    /// what its handshake settled, its channels and the OPENs still
+    /// waiting for a verdict, and whether it already lost step.
+    pub(crate) fn new(
+        write_half: WH,
+        negotiated: Negotiated,
+        table: ChannelTable,
+        incoming: IncomingQueue,
+        desync: DesyncFlag,
+    ) -> Self {
+        Self {
+            write_half: AsyncMutex::new(write_half),
+            signals: (0..table.len()).map(|_| FlowSignal::new()).collect(),
+            channels: Mutex::new(table),
+            negotiated,
+            desync,
+            incoming: Mutex::new(incoming),
+            staged: Mutex::new(Vec::new()),
+            stopped: AtomicBool::new(false),
+            listeners: AtomicUsize::new(0),
+            incoming_signal: Event::new(),
+            owed_closes: Mutex::new(Vec::new()),
+        }
+    }
+
     fn lock_channels(&self) -> std::sync::MutexGuard<'_, ChannelTable> {
         self.channels.lock().unwrap_or_else(|p| p.into_inner())
     }

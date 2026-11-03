@@ -38,6 +38,23 @@ where
     incoming: IncomingQueue,
 }
 
+/// What a connection is made of, handed over whole when it is split.
+#[cfg(feature = "split")]
+pub(crate) struct SplitParts<T> {
+    /// The transport, still in one piece.
+    pub(crate) transport: T,
+    /// Whatever of a packet was read and not decoded yet.
+    pub(crate) recv_buf: BytesMut,
+    /// What the handshake settled.
+    pub(crate) negotiated: Negotiated,
+    /// The channels, open or opening.
+    pub(crate) table: ChannelTable,
+    /// Device-initiated OPENs still waiting for a verdict.
+    pub(crate) incoming: IncomingQueue,
+    /// Whether a packet was already abandoned mid-write.
+    pub(crate) desync: DesyncFlag,
+}
+
 /// A device-initiated channel awaiting a verdict.
 ///
 /// Borrow of the connection: decide with [`accept`](Self::accept) or
@@ -263,29 +280,30 @@ where
     {
         use crate::split::{Reader, Shared, Writer};
         use alloc::sync::Arc;
-        use core::sync::atomic::{AtomicBool, AtomicUsize};
 
-        let (read_half, write_half) = self.transport.split().map_err(Error::Io)?;
+        let parts = self.into_split_parts();
+        let (read_half, write_half) = parts.transport.split().map_err(Error::Io)?;
+        let shared = Arc::new(Shared::new(
+            write_half,
+            parts.negotiated,
+            parts.table,
+            parts.incoming,
+            parts.desync,
+        ));
+        let reader = Reader::new(read_half, parts.recv_buf, Arc::clone(&shared));
+        Ok((reader, Writer::new(shared)))
+    }
 
-        let shared = Arc::new(Shared {
-            write_half: async_lock::Mutex::new(write_half),
-            signals: (0..self.table.len())
-                .map(|_| crate::split::FlowSignal::new())
-                .collect(),
-            channels: std::sync::Mutex::new(self.table),
+    #[cfg(feature = "split")]
+    fn into_split_parts(self) -> SplitParts<T> {
+        SplitParts {
+            transport: self.transport,
+            recv_buf: self.recv_buf,
             negotiated: self.negotiated,
+            table: self.table,
+            incoming: self.incoming,
             desync: self.desync,
-            incoming: std::sync::Mutex::new(self.incoming),
-            staged: std::sync::Mutex::new(alloc::vec::Vec::new()),
-            stopped: AtomicBool::new(false),
-            listeners: AtomicUsize::new(0),
-            incoming_signal: event_listener::Event::new(),
-            owed_closes: std::sync::Mutex::new(alloc::vec::Vec::new()),
-        });
-
-        let reader = Reader::new(read_half, self.recv_buf, Arc::clone(&shared));
-        let writer = Writer::new(shared);
-        Ok((reader, writer))
+        }
     }
 
     /// Open a channel and return a [`Channel`] handle that borrows this
