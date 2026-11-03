@@ -57,7 +57,8 @@ pub enum Error<E> {
     /// A logcat session failed: its output did not parse or was cut
     /// short, or logcat exited with an error.
     Logcat(crate::logcat::LogcatError),
-    /// Hex-framed protobuf decode error (track-app, app-info).
+    /// The hex-framed protobuf of a [`track_app`](crate::track_app)
+    /// snapshot did not decode.
     Decode(DecodeError),
     /// Device does not advertise a feature required by the attempted operation.
     MissingFeature(Feature),
