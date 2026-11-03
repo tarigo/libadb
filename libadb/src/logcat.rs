@@ -58,6 +58,12 @@
 //! let output = logcat::exec_text(&mut conn, &["-d", "-v", "threadtime"], &mut rx).await?;
 //! ```
 
+mod format;
+#[cfg(test)]
+mod tests;
+
+pub use format::*;
+
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
@@ -363,9 +369,3 @@ pub async fn exec_text<S: Session>(
     shell.close_stdin().await?;
     shell.collect().await
 }
-
-mod format;
-pub use format::*;
-
-#[cfg(test)]
-mod tests;

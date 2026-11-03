@@ -1,6 +1,9 @@
 //! Device selection shared by the USB backends: which enumerated device
 //! a [`UsbSelector`] picks, and what is reported when none will do.
 
+#[cfg(test)]
+mod tests;
+
 use alloc::string::String;
 
 use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
@@ -144,6 +147,3 @@ fn admit<D: Enumerated>(
 
     Ok(Some(iface))
 }
-
-#[cfg(test)]
-mod tests;

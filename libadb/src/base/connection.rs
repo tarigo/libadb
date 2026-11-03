@@ -1,3 +1,16 @@
+mod accept;
+mod banner;
+mod config;
+mod handshake;
+#[cfg(test)]
+mod tests;
+#[cfg(feature = "tls")]
+mod tls;
+
+pub use accept::Incoming;
+pub use banner::HostBanner;
+pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
+
 use bytes::BytesMut;
 use core::convert::Infallible;
 use core::future::{pending, Future};
@@ -17,9 +30,6 @@ use super::protocol::Packet;
 use super::slot::{ChannelSlot, PendingAck};
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
 use crate::error::Error;
-pub use accept::Incoming;
-pub use banner::HostBanner;
-pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 /// ADB connection over an async transport.
 pub struct Connection<T>
@@ -624,13 +634,3 @@ where
         }
     }
 }
-
-mod accept;
-mod banner;
-mod config;
-mod handshake;
-#[cfg(feature = "tls")]
-mod tls;
-
-#[cfg(test)]
-mod tests;

@@ -15,6 +15,12 @@
 //! size, and returns a [`Shell`] ready for full-duplex use with
 //! [`Shell::pump`] / [`Shell::try_next_frame`].
 
+mod decoder;
+#[cfg(test)]
+mod tests;
+
+pub use decoder::FrameDecoder;
+
 use alloc::vec::Vec;
 use core::future::Future;
 
@@ -389,9 +395,3 @@ pub async fn exec<S: Session>(
     shell.close_stdin().await?;
     shell.collect().await
 }
-
-mod decoder;
-pub use decoder::FrameDecoder;
-
-#[cfg(test)]
-mod tests;

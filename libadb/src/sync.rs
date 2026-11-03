@@ -53,8 +53,12 @@
 //! ```
 
 mod error;
+mod format;
+#[cfg(test)]
+mod tests;
 
 pub use error::SyncError;
+pub use format::*;
 
 use alloc::vec::Vec;
 
@@ -62,6 +66,10 @@ use crate::base::channel::Channel;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
 use crate::error::Error;
+use format::{
+    u32_at, DENT_V1_SIZE, DENT_V2_SIZE, ID_DATA, ID_DENT, ID_DNT2, ID_DONE, ID_FAIL, ID_LIS2,
+    ID_LIST, ID_OKAY, ID_QUIT, ID_RCV2, ID_RECV, ID_SEND, ID_SND2, ID_STA2, ID_STAT, STAT_V1_SIZE,
+};
 
 /// A sync session over an open `sync:\0` channel.
 ///
@@ -471,13 +479,3 @@ pub async fn open<'a, 'b, S: Session>(
     let channel = session.open(b"sync:\0").await?;
     Ok(SyncSession::new(channel, buf))
 }
-
-mod format;
-pub use format::*;
-use format::{
-    u32_at, DENT_V1_SIZE, DENT_V2_SIZE, ID_DATA, ID_DENT, ID_DNT2, ID_DONE, ID_FAIL, ID_LIS2,
-    ID_LIST, ID_OKAY, ID_QUIT, ID_RCV2, ID_RECV, ID_SEND, ID_SND2, ID_STA2, ID_STAT, STAT_V1_SIZE,
-};
-
-#[cfg(test)]
-mod tests;
