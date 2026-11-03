@@ -252,7 +252,7 @@ pub enum UsbConnectError {
     SerialRead(rusb::Error),
     /// Claiming the interface failed.
     Claim(rusb::Error),
-    /// The claimed interface has no bulk IN/OUT endpoints.
+    /// The ADB interface has no bulk IN/OUT endpoints.
     NoBulkEndpoints,
 }
 
@@ -324,9 +324,9 @@ pub fn connect_by_selector<R: Runtime>(
     scan(candidates, selector, |candidate, iface| {
         let handle = candidate.open()?;
         handle
-            .claim_interface(iface)
+            .claim_interface(iface.number)
             .map_err(UsbConnectError::Claim)?;
-        UsbTransport::new(handle, iface)
+        Ok(UsbTransport::from_parts(handle, iface.ep_in, iface.ep_out))
     })
 }
 
@@ -349,6 +349,7 @@ impl Candidate {
 
 impl Enumerated for Candidate {
     type Error = UsbConnectError;
+    type Interface = AdbInterface;
 
     fn vid(&self) -> u16 {
         self.descriptor.vendor_id()
@@ -358,22 +359,24 @@ impl Enumerated for Candidate {
         self.descriptor.product_id()
     }
 
-    fn adb_interface(&self) -> Result<Option<u8>, UsbConnectError> {
+    fn adb_interface(&self) -> Result<Option<AdbInterface>, UsbConnectError> {
         let config = self
             .device
             .active_config_descriptor()
             .map_err(UsbConnectError::Descriptor)?;
-        Ok(config
-            .interfaces()
-            .flat_map(|i| i.descriptors())
-            .find(|desc| {
-                speaks_adb(
-                    desc.class_code(),
-                    desc.sub_class_code(),
-                    desc.protocol_code(),
-                )
-            })
-            .map(|desc| desc.interface_number()))
+        first_with_bulk_endpoints(
+            config
+                .interfaces()
+                .flat_map(|i| i.descriptors())
+                .filter(|desc| {
+                    speaks_adb(
+                        desc.class_code(),
+                        desc.sub_class_code(),
+                        desc.protocol_code(),
+                    )
+                })
+                .map(|desc| (desc.interface_number(), bulk_endpoints(&desc))),
+        )
     }
 
     fn serial(&mut self) -> Result<Option<String>, UsbConnectError> {
@@ -408,6 +411,39 @@ impl ScanError for UsbConnectError {
     fn no_adb_interface() -> Self {
         Self::NoAdbInterface
     }
+}
+
+/// An ADB interface with the bulk endpoints its descriptor lists, so
+/// that opening the device need not read the descriptor again.
+struct AdbInterface {
+    number: u8,
+    ep_in: u8,
+    ep_out: u8,
+}
+
+/// The first of the ADB interface settings, each given as its number
+/// and bulk endpoints, that has both endpoints.
+///
+/// A device whose every ADB setting lacks them is turned down for that
+/// rather than for speaking no ADB, and before it is opened or claimed.
+fn first_with_bulk_endpoints(
+    settings: impl IntoIterator<Item = (u8, Option<(u8, u8)>)>,
+) -> Result<Option<AdbInterface>, UsbConnectError> {
+    let mut settings = settings.into_iter().peekable();
+    if settings.peek().is_none() {
+        return Ok(None);
+    }
+    settings
+        .find_map(|(number, endpoints)| {
+            let (ep_in, ep_out) = endpoints?;
+            Some(AdbInterface {
+                number,
+                ep_in,
+                ep_out,
+            })
+        })
+        .map(Some)
+        .ok_or(UsbConnectError::NoBulkEndpoints)
 }
 
 /// The bulk IN and OUT endpoint addresses of one interface setting.
@@ -455,6 +491,26 @@ mod tests {
             alloc::format!("{}", rusb::Error::Pipe)
         );
         assert!(UsbError::BlockingTaskFailed.source().is_none());
+    }
+
+    /// An ADB setting without both bulk endpoints is passed over, and a
+    /// device with no other is turned down for that, not for speaking no
+    /// ADB: the scan rejects it before opening it.
+    #[test]
+    fn the_adb_interface_is_the_first_with_both_bulk_endpoints() {
+        use crate::transport::rusb::{first_with_bulk_endpoints, UsbConnectError};
+        let found = first_with_bulk_endpoints([
+            (0, None),
+            (1, Some((0x81, 0x01))),
+            (2, Some((0x82, 0x02))),
+        ]);
+        let iface = found.expect("the descriptor was read").expect("found");
+        assert_eq!((iface.number, iface.ep_in, iface.ep_out), (1, 0x81, 0x01));
+        assert!(matches!(
+            first_with_bulk_endpoints([(0, None)]),
+            Err(UsbConnectError::NoBulkEndpoints)
+        ));
+        assert!(matches!(first_with_bulk_endpoints([]), Ok(None)));
     }
 
     #[test]

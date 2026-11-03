@@ -225,6 +225,7 @@ pub fn connect_by_selector(selector: UsbSelector<'_>) -> Result<UsbTransport, Us
 
 impl Enumerated for nusb::DeviceInfo {
     type Error = UsbConnectError;
+    type Interface = u8;
 
     fn vid(&self) -> u16 {
         self.vendor_id()

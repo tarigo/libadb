@@ -64,6 +64,7 @@ impl Dev {
 
 impl Enumerated for Dev {
     type Error = Fail;
+    type Interface = u8;
 
     fn vid(&self) -> u16 {
         self.vid
@@ -226,6 +227,40 @@ fn unreadable_interfaces_fail_only_a_named_device() {
         pid: 0x0001,
     };
     assert_eq!(pick(devices(), selector), Err(Fail::Interfaces));
+}
+
+/// A device its interfaces rule out never reaches `open`: whatever a
+/// backend finds wrong with an ADB interface there, as rusb finds
+/// missing bulk endpoints, turns the device down before it is opened
+/// and claimed.
+#[test]
+fn a_device_its_interfaces_rule_out_is_never_opened() {
+    let devices = || {
+        vec![
+            Ok(Dev::new(0xbeef, 0x0001, Some(0)).with_unreadable_interfaces()),
+            Ok(Dev::new(0xbeef, 0x0002, Some(1))),
+        ]
+    };
+
+    let mut opened = Vec::new();
+    let picked = scan(devices(), UsbSelector::Any, |d, _| {
+        opened.push(d.pid);
+        Ok(d.pid)
+    });
+    assert_eq!(picked, Ok(0x0002));
+    assert_eq!(opened, [0x0002]);
+
+    let mut opened = Vec::new();
+    let selector = UsbSelector::VidPid {
+        vid: 0xbeef,
+        pid: 0x0001,
+    };
+    let picked = scan(devices(), selector, |d, _| {
+        opened.push(d.pid);
+        Ok(d.pid)
+    });
+    assert_eq!(picked, Err(Fail::Interfaces));
+    assert!(opened.is_empty());
 }
 
 /// A device whose IDs cannot be read could be the one wanted or any

@@ -27,15 +27,23 @@ pub(super) trait Enumerated {
     /// The backend's connect error, which a failed lookup reports.
     type Error: ScanError;
 
+    /// What [`adb_interface`](Self::adb_interface) found and `scan`'s
+    /// `open` step claims: the interface number, and whatever else the
+    /// backend read alongside it that opening would otherwise read
+    /// again.
+    type Interface;
+
     /// USB vendor ID.
     fn vid(&self) -> u16;
 
     /// USB product ID.
     fn pid(&self) -> u16;
 
-    /// Number of the first interface that [speaks ADB](speaks_adb), or
-    /// `None` if none does.
-    fn adb_interface(&self) -> Result<Option<u8>, Self::Error>;
+    /// The first interface that [speaks ADB](speaks_adb), or `None` if
+    /// none does. A backend that can tell from the descriptors that an
+    /// interface is unusable passes it over here, before anything is
+    /// opened.
+    fn adb_interface(&self) -> Result<Option<Self::Interface>, Self::Error>;
 
     /// The serial number, or `None` if the device reports none.
     fn serial(&mut self) -> Result<Option<String>, Self::Error>;
@@ -58,8 +66,8 @@ pub(super) fn speaks_adb(class: u8, subclass: u8, protocol: u8) -> bool {
 }
 
 /// Walk `devices`, handing the first one the selector accepts to
-/// `open` along with its ADB interface number, and keep walking if that
-/// one turns out unusable.
+/// `open` along with its ADB interface, and keep walking if that one
+/// turns out unusable.
 ///
 /// A VID:PID names one device, so its failures are reported as they
 /// happen. `Any` and a serial number describe a search: a device that
@@ -79,7 +87,7 @@ pub(super) fn scan<D, T, F>(
 ) -> Result<T, D::Error>
 where
     D: Enumerated,
-    F: FnMut(D, u8) -> Result<T, D::Error>,
+    F: FnMut(D, D::Interface) -> Result<T, D::Error>,
 {
     let named = matches!(selector, UsbSelector::VidPid { .. });
     let mut first_err = None;
@@ -111,7 +119,10 @@ where
 
 /// The ADB interface `selector` wants `device` opened on, or `None` if
 /// it passes the device over.
-fn admit<D: Enumerated>(device: &mut D, selector: UsbSelector<'_>) -> Result<Option<u8>, D::Error> {
+fn admit<D: Enumerated>(
+    device: &mut D,
+    selector: UsbSelector<'_>,
+) -> Result<Option<D::Interface>, D::Error> {
     if let UsbSelector::VidPid { vid, pid } = selector {
         if (device.vid(), device.pid()) != (vid, pid) {
             return Ok(None);
