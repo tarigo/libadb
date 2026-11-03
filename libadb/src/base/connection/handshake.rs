@@ -12,27 +12,6 @@ use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
 
-// adbd may emit stream-level packets (CLSE/OKAY/WRTE/OPEN) for channels
-// left over from a previous session, typically right after host
-// re-attach on USB. Drain them until a handshake packet arrives: CNXN,
-// AUTH or STLS.
-pub(crate) async fn recv_handshake_pkt<T: Read>(
-    t: &mut T,
-    buf: &mut BytesMut,
-    max_payload: u32,
-) -> Result<Packet, Error<T::Error>> {
-    loop {
-        let pkt = recv_pkt(t, buf, max_payload).await?;
-        match pkt.command {
-            Command::Connect | Command::Auth | Command::StartTls => return Ok(pkt),
-            Command::Close | Command::Ready | Command::Write | Command::Open => {
-                log::debug!("dropping stale {:?} during handshake", pkt.command);
-            }
-            other => return Err(ProtocolError::UnexpectedCommand(other).into()),
-        }
-    }
-}
-
 impl<T> Connection<T>
 where
     T: Read + Write,
@@ -73,73 +52,19 @@ where
     /// .await?;
     /// ```
     pub async fn connect<A: Authenticator>(
-        mut transport: T,
-        mut auth: A,
+        transport: T,
+        auth: A,
         banner: HostBanner<'_>,
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let banner = banner.to_bytes();
-        // The flag outlives the handshake: it moves into the
-        // `Connection` that this builds, carrying over an abandoned
-        // write from the handshake itself.
-        let desync = DesyncFlag::new();
-        let mut recv_buf = BytesMut::new();
-        let verdict = open(
-            &mut transport,
-            &mut auth,
-            &banner,
-            &config,
-            &desync,
-            &mut recv_buf,
-        )
-        .await?;
-
-        match verdict {
-            Verdict::Connected(cnxn) => {
-                Self::assemble(transport, desync, recv_buf, &banner, config, cnxn)
-            }
+        let mut handshake = Handshake::new(transport, auth, banner, config);
+        match handshake.open().await? {
+            Verdict::Connected(cnxn) => handshake.assemble(cnxn),
             Verdict::StartTls(offer) => {
                 log::debug!("device demands TLS: STLS version {:#010x}", offer.arg0);
                 Err(ProtocolError::TlsRequired.into())
             }
         }
-    }
-
-    /// Everything after the device's CNXN: negotiate, parse the banner
-    /// and build the connection.
-    ///
-    /// Split out so the TLS path, which reads its CNXN from inside the
-    /// session, ends the same way.
-    pub(crate) fn assemble(
-        transport: T,
-        desync: DesyncFlag,
-        recv_buf: BytesMut,
-        banner: &[u8],
-        config: ConnectionConfig,
-        cnxn: Packet,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let delayed_ack = features::has_feature(banner, features::DELAYED_ACK)
-            && features::has_feature(&cnxn.data, features::DELAYED_ACK);
-
-        let device_banner = Some(DeviceBanner::from_bytes(
-            cnxn.data,
-            config.max_banner_properties(),
-        )?);
-
-        Ok(Self {
-            transport,
-            channels: (0..config.max_channels()).map(|_| None).collect(),
-            // Bounded by our own encoder, not just by the device's offer.
-            max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
-            protocol_version: cnxn.arg0.min(command::ADB_VERSION),
-            config,
-            device_banner,
-            local_id_counter: 1,
-            incoming: alloc::collections::VecDeque::new(),
-            delayed_ack,
-            recv_buf,
-            desync,
-        })
     }
 }
 
@@ -162,110 +87,183 @@ impl Verdict {
     }
 }
 
-/// The half of the handshake both entry points share: send our CNXN
-/// and bring back the device's verdict.
+/// What a handshake carries from our CNXN to the device's.
 ///
-/// Authentication happens in here when the device asks for it. A
-/// first answer that is none of CNXN, STLS and AUTH fails here, as a
-/// protocol error.
-pub(crate) async fn open<T: Read + Write, A: Authenticator>(
-    transport: &mut T,
-    auth: &mut A,
-    banner: &Bytes,
-    config: &ConnectionConfig,
-    desync: &DesyncFlag,
-    recv_buf: &mut BytesMut,
-) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
-    let hello = Packet::new(
-        Command::Connect,
-        command::ADB_VERSION,
-        config.max_payload(),
-        banner.clone(),
-    );
-    // The device has not told us its version yet, so stay on the
-    // conservative side: a pre-0x0100_0001 peer verifies this packet.
-    send_pkt(transport, desync, &hello, Checksum::Compute).await?;
-
-    let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-    let pkt = match Verdict::of(pkt) {
-        Ok(verdict) => return Ok(verdict),
-        Err(pkt) => pkt,
-    };
-    match pkt.command {
-        Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-            do_auth(transport, desync, auth, recv_buf, pkt.data, config).await
-        }
-        other => Err(ProtocolError::UnexpectedCommand(other).into()),
-    }
+/// Both entry points run one; the TLS one goes on with it inside the
+/// session. It ends in [`assemble`](Self::assemble), which hands its
+/// state on to the connection.
+pub(super) struct Handshake<T, A> {
+    pub(super) transport: T,
+    auth: A,
+    /// Our CNXN payload; delayed ACK is negotiated from it as well.
+    banner: Bytes,
+    config: ConnectionConfig,
+    /// Outlives the handshake: it moves into the `Connection`, carrying
+    /// over an abandoned write from the handshake itself.
+    desync: DesyncFlag,
+    /// Whatever of a packet has arrived and not been decoded yet.
+    pub(super) recv_buf: BytesMut,
 }
 
-/// Answer the device's AUTH challenge.
-///
-/// Returns the verdict the exchange ended on: CNXN once the key is
-/// accepted, or STLS if the device switches to TLS midway. Any AUTH but
-/// the one token that asks for the key is [`AuthError::Rejected`]; that
-/// token is [`AuthError::KeyNotTrusted`] when the authenticator will not
-/// offer the key; a command with no place in the handshake, such as
-/// SYNC, fails as [`ProtocolError::UnexpectedCommand`].
-pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
-    transport: &mut T,
-    desync: &DesyncFlag,
-    auth: &mut A,
-    recv_buf: &mut BytesMut,
-    token: Bytes,
-    config: &ConnectionConfig,
-) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
-    // Checked here rather than in each authenticator: a stray
-    // length must not reach a signer that may be someone else's.
-    if token.len() != command::AUTH_TOKEN_LEN {
-        return Err(ProtocolError::InvalidAuthToken(token.len()).into());
-    }
-
-    let signature = auth
-        .sign(&token)
-        .await
-        .map_err(|e| Error::Auth(AuthError::SignFailed(alloc::format!("{e}"))))?;
-
-    send_pkt(
-        transport,
-        desync,
-        &Packet::auth_signature(signature),
-        Checksum::Compute,
-    )
-    .await?;
-
-    let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-    let resp = match Verdict::of(resp) {
-        Ok(verdict) => return Ok(verdict),
-        Err(resp) => resp,
-    };
-    match resp.command {
-        // A second token: the signature was not enough, offer the key.
-        Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
-        _ => return Err(AuthError::Rejected.into()),
-    }
-
-    // The key is what brings up the dialog on the device; an
-    // authenticator that only asks whether it is trusted stops here.
-    if !auth.offer_public_key() {
-        return Err(AuthError::KeyNotTrusted.into());
-    }
-
-    {
-        let pubkey = auth.public_key();
-        send_pkt(
+impl<T, A> Handshake<T, A>
+where
+    T: Read + Write,
+    A: Authenticator,
+{
+    pub(super) fn new(
+        transport: T,
+        auth: A,
+        banner: HostBanner<'_>,
+        config: ConnectionConfig,
+    ) -> Self {
+        Self {
             transport,
-            desync,
-            &Packet::auth_public_key(pubkey.to_vec()),
-            Checksum::Compute,
-        )
-        .await?;
-
-        let resp = recv_handshake_pkt(transport, recv_buf, config.max_payload()).await?;
-        if let Ok(verdict) = Verdict::of(resp) {
-            return Ok(verdict);
+            auth,
+            banner: banner.to_bytes(),
+            config,
+            desync: DesyncFlag::new(),
+            recv_buf: BytesMut::new(),
         }
     }
 
-    Err(AuthError::Rejected.into())
+    /// The half of the handshake both entry points share: send our CNXN
+    /// and bring back the device's verdict.
+    ///
+    /// Authentication happens in here when the device asks for it. A
+    /// first answer that is none of CNXN, STLS and AUTH fails here, as a
+    /// protocol error.
+    pub(super) async fn open(&mut self) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
+        let hello = Packet::new(
+            Command::Connect,
+            command::ADB_VERSION,
+            self.config.max_payload(),
+            self.banner.clone(),
+        );
+        self.send(&hello).await?;
+
+        let pkt = match Verdict::of(self.recv().await?) {
+            Ok(verdict) => return Ok(verdict),
+            Err(pkt) => pkt,
+        };
+        match pkt.command {
+            Command::Auth if pkt.arg0 == command::AUTH_TOKEN => self.do_auth(pkt.data).await,
+            other => Err(ProtocolError::UnexpectedCommand(other).into()),
+        }
+    }
+
+    /// Answer the device's AUTH challenge.
+    ///
+    /// Returns the verdict the exchange ended on: CNXN once the key is
+    /// accepted, or STLS if the device switches to TLS midway. Any AUTH but
+    /// the one token that asks for the key is [`AuthError::Rejected`]; that
+    /// token is [`AuthError::KeyNotTrusted`] when the authenticator will not
+    /// offer the key; a command with no place in the handshake, such as
+    /// SYNC, fails as [`ProtocolError::UnexpectedCommand`].
+    pub(super) async fn do_auth(
+        &mut self,
+        token: Bytes,
+    ) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
+        // Checked here rather than in each authenticator: a stray
+        // length must not reach a signer that may be someone else's.
+        if token.len() != command::AUTH_TOKEN_LEN {
+            return Err(ProtocolError::InvalidAuthToken(token.len()).into());
+        }
+
+        let signature = self
+            .auth
+            .sign(&token)
+            .await
+            .map_err(|e| Error::Auth(AuthError::SignFailed(alloc::format!("{e}"))))?;
+        self.send(&Packet::auth_signature(signature)).await?;
+
+        let resp = match Verdict::of(self.recv().await?) {
+            Ok(verdict) => return Ok(verdict),
+            Err(resp) => resp,
+        };
+        match resp.command {
+            // A second token: the signature was not enough, offer the key.
+            Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
+            _ => return Err(AuthError::Rejected.into()),
+        }
+
+        // The key is what brings up the dialog on the device; an
+        // authenticator that only asks whether it is trusted stops here.
+        if !self.auth.offer_public_key() {
+            return Err(AuthError::KeyNotTrusted.into());
+        }
+
+        let pubkey = self.auth.public_key().to_vec();
+        self.send(&Packet::auth_public_key(pubkey)).await?;
+
+        match Verdict::of(self.recv().await?) {
+            Ok(verdict) => Ok(verdict),
+            Err(_) => Err(AuthError::Rejected.into()),
+        }
+    }
+
+    /// Everything after the device's CNXN: negotiate, parse the banner
+    /// and build the connection.
+    ///
+    /// Split out so the TLS path, which reads its CNXN from inside the
+    /// session, ends the same way.
+    pub(super) fn assemble(
+        self,
+        cnxn: Packet,
+    ) -> Result<Connection<T>, Error<<T as ErrorType>::Error>> {
+        let delayed_ack = features::has_feature(&self.banner, features::DELAYED_ACK)
+            && features::has_feature(&cnxn.data, features::DELAYED_ACK);
+
+        let device_banner = Some(DeviceBanner::from_bytes(
+            cnxn.data,
+            self.config.max_banner_properties(),
+        )?);
+
+        Ok(Connection {
+            transport: self.transport,
+            channels: (0..self.config.max_channels()).map(|_| None).collect(),
+            // Bounded by our own encoder, not just by the device's offer.
+            max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
+            protocol_version: cnxn.arg0.min(command::ADB_VERSION),
+            config: self.config,
+            device_banner,
+            local_id_counter: 1,
+            incoming: alloc::collections::VecDeque::new(),
+            delayed_ack,
+            recv_buf: self.recv_buf,
+            desync: self.desync,
+        })
+    }
+
+    /// Send a handshake packet.
+    ///
+    /// Checksummed: the device has not told us its version yet, so stay
+    /// on the conservative side — a pre-0x0100_0001 peer verifies it.
+    pub(super) async fn send(
+        &mut self,
+        pkt: &Packet,
+    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+        send_pkt(&mut self.transport, &self.desync, pkt, Checksum::Compute).await
+    }
+
+    /// The next handshake packet: CNXN, AUTH or STLS.
+    pub(super) async fn recv(&mut self) -> Result<Packet, Error<<T as ErrorType>::Error>> {
+        // adbd may emit stream-level packets (CLSE/OKAY/WRTE/OPEN) for
+        // channels left over from a previous session, typically right
+        // after host re-attach on USB. Drain them.
+        loop {
+            let pkt = recv_pkt(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+            )
+            .await?;
+            match pkt.command {
+                Command::Connect | Command::Auth | Command::StartTls => return Ok(pkt),
+                Command::Close | Command::Ready | Command::Write | Command::Open => {
+                    log::debug!("dropping stale {:?} during handshake", pkt.command);
+                }
+                other => return Err(ProtocolError::UnexpectedCommand(other).into()),
+            }
+        }
+    }
 }

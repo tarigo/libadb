@@ -8,17 +8,15 @@
 //! A device that does not ask for TLS gets the ordinary treatment, so a
 //! caller does not have to know in advance which kind it is talking to.
 
-use bytes::BytesMut;
 use embedded_io::ErrorType;
 
-use super::handshake::{do_auth, open, recv_handshake_pkt, Verdict};
+use super::handshake::{Handshake, Verdict};
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
 use crate::base::protocol::constant::STLS_VERSION;
-use crate::base::protocol::{Checksum, Packet};
-use crate::base::wire::{send_pkt, DesyncFlag};
+use crate::base::protocol::Packet;
 use crate::tls::TlsClientConfig;
 use crate::transport::tls::StartTls;
 
@@ -66,54 +64,32 @@ where
     ///   [`TlsError::HandshakeClosed`](crate::transport::tls::TlsError::HandshakeClosed)
     ///   when the device hangs up in the middle of it.
     pub async fn connect_tls<A: Authenticator>(
-        mut transport: T,
-        mut auth: A,
+        transport: T,
+        auth: A,
         banner: HostBanner<'_>,
         config: ConnectionConfig,
         tls: &TlsClientConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let banner = banner.to_bytes();
-        let desync = DesyncFlag::new();
-        let mut recv_buf = BytesMut::new();
-        let verdict = open(
-            &mut transport,
-            &mut auth,
-            &banner,
-            &config,
-            &desync,
-            &mut recv_buf,
-        )
-        .await?;
-
-        let cnxn = match verdict {
+        let mut handshake = Handshake::new(transport, auth, banner, config);
+        let cnxn = match handshake.open().await? {
             Verdict::Connected(cnxn) => cnxn,
-            Verdict::StartTls(offer) => {
-                Self::upgrade(
-                    &mut transport,
-                    &desync,
-                    &mut auth,
-                    &mut recv_buf,
-                    offer,
-                    tls,
-                    &config,
-                )
-                .await?
-            }
+            Verdict::StartTls(offer) => handshake.upgrade(offer, tls).await?,
         };
-
-        Self::assemble(transport, desync, recv_buf, &banner, config, cnxn)
+        handshake.assemble(cnxn)
     }
+}
 
+impl<T, A> Handshake<T, A>
+where
+    T: StartTls,
+    A: Authenticator,
+{
     /// Answer the device's `STLS`, start the session, and read the CNXN
     /// that arrives inside it.
-    async fn upgrade<A: Authenticator>(
-        transport: &mut T,
-        desync: &DesyncFlag,
-        auth: &mut A,
-        recv_buf: &mut BytesMut,
+    async fn upgrade(
+        &mut self,
         offer: Packet,
         tls: &TlsClientConfig,
-        config: &ConnectionConfig,
     ) -> Result<Packet, Error<<T as ErrorType>::Error>> {
         if offer.arg0 != STLS_VERSION {
             // Worth knowing, not worth refusing over: AOSP does not negotiate it.
@@ -127,23 +103,21 @@ where
         // A TLS 1.3 server says nothing before our ClientHello, so bytes
         // already here came in the clear behind the STLS. The session
         // would take them for a broken record; name them for what they are.
-        if !recv_buf.is_empty() {
+        if !self.recv_buf.is_empty() {
             return Err(ProtocolError::DataAfterStls.into());
         }
 
         let reply = Packet::new(Command::StartTls, STLS_VERSION, 0, alloc::vec::Vec::new());
-        send_pkt(transport, desync, &reply, Checksum::Compute).await?;
+        self.send(&reply).await?;
 
         // Nothing here is the device refusing our key: the certificate
         // leaves in our last flight, once the handshake is over on our
         // side, so the device has not seen it yet.
-        transport.start_tls(tls).await.map_err(Error::Io)?;
+        self.transport.start_tls(tls).await.map_err(Error::Io)?;
 
         // The host does not repeat its CNXN. The device sends one from
         // inside the session, and that is the first thing to arrive.
-        let pkt = recv_handshake_pkt(transport, recv_buf, config.max_payload())
-            .await
-            .map_err(|e| Self::verdict_on(e, recv_buf))?;
+        let pkt = self.recv().await.map_err(|e| self.verdict_on(e))?;
 
         match pkt.command {
             Command::Connect => Ok(pkt),
@@ -151,9 +125,10 @@ where
             // answering costs nothing. It only puts the CNXN off, so what
             // fails in it is judged as a failed CNXN read would be.
             Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
-                let verdict = do_auth(transport, desync, auth, recv_buf, pkt.data, config)
+                let verdict = self
+                    .do_auth(pkt.data)
                     .await
-                    .map_err(|e| Self::verdict_on(e, recv_buf))?;
+                    .map_err(|e| self.verdict_on(e))?;
                 match verdict {
                     Verdict::Connected(cnxn) => Ok(cnxn),
                     // Inside the session already, where STLS is out of turn.
@@ -177,18 +152,15 @@ where
     }
 
     /// The same judgement, for a failure met inside the session before
-    /// the device's CNXN, with `recv_buf` holding whatever of a packet
-    /// had arrived.
-    fn verdict_on(
-        error: Error<<T as ErrorType>::Error>,
-        recv_buf: &BytesMut,
-    ) -> Error<<T as ErrorType>::Error> {
+    /// the device's CNXN, with the receive buffer holding whatever of a
+    /// packet had arrived.
+    fn verdict_on(&self, error: Error<<T as ErrorType>::Error>) -> Error<<T as ErrorType>::Error> {
         match error {
             // Not a byte of a CNXN. A device that closes over our key looks
             // like this, and so does one that took the key and went away.
             // Part of one means the device let us in, so the end of the
             // stream stays what it is.
-            Error::UnexpectedEof if recv_buf.is_empty() => {
+            Error::UnexpectedEof if self.recv_buf.is_empty() => {
                 log::debug!("device closed the TLS session before its CNXN");
                 AuthError::TlsClosedBeforeConnect.into()
             }
