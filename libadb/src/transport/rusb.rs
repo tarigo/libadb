@@ -452,6 +452,19 @@ mod tests {
     }
 
     #[test]
+    fn a_transfer_error_stays_reachable_through_the_wrapper() {
+        use crate::transport::rusb::UsbError;
+        use core::error::Error as _;
+        let err = UsbError::Transfer(rusb::Error::Pipe);
+        let source = err.source().expect("the transfer error is the source");
+        assert_eq!(
+            alloc::format!("{source}"),
+            alloc::format!("{}", rusb::Error::Pipe)
+        );
+        assert!(UsbError::BlockingTaskFailed.source().is_none());
+    }
+
+    #[test]
     fn the_backend_serves_every_runtime() {
         // Compiling this is the assertion: one marker, and the
         // transport it yields follows whichever runtime is asked for.

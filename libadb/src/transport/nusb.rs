@@ -85,13 +85,17 @@ impl embedded_io::ErrorType for UsbTransport {
 
 impl embedded_io_async::Read for UsbTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        UsbTransport::read(self, buf).await.map_err(UsbError)
+        UsbTransport::read(self, buf)
+            .await
+            .map_err(UsbError::Transfer)
     }
 }
 
 impl embedded_io_async::Write for UsbTransport {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        UsbTransport::write(self, buf).await.map_err(UsbError)
+        UsbTransport::write(self, buf)
+            .await
+            .map_err(UsbError::Transfer)
     }
 
     async fn flush(&mut self) -> Result<(), Self::Error> {
@@ -118,19 +122,27 @@ impl crate::transport::Splittable for UsbTransport {
     }
 }
 
-/// Wrapper around `nusb::transfer::TransferError` implementing `embedded_io::Error`.
+/// Errors from the nusb-backed USB transport.
 #[derive(Debug)]
-pub struct UsbError(pub nusb::transfer::TransferError);
+#[non_exhaustive]
+pub enum UsbError {
+    /// A bulk transfer failed.
+    Transfer(nusb::transfer::TransferError),
+}
 
 impl core::fmt::Display for UsbError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "usb: {}", self.0)
+        match self {
+            Self::Transfer(e) => write!(f, "usb: {e}"),
+        }
     }
 }
 
 impl core::error::Error for UsbError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        Some(&self.0)
+        match self {
+            Self::Transfer(e) => Some(e),
+        }
     }
 }
 
@@ -253,7 +265,7 @@ mod tests {
     #[test]
     fn a_transfer_error_stays_reachable_through_the_wrapper() {
         use core::error::Error as _;
-        let err = UsbError(nusb::transfer::TransferError::Cancelled);
+        let err = UsbError::Transfer(nusb::transfer::TransferError::Cancelled);
         let source = err.source().expect("the transfer error is the source");
         assert_eq!(
             alloc::format!("{source}"),
