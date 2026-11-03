@@ -11,8 +11,8 @@
 use bytes::BytesMut;
 use embedded_io::ErrorType;
 
-use super::handshake::{build_host_banner, do_auth, open, recv_handshake_pkt, Verdict};
-use super::{Connection, ConnectionConfig};
+use super::handshake::{do_auth, open, recv_handshake_pkt, Verdict};
+use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
@@ -82,32 +82,35 @@ where
         tls: &TlsClientConfig,
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let banner = build_host_banner(features);
-        Self::connect_tls_with_raw_banner_and_config(
-            transport,
-            auth,
-            banner.as_slice(),
-            tls,
-            config,
-        )
-        .await
+        Self::connect_tls_banner(transport, auth, HostBanner::Features(features), tls, config).await
     }
 
     /// [`connect_tls`](Self::connect_tls) with a caller-supplied banner
     /// and explicit resource limits.
     pub async fn connect_tls_with_raw_banner_and_config<A: Authenticator>(
-        mut transport: T,
-        mut auth: A,
+        transport: T,
+        auth: A,
         banner: &[u8],
         tls: &TlsClientConfig,
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        Self::connect_tls_banner(transport, auth, HostBanner::Raw(banner), tls, config).await
+    }
+
+    async fn connect_tls_banner<A: Authenticator>(
+        mut transport: T,
+        mut auth: A,
+        banner: HostBanner<'_>,
+        tls: &TlsClientConfig,
+        config: ConnectionConfig,
+    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        let banner = banner.to_bytes();
         let desync = DesyncFlag::new();
         let mut recv_buf = BytesMut::new();
         let verdict = open(
             &mut transport,
             &mut auth,
-            banner,
+            &banner,
             &config,
             &desync,
             &mut recv_buf,
@@ -130,7 +133,7 @@ where
             }
         };
 
-        Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
+        Self::assemble(transport, desync, recv_buf, &banner, config, cnxn)
     }
 
     /// Answer the device's `STLS`, start the session, and read the CNXN

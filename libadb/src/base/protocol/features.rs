@@ -60,11 +60,10 @@ features! {
 /// Features this library actually implements on the wire and is safe
 /// to advertise as a host to a device.
 ///
-/// Used by default when callers pass this slice to
-/// [`Connection::connect`](crate::Connection::connect). Compression
-/// variants of `sendrecv_v2` are intentionally excluded — the library
-/// does not perform brotli/lz4/zstd itself, only the uncompressed
-/// `SND2`/`RCV2` framing.
+/// What [`HostBanner::default`](crate::HostBanner::default) advertises.
+/// Compression variants of `sendrecv_v2` are intentionally excluded —
+/// the library does not perform brotli/lz4/zstd itself, only the
+/// uncompressed `SND2`/`RCV2` framing.
 pub const DEFAULT_HOST_FEATURES: &[Feature] = &[
     Feature::ShellV2,
     Feature::Cmd,

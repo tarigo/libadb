@@ -137,7 +137,7 @@ pub mod uri;
 pub use base::{auth, channel, connection, device_banner, error, protocol, session};
 
 // Core types used in every non-trivial caller.
-pub use base::connection::{Connection, ConnectionConfig, Incoming};
+pub use base::connection::{Connection, ConnectionConfig, HostBanner, Incoming};
 pub use base::error::{Error, ProtocolError};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
 pub use base::session::Session;
@@ -162,8 +162,8 @@ pub use transport::{UsbBackend, ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 /// Common vocabulary for `use libadb::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        Connection, ConnectionConfig, Error, Feature, ProtocolError, Session, Splittable,
-        DEFAULT_HOST_FEATURES,
+        Connection, ConnectionConfig, Error, Feature, HostBanner, ProtocolError, Session,
+        Splittable, DEFAULT_HOST_FEATURES,
     };
 
     #[cfg(feature = "keys")]

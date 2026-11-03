@@ -19,6 +19,7 @@ use super::protocol::features::Feature;
 use super::protocol::Checksum;
 use super::protocol::Packet;
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
+pub use banner::HostBanner;
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 /// ADB connection over an async transport.
@@ -868,6 +869,7 @@ where
     }
 }
 
+mod banner;
 mod config;
 mod handshake;
 #[cfg(feature = "tls")]

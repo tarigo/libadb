@@ -1,9 +1,8 @@
-use alloc::vec::Vec;
 use bytes::{Bytes, BytesMut};
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
-use super::{Connection, ConnectionConfig};
+use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
@@ -12,17 +11,6 @@ use crate::base::protocol::features::{self, Feature};
 use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
-
-pub(super) fn build_host_banner(features: &[Feature]) -> Vec<u8> {
-    let mut banner = Vec::from(b"host::features=".as_ref());
-    for (i, f) in features.iter().enumerate() {
-        if i > 0 {
-            banner.push(b',');
-        }
-        banner.extend_from_slice(f.wire_name().as_bytes());
-    }
-    banner
-}
 
 // adbd may emit stream-level packets (CLSE/OKAY/WRTE/OPEN) for channels
 // left over from a previous session, typically right after host
@@ -89,8 +77,7 @@ where
         features: &[Feature],
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        let banner = build_host_banner(features);
-        Self::connect_with_raw_banner_and_config(transport, auth, banner.as_slice(), config).await
+        Self::connect_banner(transport, auth, HostBanner::Features(features), config).await
     }
 
     /// Connect to an ADB device with a caller-supplied raw identity
@@ -112,11 +99,21 @@ where
     /// [`connect_with_raw_banner`](Self::connect_with_raw_banner) with
     /// explicit resource limits.
     pub async fn connect_with_raw_banner_and_config<A: Authenticator>(
-        mut transport: T,
-        mut auth: A,
+        transport: T,
+        auth: A,
         banner: &[u8],
         config: ConnectionConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        Self::connect_banner(transport, auth, HostBanner::Raw(banner), config).await
+    }
+
+    async fn connect_banner<A: Authenticator>(
+        mut transport: T,
+        mut auth: A,
+        banner: HostBanner<'_>,
+        config: ConnectionConfig,
+    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
+        let banner = banner.to_bytes();
         // The flag outlives the handshake: it moves into the
         // `Connection` that this builds, carrying over an abandoned
         // write from the handshake itself.
@@ -125,7 +122,7 @@ where
         let verdict = open(
             &mut transport,
             &mut auth,
-            banner,
+            &banner,
             &config,
             &desync,
             &mut recv_buf,
@@ -134,7 +131,7 @@ where
 
         match verdict {
             Verdict::Connected(cnxn) => {
-                Self::assemble(transport, desync, recv_buf, banner, config, cnxn)
+                Self::assemble(transport, desync, recv_buf, &banner, config, cnxn)
             }
             Verdict::StartTls(offer) => {
                 log::debug!("device demands TLS: STLS version {:#010x}", offer.arg0);
@@ -209,7 +206,7 @@ impl Verdict {
 pub(crate) async fn open<T: Read + Write, A: Authenticator>(
     transport: &mut T,
     auth: &mut A,
-    banner: &[u8],
+    banner: &Bytes,
     config: &ConnectionConfig,
     desync: &DesyncFlag,
     recv_buf: &mut BytesMut,
@@ -218,7 +215,7 @@ pub(crate) async fn open<T: Read + Write, A: Authenticator>(
         Command::Connect,
         command::ADB_VERSION,
         config.max_payload(),
-        banner.to_vec(),
+        banner.clone(),
     );
     // The device has not told us its version yet, so stay on the
     // conservative side: a pre-0x0100_0001 peer verifies this packet.
@@ -306,43 +303,4 @@ pub(crate) async fn do_auth<T: Read + Write, A: Authenticator>(
     }
 
     Err(AuthError::Rejected.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_host_banner_empty_features() {
-        assert_eq!(build_host_banner(&[]), b"host::features=");
-    }
-
-    #[test]
-    fn build_host_banner_single_feature() {
-        assert_eq!(
-            build_host_banner(&[Feature::ShellV2]),
-            b"host::features=shell_v2",
-        );
-    }
-
-    #[test]
-    fn build_host_banner_multiple_features_preserves_order() {
-        assert_eq!(
-            build_host_banner(&[Feature::ShellV2, Feature::Cmd, Feature::DelayedAck]),
-            b"host::features=shell_v2,cmd,delayed_ack",
-        );
-    }
-
-    #[test]
-    fn build_host_banner_matches_default_host_features() {
-        let banner = build_host_banner(features::DEFAULT_HOST_FEATURES);
-        assert!(banner.starts_with(b"host::features="));
-        for f in features::DEFAULT_HOST_FEATURES {
-            assert!(
-                features::has_feature(banner.as_slice(), f.wire_name().as_bytes()),
-                "banner does not advertise {:?}",
-                f,
-            );
-        }
-    }
 }
