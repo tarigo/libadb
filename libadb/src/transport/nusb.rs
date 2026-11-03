@@ -111,8 +111,6 @@ impl crate::transport::ReadCancelSafety for UsbTransport {
     }
 }
 
-// Dropping a bulk transfer discards whatever the device already
-// put in it: those bytes are gone, not waiting to be re-read.
 impl crate::transport::Splittable for UsbTransport {
     type ReadHalf = UsbTransport;
     type WriteHalf = UsbTransport;

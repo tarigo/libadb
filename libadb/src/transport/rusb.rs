@@ -40,12 +40,8 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// # Cancellation
 ///
-/// Under the `tokio` / `smol` features the bulk transfers run on a
-/// blocking worker thread (`spawn_blocking` / `unblock`) when a
-/// runtime is present, and inline on the calling thread otherwise
-/// (e.g. under the blocking `libadb-ffi` executor). Dropping
-/// the returned future does **not** cancel the in-flight USB
-/// transfer — libusb has no async cancel — so a partial bulk write
+/// Dropping a read or write future does **not** cancel the in-flight
+/// USB transfer — libusb has no async cancel — so a partial bulk write
 /// may still complete on the device. Subsequent calls on the same
 /// transport may then observe wire-framing corruption. Avoid
 /// cancelling read/write futures; use the connection-level
@@ -61,11 +57,8 @@ pub struct UsbTransport<R> {
     ep_in: u8,
     ep_out: u8,
     runtime: core::marker::PhantomData<R>,
-    // Reused across read/write to avoid per-call heap allocation
-    // when crossing the spawn_blocking/unblock boundary under the
-    // tokio/smol runtime variants. Empty under the no-runtime path
-    // since that one reads/writes directly into the caller buffer.
-    #[cfg_attr(not(any(feature = "tokio", feature = "smol")), allow(dead_code))]
+    // Moved into each blocking call, which cannot borrow the caller's
+    // buffer, and back out, so the transfers share one allocation.
     buffer: Vec<u8>,
 }
 
@@ -432,7 +425,7 @@ fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<(u8, u8)> {
     Some((ep_in?, ep_out?))
 }
 
-#[cfg(all(test, feature = "rusb"))]
+#[cfg(test)]
 mod tests {
     use crate::transport::runtime::Inline;
     use crate::transport::rusb::Rusb;
