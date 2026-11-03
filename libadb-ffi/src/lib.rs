@@ -47,6 +47,7 @@ mod channel;
 mod connection;
 mod error;
 mod feature;
+mod incoming;
 mod keys;
 #[cfg(feature = "pairing")]
 mod pairing;
@@ -58,9 +59,6 @@ mod transport;
 use core::ffi::c_char;
 use core::ptr;
 
-use channel::encode_channel_id;
-use connection::lock_poisoned;
-
 pub use auth::{adb_authenticator_t, AdbSignFn};
 // Also reachable through the C ABI; re-exported so Rust consumers of the
 // rlib — the crate's own integration tests among them — can name them.
@@ -71,6 +69,7 @@ pub use connection::{
     adb_connection_set_io_timeout_ms, adb_connection_t,
 };
 pub use error::{adb_last_error, AdbStatus};
+pub use incoming::{adb_accept_channel, adb_incoming_accept, adb_incoming_reject};
 pub use keys::{
     adb_key_free, adb_key_load_or_generate, adb_key_private_key_pem, adb_key_public_key, adb_key_t,
 };
@@ -177,100 +176,4 @@ unsafe fn copy_out(src: &[u8], buf: *mut u8, buf_len: usize, out_len: *mut usize
         let n = src.len().min(buf_len);
         ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
     }
-}
-
-/// Report the staged device-initiated channel (`adb reverse` traffic),
-/// waiting for one to arrive if none is staged, and copy its
-/// destination into `(dest, dest_cap, out_dest_len)` per
-/// [`adb_connection_features`]. The request stays staged on the handle
-/// until [`adb_incoming_accept`] or [`adb_incoming_reject`] consumes
-/// exactly it — repeated calls report the same request again, which is
-/// what makes the truncate-and-report convention usable here: probe
-/// with `(NULL, 0, &len)`, allocate, call again for the bytes.
-///
-/// With nothing staged this blocks until a channel arrives, exactly as
-/// [`adb_read_channel`] blocks for data, and — like it — holds the read
-/// lock while waiting, so a device that never opens one parks this
-/// call. The staged request is held locked for the whole call, so
-/// concurrent reports and verdicts serialize against it rather than
-/// racing for the queue. There is no way to interrupt it yet; in
-/// particular the handle must stay alive until this returns — freeing
-/// it from another thread while a call is blocked is undefined
-/// behaviour, not an interruption mechanism.
-///
-/// # Safety
-/// `conn` must be a valid handle and must not be freed while this call
-/// is in flight. `dest` must be NULL or writable for `dest_cap` bytes;
-/// `out_dest_len` must be NULL or a writable `usize`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn adb_accept_channel(
-    conn: *mut adb_connection_t,
-    dest: *mut u8,
-    dest_cap: usize,
-    out_dest_len: *mut usize,
-) -> AdbStatus {
-    error::clear_last_error();
-    if conn.is_null() {
-        return error::fail_invalid_arg("null handle");
-    }
-    // The staged lock is held across the empty check, the dequeue and
-    // the store: concurrent reports serialize on one staged request —
-    // a re-report of the same holder, never two racing holders. The
-    // reader lock nests inside it, in that order only.
-    let mut staged = lock_poisoned(&(*conn).staged_incoming);
-    // A request already staged is re-reported, not displaced — that
-    // keeps probe-allocate-copy sequences working on one request.
-    if let Some(incoming) = staged.as_ref() {
-        copy_out(incoming.destination(), dest, dest_cap, out_dest_len);
-        return AdbStatus::Ok;
-    }
-    let mut g = (*conn).lock_reader();
-    let incoming = ffi_try!(g.accept_incoming());
-    drop(g);
-    copy_out(incoming.destination(), dest, dest_cap, out_dest_len);
-    // Stage the request itself: the verdict calls consume it, so they
-    // cannot answer some other OPEN that queued up in the meantime.
-    *staged = Some(incoming);
-    AdbStatus::Ok
-}
-
-/// Accept the channel staged by [`adb_accept_channel`], returning its
-/// ID through `out_id`.
-///
-/// # Safety
-/// `conn` must be a valid handle; `out_id` a writable `uint64_t`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn adb_incoming_accept(
-    conn: *mut adb_connection_t,
-    out_id: *mut u64,
-) -> AdbStatus {
-    error::clear_last_error();
-    if conn.is_null() || out_id.is_null() {
-        return error::fail_invalid_arg("null pointer");
-    }
-    let staged = lock_poisoned(&(*conn).staged_incoming).take();
-    let Some(incoming) = staged else {
-        return error::fail_invalid_arg("no incoming channel is staged");
-    };
-    let ch = ffi_try!(incoming.accept());
-    *out_id = encode_channel_id(ch);
-    AdbStatus::Ok
-}
-
-/// Reject the channel staged by [`adb_accept_channel`].
-///
-/// # Safety
-/// `conn` must be a valid handle.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn adb_incoming_reject(conn: *mut adb_connection_t) -> AdbStatus {
-    error::clear_last_error();
-    if conn.is_null() {
-        return error::fail_invalid_arg("null handle");
-    }
-    let staged = lock_poisoned(&(*conn).staged_incoming).take();
-    let Some(incoming) = staged else {
-        return error::fail_invalid_arg("no incoming channel is staged");
-    };
-    ffi_try!(incoming.reject());
-    AdbStatus::Ok
 }
