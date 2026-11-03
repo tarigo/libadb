@@ -1,6 +1,7 @@
 use bytes::BytesMut;
-use core::future::Future;
-use core::task::Poll;
+use core::convert::Infallible;
+use core::future::{pending, Future};
+use core::pin::pin;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
@@ -16,7 +17,7 @@ use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::Checksum;
 use super::protocol::Packet;
-use super::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag, Staged, MIN_READ};
+use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
 pub const DEFAULT_MAX_CHANNELS: usize = 32;
@@ -522,52 +523,12 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<T as ErrorType>::Error>> {
-        self.desync.check()?;
-        let delayed_ack = self.delayed_ack;
-        let watermark = self.config.rx_watermark();
-        let buffered = self
-            .slot_mut(ch)?
-            .take_buffered(buf, delayed_ack, watermark)?;
-        if let Some((n, ack)) = buffered {
-            if let Some((local_id, remote_id, len)) = ack {
-                self.send_okay(local_id, remote_id, len).await?;
-            }
-            return Ok(n);
-        }
-
-        let (local_id, remote_id) = self.channel_ids(ch)?;
-        let rx_cap = self.config.rx_cap();
-
-        loop {
-            let pkt = recv_pkt(
-                &mut self.transport,
-                &mut self.recv_buf,
-                self.config.max_payload(),
-            )
-            .await?;
-            match pkt.command {
-                Command::Write if pkt.arg1 == local_id => {
-                    let n = buf.len().min(pkt.data.len());
-                    buf[..n].copy_from_slice(&pkt.data[..n]);
-                    let ack = match self.channels[ch.slot].as_mut() {
-                        Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
-                        None => None,
-                    };
-                    if let Some((local_id, remote_id, len)) = ack {
-                        self.send_okay(local_id, remote_id, len).await?;
-                    }
-                    return Ok(n);
-                }
-                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
-                    if let Some(slot) = self.channels[ch.slot].as_mut() {
-                        slot.apply_close();
-                    }
-                    return Err(Error::ChannelClosed);
-                }
-                _ => {
-                    self.dispatch(pkt).await?;
-                }
-            }
+        match self
+            .recv_data(ch, buf, pending::<Infallible>(), true)
+            .await?
+        {
+            SelectResult::Data(n) => Ok(n),
+            SelectResult::Interrupted(never) => match never {},
         }
     }
 
@@ -738,13 +699,25 @@ where
         F: Future,
         T: crate::transport::ReadCancelSafety,
     {
+        let race = self.transport.read_cancel_safe();
+        self.recv_data(ch, buf, interrupt, race).await
+    }
+
+    /// Buffered data first, then packets off the wire until one is for
+    /// `ch`, with `interrupt` and `race` as in [`recv_pkt_or`].
+    async fn recv_data<F: Future>(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+        interrupt: F,
+        race: bool,
+    ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        let cancel_safe = self.transport.read_cancel_safe();
-        let delayed_ack_now = self.delayed_ack;
-        let watermark_now = self.config.rx_watermark();
+        let delayed_ack = self.delayed_ack;
+        let watermark = self.config.rx_watermark();
         let buffered = self
             .slot_mut(ch)?
-            .take_buffered(buf, delayed_ack_now, watermark_now)?;
+            .take_buffered(buf, delayed_ack, watermark)?;
         if let Some((n, ack)) = buffered {
             if let Some((local_id, remote_id, len)) = ack {
                 self.send_okay(local_id, remote_id, len).await?;
@@ -753,118 +726,43 @@ where
         }
 
         let (local_id, remote_id) = self.channel_ids(ch)?;
-        let delayed_ack = self.delayed_ack;
         let rx_cap = self.config.rx_cap();
-        let watermark = self.config.rx_watermark();
-        let checksum = self.checksum();
-
-        let mut interrupt = core::pin::pin!(interrupt);
+        let mut interrupt = pin!(interrupt);
 
         loop {
-            if let Some(pkt) = Packet::decode(&mut self.recv_buf, self.config.max_payload())? {
-                match pkt.command {
-                    Command::Write if pkt.arg1 == local_id => {
-                        let n = buf.len().min(pkt.data.len());
-                        buf[..n].copy_from_slice(&pkt.data[..n]);
-                        let ack = match self.channels[ch.slot].as_mut() {
-                            Some(slot) => {
-                                slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?
-                            }
-                            None => None,
-                        };
-                        if let Some((local_id, remote_id, len)) = ack {
-                            send_okay_to(
-                                &mut self.transport,
-                                &self.desync,
-                                delayed_ack,
-                                local_id,
-                                remote_id,
-                                len,
-                                checksum,
-                            )
-                            .await?;
-                        }
-                        return Ok(SelectResult::Data(n));
-                    }
-                    Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
-                        if let Some(slot) = self.channels[ch.slot].as_mut() {
-                            slot.apply_close();
-                        }
-                        return Err(Error::ChannelClosed);
-                    }
-                    _ => {
-                        dispatch_to(
-                            &mut self.transport,
-                            &self.desync,
-                            &mut self.channels,
-                            &mut self.incoming,
-                            delayed_ack,
-                            rx_cap,
-                            watermark,
-                            checksum,
-                            pkt,
-                        )
-                        .await?;
-                        continue;
-                    }
-                }
-            }
-
+            let pkt = match recv_pkt_or(
+                &mut self.transport,
+                &mut self.recv_buf,
+                self.config.max_payload(),
+                interrupt.as_mut(),
+                race,
+            )
+            .await?
             {
-                enum Wakeup<O> {
-                    Read(usize),
-                    Interrupt(O),
-                }
-
-                let want = Packet::missing(&self.recv_buf).max(MIN_READ);
-                let this = &mut *self;
-                let mut staged = Staged::new(&mut this.recv_buf, want);
-                let transport = &mut this.transport;
-
-                // Read into the one stretch until the packet is whole, as
-                // `recv_pkt` does. There is nothing to dispatch before then,
-                // and `interrupt` is asked afresh for each read. However the
-                // loop ends, `staged` trims the untouched tail as it drops.
-                loop {
-                    let wakeup = if cancel_safe {
-                        let mut read_fut = core::pin::pin!(transport.read(staged.spare()));
-
-                        core::future::poll_fn(|cx| {
-                            if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
-                                return Poll::Ready(Ok(Wakeup::Interrupt(val)));
-                            }
-                            match read_fut.as_mut().poll(cx) {
-                                Poll::Ready(Ok(0)) => Poll::Ready(Err(Error::UnexpectedEof)),
-                                Poll::Ready(Ok(n)) => Poll::Ready(Ok(Wakeup::Read(n))),
-                                Poll::Ready(Err(e)) => Poll::Ready(Err(Error::Io(e))),
-                                Poll::Pending => Poll::Pending,
-                            }
-                        })
-                        .await?
-                    } else {
-                        // The transport loses whatever it has already been
-                        // handed if a read is dropped, so `interrupt` only
-                        // gets its answer between reads: due now, or once
-                        // this read has run its course.
-                        let due =
-                            core::future::poll_fn(|cx| Poll::Ready(interrupt.as_mut().poll(cx)))
-                                .await;
-                        if let Poll::Ready(val) = due {
-                            return Ok(SelectResult::Interrupted(val));
-                        }
-                        match transport.read(staged.spare()).await {
-                            Ok(0) => return Err(Error::UnexpectedEof),
-                            Ok(n) => Wakeup::Read(n),
-                            Err(e) => return Err(Error::Io(e)),
-                        }
+                Received::Packet(pkt) => pkt,
+                Received::Interrupted(val) => return Ok(SelectResult::Interrupted(val)),
+            };
+            match pkt.command {
+                Command::Write if pkt.arg1 == local_id => {
+                    let n = buf.len().min(pkt.data.len());
+                    buf[..n].copy_from_slice(&pkt.data[..n]);
+                    let ack = match self.channels[ch.slot].as_mut() {
+                        Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
+                        None => None,
                     };
-                    match wakeup {
-                        Wakeup::Read(n) => staged.commit(n),
-                        Wakeup::Interrupt(val) => return Ok(SelectResult::Interrupted(val)),
+                    if let Some((local_id, remote_id, len)) = ack {
+                        self.send_okay(local_id, remote_id, len).await?;
                     }
-                    if !staged.wants_more() {
-                        break;
+                    return Ok(SelectResult::Data(n));
+                }
+                Command::Close if clse_closes(pkt.arg0, pkt.arg1, local_id, remote_id) => {
+                    if let Some(slot) = self.channels[ch.slot].as_mut() {
+                        slot.apply_close();
                     }
+                    return Err(Error::ChannelClosed);
+                }
+                _ => {
+                    self.dispatch(pkt).await?;
                 }
             }
         }

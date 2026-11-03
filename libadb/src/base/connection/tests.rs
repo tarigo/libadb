@@ -551,11 +551,10 @@ fn a_borrowed_authenticator_withholds_its_key_as_the_owned_one_does() {
 
 #[test]
 fn a_large_packet_is_zeroed_once_while_select_reads_it() {
-    // The read loop stages its own buffer, apart from `recv_pkt` (whose
-    // twin test in wire.rs covers the handshake), and must zero it once
-    // per packet, not again for each 16 KiB read that TLS hands over.
-    // The bound allows the header and the MIN_READ that a first read is
-    // padded to.
+    // Raced against an interrupt, the read still stages the packet once,
+    // as `recv_pkt` does in its twin test in wire.rs, and must not zero
+    // it again for each 16 KiB read that TLS hands over. The bound
+    // allows the header and the MIN_READ that a first read is padded to.
     let big = vec![0x5a; 256 * 1024];
     let (mut conn, ch) = connected_for_select(|mock| {
         mock.feed(&wrte(1, &big)).drips(16 * 1024);
