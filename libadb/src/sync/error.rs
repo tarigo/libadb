@@ -5,6 +5,9 @@ use core::fmt;
 
 use crate::error::Error;
 
+/// What the sync service answered instead of what was asked: a `FAIL`,
+/// a reply the session did not expect, or an errno in a v2 stat or
+/// listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SyncError {
