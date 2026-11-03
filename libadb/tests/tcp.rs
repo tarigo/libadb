@@ -374,6 +374,9 @@ async fn exec_run_returns_buffer_full_when_output_exceeds_capacity() {
         ch.expect_ack().await;
         ch.send_write(&[b'y'; 16]).await;
         ch.expect_ack().await;
+        // The buffer is full but the output goes on.
+        ch.send_write(&[b'y'; 16]).await;
+        ch.expect_ack().await;
         // `yes` never ends: the channel is ours to close.
         ch.expect_close().await;
     })

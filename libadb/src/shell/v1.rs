@@ -142,7 +142,7 @@ pub async fn exec<S: Session>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::mock::{now, okay, one_slot, wrte, MockError};
+    use crate::base::mock::{clse, now, okay, one_slot, wrte, MockError};
     use crate::base::protocol::Packet;
 
     /// Run a one-shot `exec` the device answers with `answer` on a
@@ -159,8 +159,17 @@ mod tests {
     }
 
     #[test]
+    fn exec_returns_output_that_exactly_fills_the_buffer() {
+        let mut conn = one_slot("shell_v2", &[wrte(1, b"0123456789abcdef"), clse(1)]);
+        let mut buf = [0u8; 16];
+        let n = now(exec(&mut conn, "seq", &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"0123456789abcdef");
+    }
+
+    #[test]
     fn exec_frees_its_slot_when_the_buffer_fills() {
-        let err = exec_fails_then_slot_reopens(&[wrte(1, &[b'y'; 16])]);
+        // One byte past the buffer is enough to overflow it.
+        let err = exec_fails_then_slot_reopens(&[wrte(1, &[b'y'; 16]), wrte(1, b"y")]);
         assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
     }
 

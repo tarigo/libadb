@@ -159,15 +159,25 @@ pub(crate) trait ReadToEnd: Sized {
     /// best-effort, its own result dropped in favour of what the reads
     /// came to.
     ///
-    /// A `buf` that fills up before the device closes the channel is
-    /// [`Error::ReceiveBufferFull`], with what was read left in it.
+    /// Output that fills `buf` exactly still counts as read in full:
+    /// once `buf` is full, one more read, into a scratch byte, tells
+    /// whether the device has more. The device closing the channel then
+    /// returns `buf.len()`. Data means the output is longer than `buf`:
+    /// [`Error::ReceiveBufferFull`], with what was read left in `buf` and
+    /// the scratch byte lost along with the rest of the output. Any other
+    /// error that read meets is returned as it is.
     async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>> {
         let mut tail = 0;
+        let mut scratch = [0u8; 1];
         let read = loop {
-            if tail >= buf.len() {
-                break Err(Error::ReceiveBufferFull);
-            }
-            match self.read(&mut buf[tail..]).await {
+            let full = tail == buf.len();
+            let room = if full {
+                &mut scratch[..]
+            } else {
+                &mut buf[tail..]
+            };
+            match self.read(room).await {
+                Ok(n) if full && n > 0 => break Err(Error::ReceiveBufferFull),
                 Ok(n) => tail += n,
                 Err(Error::ChannelClosed) => break Ok(tail),
                 Err(e) => break Err(e),
