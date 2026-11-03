@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::fmt;
 use core::ops::{BitOr, BitOrAssign};
 
 /// Size of the basic sync header: `id(4) + arg(4)`.
@@ -84,14 +85,45 @@ pub const STAT_V2_BODY_SIZE: usize = STAT_V2_SIZE - 4;
 pub(super) const DENT_V1_SIZE: usize = 20;
 pub(super) const DENT_V2_SIZE: usize = 76;
 
+/// A Unix file mode as the sync protocol carries it: the file type and
+/// the permission bits in one number, e.g. `0o100644` for a regular
+/// file its owner may write and anyone may read.
+///
+/// `Display` prints it in octal, and `{:#}` adds the `0o`.
+///
+/// ```
+/// use libadb::sync::FileMode;
+///
+/// let mode = FileMode(0o100644);
+/// assert_eq!(mode.to_string(), "100644");
+/// assert_eq!(format!("{mode:#}"), "0o100644");
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(transparent)]
+pub struct FileMode(pub u32);
+
+impl fmt::Display for FileMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Octal::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Debug for FileMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FileMode({:#o})", self.0)
+    }
+}
+
 /// File metadata from a `STAT` (v1) response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatV1 {
     /// Unix file mode (type + permissions).
-    pub mode: u32,
+    pub mode: FileMode,
     /// File size in bytes (truncated to u32).
     pub size: u32,
-    /// Modification time (Unix seconds).
+    /// Modification time in Unix seconds, as the v1 record's unsigned
+    /// 32 bits hold it: nothing before 1970 or after 2106.
+    /// [`StatV2::mtime`] is signed and 64-bit.
     pub mtime: u32,
 }
 
@@ -100,31 +132,50 @@ pub struct StatV1 {
 pub struct StatV2 {
     /// Error code from the device (0 on success, errno on failure).
     pub error: u32,
+    /// The device the file lives on (`st_dev`).
     pub dev: u64,
+    /// The file's inode number.
     pub ino: u64,
-    pub mode: u32,
+    /// Unix file mode (type + permissions).
+    pub mode: FileMode,
+    /// Hard links to the file.
     pub nlink: u32,
+    /// The owner's user id.
     pub uid: u32,
+    /// The owner's group id.
     pub gid: u32,
+    /// File size in bytes.
     pub size: u64,
+    /// Last access, in Unix seconds.
     pub atime: i64,
+    /// Last modification, in Unix seconds: signed and 64-bit, where
+    /// [`StatV1::mtime`] is unsigned and 32-bit.
     pub mtime: i64,
+    /// Last status change, in Unix seconds.
     pub ctime: i64,
 }
 
 /// Directory entry from a `LIST` → `DENT` response (v1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
+    /// The entry's name, as the device's bytes: not always UTF-8.
     pub name: Vec<u8>,
-    pub mode: u32,
+    /// Unix file mode (type + permissions).
+    pub mode: FileMode,
+    /// File size in bytes (truncated to u32).
     pub size: u32,
+    /// Modification time in Unix seconds, unsigned and 32-bit as in
+    /// [`StatV1::mtime`].
     pub mtime: u32,
 }
 
 /// Directory entry from a `LIS2` response (v2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntryV2 {
+    /// The entry's name, as the device's bytes: not always UTF-8.
     pub name: Vec<u8>,
+    /// The entry's metadata; `stat.error` is non-zero when the device
+    /// could not stat it.
     pub stat: StatV2,
 }
 
@@ -213,7 +264,7 @@ pub fn parse_stat_v2_body(b: &[u8; STAT_V2_BODY_SIZE]) -> StatV2 {
         error: u32_at(b, 0),
         dev: u64_at(b, 4),
         ino: u64_at(b, 12),
-        mode: u32_at(b, 20),
+        mode: FileMode(u32_at(b, 20)),
         nlink: u32_at(b, 24),
         uid: u32_at(b, 28),
         gid: u32_at(b, 32),

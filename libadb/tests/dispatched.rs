@@ -300,7 +300,7 @@ async fn sync_stat_runs_over_the_writer() {
     let mut buf = [0u8; 128];
     let mut sync = sync::open(&mut writer, &mut buf).await.unwrap();
     let stat = sync.stat("/file").await.unwrap();
-    assert_eq!((stat.mode, stat.size), (0o100644, 42));
+    assert_eq!((stat.mode, stat.size), (sync::FileMode(0o100644), 42));
     sync.quit().await.unwrap();
     rt::join(device).await;
 }

@@ -33,7 +33,7 @@ fn parse_stat_v2_roundtrip() {
     assert_eq!(stat.error, 0);
     assert_eq!(stat.dev, 0x0102030405060708);
     assert_eq!(stat.ino, 42);
-    assert_eq!(stat.mode, 33188);
+    assert_eq!(stat.mode, FileMode(0o100644));
     assert_eq!(stat.nlink, 1);
     assert_eq!(stat.uid, 1000);
     assert_eq!(stat.gid, 1000);

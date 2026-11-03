@@ -23,7 +23,7 @@ compile_error!("this example requires --features tokio,host-keys or --features s
 
 use std::{env, fs, process};
 
-use libadb::sync;
+use libadb::sync::{self, FileMode};
 use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
 
 #[cfg(feature = "tokio")]
@@ -72,7 +72,7 @@ async fn connect(addr: &str) -> Result<Connection<Tcp>, Box<dyn std::error::Erro
     Ok(conn)
 }
 
-fn format_mode(mode: u32) -> String {
+fn format_mode(FileMode(mode): FileMode) -> String {
     const S_IFMT: u32 = 0o170000;
     const S_IFSOCK: u32 = 0o140000;
     const S_IFLNK: u32 = 0o120000;
@@ -117,7 +117,7 @@ async fn cmd_stat(addr: &str, path: &str) -> Result<(), Box<dyn std::error::Erro
     match session.stat_v2(path).await {
         Ok(st) => {
             println!("  path:  {path}");
-            println!("  mode:  {} ({:#o})", format_mode(st.mode), st.mode);
+            println!("  mode:  {} ({:#})", format_mode(st.mode), st.mode);
             println!("  size:  {}", st.size);
             println!("  uid:   {}", st.uid);
             println!("  gid:   {}", st.gid);
@@ -132,7 +132,7 @@ async fn cmd_stat(addr: &str, path: &str) -> Result<(), Box<dyn std::error::Erro
             eprintln!("[*] stat_v2 failed ({e}), trying v1 ...");
             let st = session.stat(path).await.map_err(|e| format!("stat: {e}"))?;
             println!("  path:  {path}");
-            println!("  mode:  {} ({:#o})", format_mode(st.mode), st.mode);
+            println!("  mode:  {} ({:#})", format_mode(st.mode), st.mode);
             println!("  size:  {}", st.size);
             println!("  mtime: {}", st.mtime);
         }
@@ -221,7 +221,7 @@ async fn cmd_push(addr: &str, local: &str, remote: &str) -> Result<(), Box<dyn s
         .map_err(|e| format!("sync open: {e}"))?;
 
     let data = fs::read(local)?;
-    let mode: u32 = 0o100644;
+    let mode = FileMode(0o100644);
     let mtime: u32 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)

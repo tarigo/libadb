@@ -47,7 +47,7 @@
 //! let data = sync.recv("/sdcard/file.txt").await?;
 //!
 //! // push
-//! sync.send("/sdcard/upload.txt", 0o100644, 0, b"hello").await?;
+//! sync.send("/sdcard/upload.txt", FileMode(0o100644), 0, b"hello").await?;
 //!
 //! sync.quit().await?;
 //! ```
@@ -195,7 +195,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.rx
             .fill_at_least(&mut self.channel, STAT_V1_SIZE)
             .await?;
-        let mode = self.peek_u32(4);
+        let mode = FileMode(self.peek_u32(4));
         let size = self.peek_u32(8);
         let mtime = self.peek_u32(12);
         self.rx.head += STAT_V1_SIZE;
@@ -248,7 +248,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             self.rx
                 .fill_at_least(&mut self.channel, DENT_V1_SIZE)
                 .await?;
-            let mode = self.peek_u32(4);
+            let mode = FileMode(self.peek_u32(4));
             let size = self.peek_u32(8);
             let mtime = self.peek_u32(12);
             let namelen = self.peek_u32(16) as usize;
@@ -386,22 +386,27 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `SEND` (v1) push.
     ///
-    /// `mode` is the Unix file permission bits (e.g. `0o100644`).
-    pub async fn send_start(&mut self, path: &str, mode: u32) -> Result<(), Error<S::IoError>> {
+    /// `mode` is the mode the device gives the file, e.g.
+    /// `FileMode(0o100644)`.
+    pub async fn send_start(
+        &mut self,
+        path: &str,
+        mode: FileMode,
+    ) -> Result<(), Error<S::IoError>> {
         let mut mode_dec = [0u8; 10];
-        let mode_str = format_u32(mode, &mut mode_dec);
+        let mode_str = format_u32(mode.0, &mut mode_dec);
         self.write_request(SyncId::Send, &[path.as_bytes(), b",", mode_str])
             .await
     }
 
     /// Begin a `SND2` (v2) push.
     ///
-    /// `flags` combines [`SyncFlags`]; [`SyncFlags::NONE`] pushes
-    /// uncompressed.
+    /// `mode` is as in [`send_start`](Self::send_start). `flags`
+    /// combines [`SyncFlags`]; [`SyncFlags::NONE`] pushes uncompressed.
     pub async fn send_v2_start(
         &mut self,
         path: &str,
-        mode: u32,
+        mode: FileMode,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
@@ -410,7 +415,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             .await?;
         self.channel.write(path_bytes).await?;
         let mut info = [0u8; 8];
-        info[0..4].copy_from_slice(&mode.to_le_bytes());
+        info[0..4].copy_from_slice(&mode.0.to_le_bytes());
         info[4..8].copy_from_slice(&flags.bits().to_le_bytes());
         self.channel.write(&info).await?;
         Ok(())
@@ -428,8 +433,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         Ok(())
     }
 
-    /// Finish a push, providing the file modification time (Unix
-    /// seconds).
+    /// Finish a push, providing the file modification time in Unix
+    /// seconds: unsigned and 32-bit for v1 and v2 alike, since `DONE`
+    /// has no wider field.
     ///
     /// Sends `DONE` and reads the device response (`OKAY` or `FAIL`).
     pub async fn send_done(&mut self, mtime: u32) -> Result<(), Error<S::IoError>> {
@@ -447,7 +453,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     pub async fn send(
         &mut self,
         path: &str,
-        mode: u32,
+        mode: FileMode,
         mtime: u32,
         data: &[u8],
     ) -> Result<(), Error<S::IoError>> {
@@ -461,7 +467,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     pub async fn send_v2(
         &mut self,
         path: &str,
-        mode: u32,
+        mode: FileMode,
         mtime: u32,
         flags: SyncFlags,
         data: &[u8],

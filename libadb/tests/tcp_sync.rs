@@ -1,7 +1,7 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::error::SyncError;
-use libadb::sync;
+use libadb::sync::{self, FileMode};
 use libadb::Error;
 
 #[path = "rt/rt.rs"]
@@ -113,7 +113,7 @@ async fn sync_stat_v1_returns_decoded_fields() {
     let mut buf = [0u8; 128];
     let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
     let stat = sync.stat("/file").await.unwrap();
-    assert_eq!(stat.mode, 0o100644);
+    assert_eq!(stat.mode, FileMode(0o100644));
     assert_eq!(stat.size, 42);
     assert_eq!(stat.mtime, 1_700_000_000);
 
@@ -141,7 +141,7 @@ async fn sync_stat_v2_returns_full_metadata() {
     let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
     let stat = sync.stat_v2("/dir").await.unwrap();
     assert_eq!(stat.error, 0);
-    assert_eq!(stat.mode, 0o40755);
+    assert_eq!(stat.mode, FileMode(0o40755));
     assert_eq!(stat.uid, 1000);
     assert_eq!(stat.size, 4096);
     assert_eq!(stat.mtime, 1_700_000_000);
@@ -205,10 +205,10 @@ async fn sync_list_v1_returns_entries_until_done() {
     let entries = sync.list("/dir").await.unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, b"a.txt");
-    assert_eq!(entries[0].mode, 0o100644);
+    assert_eq!(entries[0].mode, FileMode(0o100644));
     assert_eq!(entries[0].size, 10);
     assert_eq!(entries[1].name, b"sub");
-    assert_eq!(entries[1].mode, 0o40755);
+    assert_eq!(entries[1].mode, FileMode(0o40755));
 
     sync.quit().await.unwrap();
     rt::join(device).await;
@@ -264,7 +264,7 @@ async fn sync_send_v1_sends_start_data_done_and_reads_okay() {
 
     let mut buf = [0u8; 256];
     let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
-    sync.send("/upload", 0o644, 42, b"hi").await.unwrap();
+    sync.send("/upload", FileMode(0o644), 42, b"hi").await.unwrap();
 
     sync.quit().await.unwrap();
     rt::join(device).await;
@@ -395,7 +395,7 @@ async fn sync_session_survives_a_list_v1() {
     assert!(sync.list("/dir").await.unwrap().is_empty());
 
     let st = sync.stat("/dir").await.expect("stat after list");
-    assert_eq!(st.mode, 0o40755);
+    assert_eq!(st.mode, FileMode(0o40755));
 
     sync.quit().await.unwrap();
     rt::join(device).await;
