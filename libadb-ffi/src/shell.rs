@@ -1,8 +1,6 @@
 #![allow(clippy::await_holding_lock)]
 
 use alloc::boxed::Box;
-use alloc::format;
-use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -12,35 +10,13 @@ use std::sync::Mutex;
 
 use libadb::base::channel::ChannelId;
 use libadb::base::error::{Error, ProtocolError};
-use libadb::shell::v2::{FrameDecoder, FrameId};
+use libadb::shell::v2::{destination, FrameDecoder, FrameId, ShellMode, WindowSize};
 
 use crate::block_on;
 use crate::connection::{lock_poisoned, FfiReader, FfiWriter};
 use crate::error::{self, AdbStatus};
 use crate::slice::copy_out;
 use crate::transport::FfiTransportError;
-
-fn build_shell_v2_destination(
-    pty: bool,
-    term: &str,
-    command: &str,
-) -> Result<String, ProtocolError> {
-    if command.contains('\0') || term.contains('\0') {
-        return Err(ProtocolError::InvalidDestination);
-    }
-    Ok(match (pty, term.is_empty()) {
-        (false, _) => format!("shell,v2,raw:{command}\0"),
-        (true, true) => format!("shell,v2,pty:{command}\0"),
-        (true, false) => format!("shell,v2,pty,TERM={term}:{command}\0"),
-    })
-}
-
-fn encode_window_size(rows: u16, cols: u16) -> [u8; 8] {
-    let mut buf = [0u8; 8];
-    buf[0..2].copy_from_slice(&rows.to_le_bytes());
-    buf[2..4].copy_from_slice(&cols.to_le_bytes());
-    buf
-}
 
 const SHELL_V2_RX_BUF: usize = 64 * 1024;
 
@@ -201,16 +177,23 @@ pub unsafe extern "C" fn adb_shell_open(
         Err(e) => return error::fail_invalid_arg(e),
     };
     let term_str = if term.is_null() {
-        ""
+        None
     } else {
         // SAFETY: non-null, and a C string per `# Safety`.
         match unsafe { CStr::from_ptr(term) }.to_str() {
-            Ok(s) => s,
+            // The C ABI has always taken an empty TERM to mean none.
+            Ok("") => None,
+            Ok(s) => Some(s),
             Err(e) => return error::fail_invalid_arg(e),
         }
     };
+    let mode = if pty {
+        ShellMode::Pty { term: term_str }
+    } else {
+        ShellMode::Raw
+    };
 
-    let dest = match build_shell_v2_destination(pty, term_str, cmd_str) {
+    let dest = match destination(mode, cmd_str) {
         Ok(d) => d,
         Err(e) => return error::fail_error::<FfiTransportError>(Error::Protocol(e)),
     };
@@ -225,7 +208,7 @@ pub unsafe extern "C" fn adb_shell_open(
     let send_lock = Mutex::new(());
 
     if pty && (rows != 0 || cols != 0) {
-        let payload = encode_window_size(rows, cols);
+        let payload = WindowSize { rows, cols }.encode();
         let res = block_on::block_on(send_frame_async(
             &writer,
             &send_lock,
@@ -368,7 +351,7 @@ pub unsafe extern "C" fn adb_shell_set_window_size(
     if sh.is_null() {
         return error::fail_invalid_arg("null handle");
     }
-    let payload = encode_window_size(rows, cols);
+    let payload = WindowSize { rows, cols }.encode();
     // SAFETY: non-null, and a valid handle per `# Safety`.
     unsafe { send_frame_payload(sh, FrameId::WindowSizeChange, &payload) }
 }
