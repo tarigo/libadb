@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn every_sync_id_reads_back_from_its_bytes() {
+    for id in SyncId::ALL {
+        assert_eq!(SyncId::from_bytes(id.as_bytes()), Some(id));
+    }
+    assert_eq!(SyncId::Sta2.as_bytes(), *b"STA2");
+}
+
+#[test]
+fn bytes_that_spell_no_sync_id_are_none() {
+    assert_eq!(SyncId::from_bytes(*b"MEOW"), None);
+    assert_eq!(SyncId::from_bytes(*b"stat"), None);
+}
+
+#[test]
 fn parse_stat_v2_roundtrip() {
     let mut buf = [0u8; 68];
     buf[4..12].copy_from_slice(&0x0102030405060708u64.to_le_bytes());

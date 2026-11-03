@@ -66,10 +66,7 @@ use crate::base::channel::Channel;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
 use crate::error::Error;
-use format::{
-    u32_at, DENT_V1_SIZE, DENT_V2_SIZE, ID_DATA, ID_DENT, ID_DNT2, ID_DONE, ID_FAIL, ID_LIS2,
-    ID_LIST, ID_OKAY, ID_QUIT, ID_RCV2, ID_RECV, ID_SEND, ID_SND2, ID_STA2, ID_STAT, STAT_V1_SIZE,
-};
+use format::{u32_at, SyncId, DENT_V1_SIZE, DENT_V2_SIZE, STAT_V1_SIZE};
 
 /// A sync session over an open `sync:\0` channel.
 ///
@@ -109,16 +106,16 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         u32_at(self.rx.buf, self.rx.head + offset)
     }
 
-    async fn write_header(&mut self, id: &[u8; 4], arg: u32) -> Result<(), Error<S::IoError>> {
+    async fn write_header(&mut self, id: SyncId, arg: u32) -> Result<(), Error<S::IoError>> {
         let mut hdr = [0u8; HEADER_SIZE];
-        hdr[..4].copy_from_slice(id);
+        hdr[..4].copy_from_slice(&id.as_bytes());
         hdr[4..8].copy_from_slice(&arg.to_le_bytes());
         self.channel.write(&hdr).await
     }
 
     async fn write_request(
         &mut self,
-        id: &[u8; 4],
+        id: SyncId,
         parts: &[&[u8]],
     ) -> Result<(), Error<S::IoError>> {
         let arg_len: usize = parts.iter().map(|p| p.len()).sum();
@@ -129,7 +126,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
         if total <= free {
             let s = self.rx.tail;
-            self.rx.buf[s..s + 4].copy_from_slice(id);
+            self.rx.buf[s..s + 4].copy_from_slice(&id.as_bytes());
             self.rx.buf[s + 4..s + 8].copy_from_slice(&(arg_len as u32).to_le_bytes());
             let mut off = s + HEADER_SIZE;
             for p in parts {
@@ -148,19 +145,19 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         }
     }
 
-    async fn read_next_id(&mut self, allowed: &[[u8; 4]]) -> Result<[u8; 4], Error<S::IoError>> {
+    async fn read_next_id(&mut self, allowed: &[SyncId]) -> Result<SyncId, Error<S::IoError>> {
         self.rx
             .fill_at_least(&mut self.channel, HEADER_SIZE)
             .await?;
-        let id = self.peek_id();
-        if id == ID_FAIL {
-            let msg = self.read_fail_body().await?;
-            return Err(SyncError::Failed(msg).into());
+        let raw = self.peek_id();
+        match SyncId::from_bytes(raw) {
+            Some(SyncId::Fail) => {
+                let msg = self.read_fail_body().await?;
+                Err(SyncError::Failed(msg).into())
+            }
+            Some(id) if allowed.contains(&id) => Ok(id),
+            _ => Err(SyncError::UnexpectedId(raw).into()),
         }
-        if !allowed.contains(&id) {
-            return Err(SyncError::UnexpectedId(id).into());
-        }
-        Ok(id)
     }
 
     async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<S::IoError>> {
@@ -192,8 +189,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// error code).
     pub async fn stat(&mut self, path: &str) -> Result<StatV1, Error<S::IoError>> {
         self.rx.compact();
-        self.write_request(&ID_STAT, &[path.as_bytes()]).await?;
-        self.read_next_id(&[ID_STAT]).await?;
+        self.write_request(SyncId::Stat, &[path.as_bytes()]).await?;
+        self.read_next_id(&[SyncId::Stat]).await?;
 
         self.rx
             .fill_at_least(&mut self.channel, STAT_V1_SIZE)
@@ -214,8 +211,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// non-zero error code (e.g. `ENOENT`).
     pub async fn stat_v2(&mut self, path: &str) -> Result<StatV2, Error<S::IoError>> {
         self.rx.compact();
-        self.write_request(&ID_STA2, &[path.as_bytes()]).await?;
-        self.read_next_id(&[ID_STA2]).await?;
+        self.write_request(SyncId::Sta2, &[path.as_bytes()]).await?;
+        self.read_next_id(&[SyncId::Sta2]).await?;
 
         self.rx
             .fill_at_least(&mut self.channel, STAT_V2_SIZE)
@@ -233,11 +230,11 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// List a directory (v1).
     pub async fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, Error<S::IoError>> {
         self.rx.compact();
-        self.write_request(&ID_LIST, &[path.as_bytes()]).await?;
+        self.write_request(SyncId::List, &[path.as_bytes()]).await?;
 
         let mut entries = Vec::new();
         loop {
-            if self.read_next_id(&[ID_DENT, ID_DONE]).await? == ID_DONE {
+            if self.read_next_id(&[SyncId::Dent, SyncId::Done]).await? == SyncId::Done {
                 // adbd closes a listing with a whole `dent` record whose
                 // id is DONE, not a bare header — consuming only the
                 // head would leave its tail in the stream.
@@ -277,11 +274,11 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// still included in the result.
     pub async fn list_v2(&mut self, path: &str) -> Result<Vec<DirEntryV2>, Error<S::IoError>> {
         self.rx.compact();
-        self.write_request(&ID_LIS2, &[path.as_bytes()]).await?;
+        self.write_request(SyncId::Lis2, &[path.as_bytes()]).await?;
 
         let mut entries = Vec::new();
         loop {
-            if self.read_next_id(&[ID_DNT2, ID_DONE]).await? == ID_DONE {
+            if self.read_next_id(&[SyncId::Dnt2, SyncId::Done]).await? == SyncId::Done {
                 // Same as `list`, with the v2 record size.
                 self.rx
                     .fill_at_least(&mut self.channel, DENT_V2_SIZE)
@@ -309,7 +306,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Begin a `RECV` (v1) pull.
     pub async fn recv_start(&mut self, path: &str) -> Result<(), Error<S::IoError>> {
         self.rx.compact();
-        self.write_request(&ID_RECV, &[path.as_bytes()]).await
+        self.write_request(SyncId::Recv, &[path.as_bytes()]).await
     }
 
     /// Begin a `RCV2` (v2) pull.
@@ -319,7 +316,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     pub async fn recv_v2_start(&mut self, path: &str, flags: u32) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
-        self.write_header(&ID_RCV2, path_bytes.len() as u32).await?;
+        self.write_header(SyncId::Rcv2, path_bytes.len() as u32)
+            .await?;
         self.channel.write(path_bytes).await?;
         self.channel.write(&flags.to_le_bytes()).await?;
         Ok(())
@@ -335,7 +333,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// [`recv_v2_start`](Self::recv_v2_start).
     pub async fn recv_next(&mut self) -> Result<Option<&[u8]>, Error<S::IoError>> {
         self.rx.compact();
-        if self.read_next_id(&[ID_DATA, ID_DONE]).await? == ID_DONE {
+        if self.read_next_id(&[SyncId::Data, SyncId::Done]).await? == SyncId::Done {
             self.rx.head += HEADER_SIZE;
             return Ok(None);
         }
@@ -383,7 +381,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     pub async fn send_start(&mut self, path: &str, mode: u32) -> Result<(), Error<S::IoError>> {
         let mut mode_dec = [0u8; 10];
         let mode_str = format_u32(mode, &mut mode_dec);
-        self.write_request(&ID_SEND, &[path.as_bytes(), b",", mode_str])
+        self.write_request(SyncId::Send, &[path.as_bytes(), b",", mode_str])
             .await
     }
 
@@ -398,7 +396,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     ) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
-        self.write_header(&ID_SND2, path_bytes.len() as u32).await?;
+        self.write_header(SyncId::Snd2, path_bytes.len() as u32)
+            .await?;
         self.channel.write(path_bytes).await?;
         let mut info = [0u8; 8];
         info[0..4].copy_from_slice(&mode.to_le_bytes());
@@ -414,7 +413,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// [`send_done`](Self::send_done).
     pub async fn send_data(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
         for chunk in data.chunks(SYNC_DATA_MAX) {
-            self.write_request(&ID_DATA, &[chunk]).await?;
+            self.write_request(SyncId::Data, &[chunk]).await?;
         }
         Ok(())
     }
@@ -424,9 +423,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     ///
     /// Sends `DONE` and reads the device response (`OKAY` or `FAIL`).
     pub async fn send_done(&mut self, mtime: u32) -> Result<(), Error<S::IoError>> {
-        self.write_header(&ID_DONE, mtime).await?;
+        self.write_header(SyncId::Done, mtime).await?;
         self.rx.compact();
-        self.read_next_id(&[ID_OKAY]).await?;
+        self.read_next_id(&[SyncId::Okay]).await?;
         self.rx.head += HEADER_SIZE;
         Ok(())
     }
@@ -463,7 +462,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Send `QUIT` and close the underlying channel.
     pub async fn quit(mut self) -> Result<(), Error<S::IoError>> {
-        self.write_header(&ID_QUIT, 0).await?;
+        self.write_header(SyncId::Quit, 0).await?;
         self.channel.close().await
     }
 }

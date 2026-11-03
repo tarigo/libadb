@@ -6,21 +6,72 @@ pub const HEADER_SIZE: usize = 8;
 /// Maximum data payload in a single `DATA` message (64 KiB).
 pub const SYNC_DATA_MAX: usize = 64 * 1024;
 
-pub(super) const ID_STAT: [u8; 4] = *b"STAT";
-pub(super) const ID_STA2: [u8; 4] = *b"STA2";
-pub(super) const ID_LIST: [u8; 4] = *b"LIST";
-pub(super) const ID_LIS2: [u8; 4] = *b"LIS2";
-pub(super) const ID_SEND: [u8; 4] = *b"SEND";
-pub(super) const ID_SND2: [u8; 4] = *b"SND2";
-pub(super) const ID_RECV: [u8; 4] = *b"RECV";
-pub(super) const ID_RCV2: [u8; 4] = *b"RCV2";
-pub(super) const ID_DATA: [u8; 4] = *b"DATA";
-pub(super) const ID_DONE: [u8; 4] = *b"DONE";
-pub(super) const ID_OKAY: [u8; 4] = *b"OKAY";
-pub(super) const ID_FAIL: [u8; 4] = *b"FAIL";
-pub(super) const ID_DENT: [u8; 4] = *b"DENT";
-pub(super) const ID_DNT2: [u8; 4] = *b"DNT2";
-pub(super) const ID_QUIT: [u8; 4] = *b"QUIT";
+/// The four ASCII bytes that open every sync message: the request a
+/// host makes, or the reply a device gives to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncId {
+    Stat,
+    Sta2,
+    List,
+    Lis2,
+    Send,
+    Snd2,
+    Recv,
+    Rcv2,
+    Data,
+    Done,
+    Okay,
+    Fail,
+    Dent,
+    Dnt2,
+    Quit,
+}
+
+impl SyncId {
+    pub(super) const ALL: [Self; 15] = [
+        Self::Stat,
+        Self::Sta2,
+        Self::List,
+        Self::Lis2,
+        Self::Send,
+        Self::Snd2,
+        Self::Recv,
+        Self::Rcv2,
+        Self::Data,
+        Self::Done,
+        Self::Okay,
+        Self::Fail,
+        Self::Dent,
+        Self::Dnt2,
+        Self::Quit,
+    ];
+
+    /// The id as it goes on the wire.
+    pub(crate) fn as_bytes(self) -> [u8; 4] {
+        match self {
+            Self::Stat => *b"STAT",
+            Self::Sta2 => *b"STA2",
+            Self::List => *b"LIST",
+            Self::Lis2 => *b"LIS2",
+            Self::Send => *b"SEND",
+            Self::Snd2 => *b"SND2",
+            Self::Recv => *b"RECV",
+            Self::Rcv2 => *b"RCV2",
+            Self::Data => *b"DATA",
+            Self::Done => *b"DONE",
+            Self::Okay => *b"OKAY",
+            Self::Fail => *b"FAIL",
+            Self::Dent => *b"DENT",
+            Self::Dnt2 => *b"DNT2",
+            Self::Quit => *b"QUIT",
+        }
+    }
+
+    /// The id `bytes` spell, if they spell one.
+    pub(crate) fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
+        Self::ALL.into_iter().find(|id| id.as_bytes() == bytes)
+    }
+}
 
 pub(super) const STAT_V1_SIZE: usize = 16;
 /// Size of a `STA2` response: the four-byte id plus the body
