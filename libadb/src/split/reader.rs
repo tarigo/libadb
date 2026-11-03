@@ -373,73 +373,15 @@ where
                 credit,
                 destination,
             } => {
-                // Bounded by the channel table: past that, an OPEN
-                // storm is refused on arrival rather than remembered.
-                // Held holders spend the same budget as queued
-                // requests — otherwise an application sitting on
-                // holders would drain the queue and let payloads
-                // accumulate without limit.
                 let pending = PendingOpen {
                     remote,
                     credit,
                     destination,
                 };
-                let refused = {
-                    let staged = self.shared.lock_staged();
-                    let mut q = self.shared.lock_incoming();
-                    if staged.len() + q.len() >= self.shared.negotiated.config.max_channels() {
-                        Some(pending)
-                    } else {
-                        q.push_back(pending);
-                        None
-                    }
-                };
-                if refused.is_none() {
-                    self.shared.incoming_signal.notify(usize::MAX);
-                }
-                if let Some(pending) = refused {
-                    // The refusal owes adbd a CLSE, and waiting for the
-                    // write lock is a cancellation point: dropped
-                    // there, the OPEN would vanish unanswered with the
-                    // connection still healthy. Hand it to the verdict
-                    // machinery instead — reject() keeps the request
-                    // recoverable until CLSE is committed, and its Drop
-                    // re-queues it (one past the cap, which only new
-                    // arrivals check).
-                    self.shared.stage_incoming(pending).reject().await?;
-                }
+                self.shared.queue_or_refuse(pending).await?;
             }
             DispatchOutcome::CancelPendingOpen { remote } => {
-                // Every place the request can live, under one lock
-                // order (channels, then staged, then incoming — the
-                // same order accept and Drop take): a racing accept
-                // may have installed the slot after this packet was
-                // classified, so look for it again here; otherwise
-                // flag the staged holder and drop it from the queue.
-                // There is no gap in which the withdrawal finds the
-                // request nowhere.
-                let mut chs = self.shared.lock_channels();
-                let staged = self.shared.lock_staged();
-                let mut incoming = self.shared.lock_incoming();
-                let closed = chs.close_remote(remote);
-                if closed.is_none() {
-                    incoming.withdraw(remote);
-                    // A request staged out of the queue is cancelled
-                    // through its flag: the verdict observes it.
-                    for (id, flag) in staged.iter() {
-                        if *id == remote {
-                            flag.store(true, Ordering::Relaxed);
-                        }
-                    }
-                }
-                drop(incoming);
-                drop(staged);
-                drop(chs);
-                if let Some(idx) = closed {
-                    if let Some(signal) = self.shared.signals.get(idx) {
-                        signal.wake();
-                    }
-                }
+                self.shared.withdraw_open(remote);
             }
             DispatchOutcome::StrayReady { ids } => {
                 let mut wh = self.shared.lock_write().await?;

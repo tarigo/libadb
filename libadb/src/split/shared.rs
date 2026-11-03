@@ -315,6 +315,83 @@ impl<WH> Shared<WH> {
         }
     }
 
+    /// Queue a device-initiated OPEN for a verdict, or refuse it once
+    /// queued and staged requests together fill the channel table.
+    ///
+    /// Bounded by the channel table: past that, an OPEN storm is
+    /// refused on arrival rather than remembered. Held holders spend the
+    /// same budget as queued requests — otherwise an application sitting
+    /// on holders would drain the queue and let payloads accumulate
+    /// without limit.
+    ///
+    /// The refusal owes adbd a CLSE, and waiting for the write lock is a
+    /// cancellation point: dropped there, the OPEN would vanish
+    /// unanswered with the connection still healthy. So it goes to the
+    /// verdict machinery instead — [`SplitIncoming::reject`] keeps the
+    /// request recoverable until CLSE is committed, and the holder's
+    /// `Drop` re-queues it (one past the cap, which only new arrivals
+    /// check).
+    pub(super) async fn queue_or_refuse(
+        self: &Arc<Self>,
+        pending: PendingOpen,
+    ) -> Result<(), Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        let refused = {
+            let staged = self.lock_staged();
+            let mut q = self.lock_incoming();
+            if staged.len() + q.len() >= self.negotiated.config.max_channels() {
+                Some(pending)
+            } else {
+                q.push_back(pending);
+                None
+            }
+        };
+        if refused.is_none() {
+            self.incoming_signal.notify(usize::MAX);
+        }
+        if let Some(pending) = refused {
+            self.stage_incoming(pending).reject().await?;
+        }
+        Ok(())
+    }
+
+    /// Act on the device withdrawing an OPEN (a CLSE that names no local
+    /// id), wherever the request has got to by now.
+    ///
+    /// Every place the request can live is searched under one lock
+    /// order (channels, then staged, then incoming — the same order
+    /// accept and `Drop` take): a racing accept may have installed the
+    /// slot after this packet was classified, so the slot is looked for
+    /// again here; otherwise the staged holder is flagged and the
+    /// request dropped from the queue. There is no gap in which the
+    /// withdrawal finds the request nowhere.
+    pub(super) fn withdraw_open(&self, remote: RemoteId) {
+        let mut chs = self.lock_channels();
+        let staged = self.lock_staged();
+        let mut incoming = self.lock_incoming();
+        let closed = chs.close_remote(remote);
+        if closed.is_none() {
+            incoming.withdraw(remote);
+            // A request staged out of the queue is cancelled
+            // through its flag: the verdict observes it.
+            for (id, flag) in staged.iter() {
+                if *id == remote {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        drop(incoming);
+        drop(staged);
+        drop(chs);
+        if let Some(idx) = closed {
+            if let Some(signal) = self.signals.get(idx) {
+                signal.wake();
+            }
+        }
+    }
+
     /// Mark the connection unread and wake every waiter to see it.
     pub(super) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
