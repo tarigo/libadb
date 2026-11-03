@@ -10,7 +10,7 @@ use alloc::collections::VecDeque;
 
 use super::channel::{
     channel_ids_of, dispatch_packet, Channel, ChannelId, ChannelSlot, ChannelState,
-    DispatchOutcome, PendingOpen, SelectResult,
+    DispatchOutcome, PendingAck, PendingOpen, SelectResult,
 };
 use super::device_banner::DeviceBanner;
 use super::error::Error;
@@ -186,8 +186,8 @@ async fn dispatch_to<T: Write>(
     pkt: Packet,
 ) -> Result<(), Error<T::Error>> {
     match dispatch_packet(channels, &pkt, delayed_ack, rx_cap, watermark) {
-        DispatchOutcome::AckWrite { ids, len, .. } => {
-            send_okay_to(transport, desync, delayed_ack, ids, len, checksum).await?;
+        DispatchOutcome::AckWrite { ack, .. } => {
+            send_okay_to(transport, desync, ack, delayed_ack, checksum).await?;
         }
         DispatchOutcome::IncomingOpen {
             remote,
@@ -677,8 +677,8 @@ where
             .slot_mut(ch)?
             .take_buffered(buf, delayed_ack, watermark)?;
         if let Some((n, ack)) = buffered {
-            if let Some((ids, len)) = ack {
-                self.send_okay(ids, len).await?;
+            if let Some(ack) = ack {
+                self.send_okay(ack).await?;
             }
             return Ok(SelectResult::Data(n));
         }
@@ -708,8 +708,8 @@ where
                         Some(slot) => slot.deliver(&pkt.data, n, rx_cap, delayed_ack, watermark)?,
                         None => None,
                     };
-                    if let Some((ids, len)) = ack {
-                        self.send_okay(ids, len).await?;
+                    if let Some(ack) = ack {
+                        self.send_okay(ack).await?;
                     }
                     return Ok(SelectResult::Data(n));
                 }
@@ -754,19 +754,14 @@ where
         channel_ids_of(&self.channels, ch)
     }
 
-    async fn send_okay(
-        &mut self,
-        ids: ChannelIds,
-        wrte_len: usize,
-    ) -> Result<(), Error<<T as ErrorType>::Error>> {
+    async fn send_okay(&mut self, ack: PendingAck) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.negotiated.checksum();
         let delayed_ack = self.negotiated.delayed_ack;
         send_okay_to(
             &mut self.transport,
             &self.desync,
+            ack,
             delayed_ack,
-            ids,
-            wrte_len,
             checksum,
         )
         .await

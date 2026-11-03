@@ -7,6 +7,7 @@ use core::task::Poll;
 use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
 
+use super::channel::PendingAck;
 use super::error::{Error, ProtocolError};
 use super::ids::ChannelIds;
 use super::protocol::command::Command;
@@ -282,17 +283,26 @@ async fn send_frame<T: Write>(
     Ok(())
 }
 
+/// Send the OKAY `ack` stands for. Under delayed ACK it carries the
+/// bytes acknowledged, as credit; the classic OKAY carries nothing.
 pub(crate) async fn send_okay_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,
+    ack: PendingAck,
     delayed_ack: bool,
-    ids: ChannelIds,
-    wrte_len: usize,
     checksum: Checksum,
 ) -> Result<(), Error<T::Error>> {
-    let ack = (wrte_len as u32).to_le_bytes();
-    let payload: &[u8] = if delayed_ack { &ack } else { &[] };
-    send_raw(transport, desync, Command::Ready, ids, payload, checksum).await
+    let credit = (ack.len as u32).to_le_bytes();
+    let payload: &[u8] = if delayed_ack { &credit } else { &[] };
+    send_raw(
+        transport,
+        desync,
+        Command::Ready,
+        ack.ids,
+        payload,
+        checksum,
+    )
+    .await
 }
 
 #[cfg(test)]

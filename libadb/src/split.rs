@@ -70,7 +70,7 @@ use alloc::vec::Vec;
 
 use crate::base::channel::{
     channel_ids_of, dispatch_packet, slot_for_mut, ChannelFault, ChannelId, ChannelSlot,
-    ChannelState, DispatchOutcome, PendingOpen, SelectResult,
+    ChannelState, DispatchOutcome, PendingAck, PendingOpen, SelectResult,
 };
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
@@ -272,13 +272,12 @@ impl<WH> Shared<WH> {
         let Some((n, ack)) = taken else {
             return Ok(None);
         };
-        if let Some((ids, len)) = ack {
+        if let Some(ack) = ack {
             send_okay_to(
                 &mut *wh,
                 &self.desync,
+                ack,
                 self.negotiated.delayed_ack,
-                ids,
-                len,
                 self.negotiated.checksum(),
             )
             .await?;
@@ -286,11 +285,7 @@ impl<WH> Shared<WH> {
         Ok(Some(n))
     }
 
-    async fn send_okay(
-        &self,
-        ids: ChannelIds,
-        wrte_len: usize,
-    ) -> Result<(), Error<<WH as ErrorType>::Error>>
+    async fn send_okay(&self, ack: PendingAck) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
     {
@@ -298,9 +293,8 @@ impl<WH> Shared<WH> {
         send_okay_to(
             &mut *wh,
             &self.desync,
+            ack,
             self.negotiated.delayed_ack,
-            ids,
-            wrte_len,
             self.negotiated.checksum(),
         )
         .await
@@ -821,8 +815,8 @@ where
                             None => None,
                         }
                     };
-                    if let Some((ids, len)) = ack {
-                        self.shared.send_okay(ids, len).await?;
+                    if let Some(ack) = ack {
+                        self.shared.send_okay(ack).await?;
                     }
                     return Ok(n);
                 }
@@ -906,9 +900,9 @@ where
         };
 
         match outcome {
-            DispatchOutcome::AckWrite { idx, ids, len } => {
+            DispatchOutcome::AckWrite { idx, ack } => {
                 self.shared.signals[idx].wake();
-                self.shared.send_okay(ids, len).await?;
+                self.shared.send_okay(ack).await?;
             }
             DispatchOutcome::CreditGranted { idx }
             | DispatchOutcome::SlotClosed { idx }

@@ -22,9 +22,20 @@ pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
     }
 }
 
+/// The OKAY a channel owes the device for data that left its buffer,
+/// or never had to stay in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingAck {
+    /// The channel the OKAY is for.
+    pub(crate) ids: ChannelIds,
+    /// Bytes it acknowledges: the credit it hands back under delayed
+    /// ACK, and nothing the device reads otherwise.
+    pub(crate) len: usize,
+}
+
 /// Whether an inbound WRTE is acknowledged now or once it is read.
 pub(crate) enum AckDecision {
-    Now { ids: ChannelIds, len: usize },
+    Now(PendingAck),
     Hold,
 }
 
@@ -33,8 +44,7 @@ pub(crate) enum DispatchOutcome {
     AckWrite {
         #[allow(dead_code)] // read only by split::Reader, to wake readers
         idx: usize,
-        ids: ChannelIds,
-        len: usize,
+        ack: PendingAck,
     },
     /// An OKAY refilled the slot's send budget: one writer can proceed.
     CreditGranted {
@@ -178,9 +188,7 @@ pub(crate) fn dispatch_packet(
             }
             Command::Write if ours => {
                 return match slot.apply_write(&pkt.data, rx_cap, delayed_ack, watermark) {
-                    Ok(AckDecision::Now { ids, len }) => {
-                        DispatchOutcome::AckWrite { idx, ids, len }
-                    }
+                    Ok(AckDecision::Now(ack)) => DispatchOutcome::AckWrite { idx, ack },
                     Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
                     Err(RxOverflow) => slot.fault(idx, remote, ChannelFault::RxOverflow),
                 };
@@ -402,10 +410,7 @@ impl ChannelSlot {
         self.unacked = self.unacked.saturating_add(payload.len());
         if !delayed_ack && self.rx_buf.len() < watermark {
             self.unacked = 0;
-            return Ok(AckDecision::Now {
-                ids: self.channel_ids(),
-                len: payload.len(),
-            });
+            return Ok(AckDecision::Now(self.ack(payload.len())));
         }
         Ok(AckDecision::Hold)
     }
@@ -419,32 +424,35 @@ impl ChannelSlot {
         cap: usize,
         delayed_ack: bool,
         watermark: usize,
-    ) -> Result<Option<(ChannelIds, usize)>, RxOverflow> {
+    ) -> Result<Option<PendingAck>, RxOverflow> {
         if taken < payload.len() {
             self.push_rx(&payload[taken..], cap)?;
             self.unacked = self.unacked.saturating_add(payload.len() - taken);
         }
         if delayed_ack {
-            return Ok((taken > 0).then_some((self.channel_ids(), taken)));
+            return Ok((taken > 0).then(|| self.ack(taken)));
         }
         if self.rx_buf.len() >= watermark {
             return Ok(None);
         }
         let len = core::mem::take(&mut self.unacked);
-        Ok(Some((self.channel_ids(), len)))
+        Ok(Some(self.ack(len)))
     }
 
     /// Record that the application took `n` bytes, and say what to
     /// acknowledge as a result.
-    pub fn consume(
-        &mut self,
-        n: usize,
-        delayed_ack: bool,
-        watermark: usize,
-    ) -> Option<(ChannelIds, usize)> {
+    pub fn consume(&mut self, n: usize, delayed_ack: bool, watermark: usize) -> Option<PendingAck> {
         let len = self.ack_len(n, self.rx_buf.len(), delayed_ack, watermark)?;
         self.unacked -= len;
-        Some((self.channel_ids(), len))
+        Some(self.ack(len))
+    }
+
+    /// The OKAY for `len` bytes on this channel.
+    fn ack(&self, len: usize) -> PendingAck {
+        PendingAck {
+            ids: self.channel_ids(),
+            len,
+        }
     }
 
     /// Whether taking up to `want` buffered bytes now would owe the
@@ -482,13 +490,12 @@ impl ChannelSlot {
     /// taking them. `None` while an open channel has nothing buffered;
     /// once a closed one is drained, [`Error::ChannelClosed`] or the
     /// fault that closed it.
-    #[allow(clippy::type_complexity)]
     pub fn take_buffered<E>(
         &mut self,
         buf: &mut [u8],
         delayed_ack: bool,
         watermark: usize,
-    ) -> Result<Option<(usize, Option<(ChannelIds, usize)>)>, Error<E>> {
+    ) -> Result<Option<(usize, Option<PendingAck>)>, Error<E>> {
         if self.rx_buf.is_empty() {
             return if self.is_closed() {
                 Err(self.closed_error())
