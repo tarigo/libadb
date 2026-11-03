@@ -24,7 +24,7 @@ compile_error!("this example requires --features tokio,host-keys or --features s
 use std::{env, fs, process};
 
 use libadb::sync;
-use libadb::{Connection, Feature};
+use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
 
 #[cfg(feature = "tokio")]
 type Tcp = libadb::TokioTcp;
@@ -53,12 +53,13 @@ async fn connect(addr: &str) -> Result<Connection<Tcp>, Box<dyn std::error::Erro
     let conn = Connection::connect(
         transport,
         auth,
-        &[
+        HostBanner::Features(&[
             Feature::ShellV2,
             Feature::StatV2,
             Feature::LsV2,
             Feature::SendrecvV2,
-        ],
+        ]),
+        ConnectionConfig::new(),
     )
     .await
     .map_err(|e| format!("connect: {e}"))?;

@@ -68,7 +68,7 @@ type ExampleTransport = libadb::transport::common::Transport<
     libadb::transport::tls::MaybeTls<<Rt as libadb::transport::runtime::Runtime>::Tcp>,
     <Usb as libadb::UsbBackend<Rt>>::Transport,
 >;
-use libadb::{Connection, Feature};
+use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
 
 #[cfg(feature = "tokio")]
 use tokio::signal::unix::{signal, SignalKind};
@@ -162,9 +162,14 @@ async fn open_connection(
         .map_err(|e| format!("transport: {e}"))?;
 
     #[cfg(not(feature = "tls"))]
-    let conn = Connection::connect(transport, auth, &[Feature::ShellV2])
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let conn = Connection::connect(
+        transport,
+        auth,
+        HostBanner::Features(&[Feature::ShellV2]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .map_err(|e| format!("connect: {e}"))?;
 
     #[cfg(feature = "tls")]
     let conn = {
@@ -176,9 +181,15 @@ async fn open_connection(
         let identity = TlsIdentity::from_key(&auth, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
         let tls = TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))?;
 
-        Connection::connect_tls(transport.tls_ready(), auth, &[Feature::ShellV2], &tls)
-            .await
-            .map_err(|e| format!("connect: {e}"))?
+        Connection::connect_tls(
+            transport.tls_ready(),
+            auth,
+            HostBanner::Features(&[Feature::ShellV2]),
+            ConnectionConfig::new(),
+            &tls,
+        )
+        .await
+        .map_err(|e| format!("connect: {e}"))?
     };
 
     eprintln!(

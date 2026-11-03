@@ -22,7 +22,7 @@ use std::io::{self, Write};
 use std::{env, process};
 
 use libadb::shell::v2::Frame;
-use libadb::{cmd, Connection, Error, Feature};
+use libadb::{cmd, Connection, ConnectionConfig, Error, Feature, HostBanner};
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
@@ -46,7 +46,8 @@ async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::E
     let mut conn = Connection::connect(
         transport,
         auth,
-        &[Feature::ShellV2, Feature::AbbExec, Feature::Abb],
+        HostBanner::Features(&[Feature::ShellV2, Feature::AbbExec, Feature::Abb]),
+        ConnectionConfig::new(),
     )
     .await
     .map_err(|e| format!("connect: {e}"))?;
@@ -84,7 +85,8 @@ async fn run_stream(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error:
     let mut conn = Connection::connect(
         transport,
         auth,
-        &[Feature::ShellV2, Feature::AbbExec, Feature::Abb],
+        HostBanner::Features(&[Feature::ShellV2, Feature::AbbExec, Feature::Abb]),
+        ConnectionConfig::new(),
     )
     .await
     .map_err(|e| format!("connect: {e}"))?;

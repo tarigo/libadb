@@ -17,12 +17,16 @@ pub const MIN_MAX_PAYLOAD: u32 = 1024;
 /// trades throughput for a footprint that fits a microcontroller.
 ///
 /// ```ignore
-/// use libadb::{Connection, ConnectionConfig, Feature};
+/// use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
 ///
 /// let config = ConnectionConfig::embedded().with_max_payload(4 * 1024);
-/// let conn = Connection::connect_with_config(
-///     transport, auth, &[Feature::ShellV2], config,
-/// ).await?;
+/// let conn = Connection::connect(
+///     transport,
+///     auth,
+///     HostBanner::Features(&[Feature::ShellV2]),
+///     config,
+/// )
+/// .await?;
 /// ```
 ///
 /// # Why this matters off the desktop

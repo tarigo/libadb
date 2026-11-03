@@ -69,7 +69,7 @@ libadb = { version = "0.9", features = ["tokio"] }
 
 ```rust,ignore
 use libadb::shell::v2;
-use libadb::{Connection, Feature, TokioTcp};
+use libadb::{Connection, ConnectionConfig, Feature, HostBanner, TokioTcp};
 
 let tcp = tokio::net::TcpStream::connect("127.0.0.1:5555").await?;
 tcp.set_nodelay(true)?; // ADB болтлив: Нейгл стоит round-trip на каждый обмен
@@ -78,13 +78,20 @@ let transport = TokioTcp::new(tcp);
 let mut conn = Connection::connect(
     transport,
     auth, // ваша реализация `libadb::auth::Authenticator`
-    &[Feature::ShellV2],
+    HostBanner::Features(&[Feature::ShellV2]),
+    ConnectionConfig::new(),
 ).await?;
 
 let mut rx = [0u8; 64 * 1024];
 let out = v2::exec(&mut conn, "getprop ro.product.model", &mut rx).await?;
 println!("{}", core::str::from_utf8(&out.stdout)?);
 ```
+
+`HostBanner` — то, что хост объявляет о себе в CNXN: список фич, как
+здесь, `HostBanner::default()` — всё, что реализует библиотека, или
+`HostBanner::Raw` — собственные байты. `ConnectionConfig::new()`
+оставляет десктопные лимиты; как их ужать — в разделе «Бюджет памяти»
+ниже.
 
 `Authenticator` — пользовательский трейт, но с фичей `keys` крейт даёт
 готовую реализацию: `keys::AdbKey` разбирает ключ, который `adb` держит
@@ -139,10 +146,13 @@ let auth = store::load_or_generate(&dir, &mut rng, "user@host")?;
 | `max_banner_properties` | 64                     | 64           | сколько свойств может нести баннер устройства          |
 
 ```rust,ignore
-use libadb::{Connection, ConnectionConfig, Feature};
+use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
 
-let conn = Connection::connect_with_config(
-    transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
+let conn = Connection::connect(
+    transport,
+    auth,
+    HostBanner::Features(&[Feature::ShellV2]),
+    ConnectionConfig::embedded(),
 ).await?;
 ```
 

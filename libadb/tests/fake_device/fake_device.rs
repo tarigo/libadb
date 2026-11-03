@@ -625,8 +625,7 @@ where
     .await
 }
 
-/// Same as [`session`], but drives the handshake through
-/// `connect_with_raw_banner_and_config`.
+/// Same as [`session`], with resource limits of the caller's choosing.
 pub async fn session_with_config<F, Fut, R>(
     device: FakeDevice,
     host_banner: &[u8],
@@ -644,10 +643,10 @@ where
         scenario(s).await
     });
     let stream = rt::connect(addr).await;
-    let conn = libadb::Connection::connect_with_raw_banner_and_config(
+    let conn = libadb::Connection::connect(
         wrap(stream),
         TestAuth,
-        host_banner,
+        libadb::HostBanner::Raw(host_banner),
         config,
     )
     .await

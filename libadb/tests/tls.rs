@@ -1306,7 +1306,7 @@ use libadb::protocol::command::{
     Command, AUTH_SIGNATURE, AUTH_TOKEN, CMD_AUTH, CMD_CNXN, CMD_OKAY, CMD_STLS,
 };
 use libadb::protocol::constant::{ADB_VERSION, STLS_VERSION};
-use libadb::{Connection, Error};
+use libadb::{Connection, ConnectionConfig, Error, HostBanner};
 
 const DEVICE_BANNER: &[u8] = b"device::features=shell_v2,cmd";
 
@@ -1414,7 +1414,13 @@ async fn a_device_that_demands_tls_ends_up_connected() {
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
     let tls = client_config();
-    let connect = Connection::connect_tls(transport, test_auth(), &[], &tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
     let conn = rt::within("the connect", connect)
         .await
         .expect("a device that offers TLS and trusts the key connects");
@@ -1435,7 +1441,13 @@ async fn a_key_the_device_will_not_have_is_named_as_such() {
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
     let tls = client_config();
-    let connect = Connection::connect_tls(transport, test_auth(), &[], &tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
     let Err(err) = rt::within("the connect", connect).await else {
         panic!("a device that refuses the key must not hand back a connection");
     };
@@ -1462,7 +1474,13 @@ async fn a_device_that_never_asks_for_tls_is_served_in_the_clear() {
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
     let tls = client_config();
-    let connect = Connection::connect_tls(transport, test_auth(), &[], &tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
     let conn = rt::within("the connect", connect)
         .await
         .expect("a plain device still connects");
@@ -1484,7 +1502,13 @@ async fn a_usb_transport_connects_through_connect_tls_all_the_same() {
     let usb = rt::wrap(rt::connect(addr).await);
     let transport = Transport::<MaybeTls<rt::AdbTransport>, _>::Usb(usb);
     let tls = client_config();
-    let connect = Connection::connect_tls(transport, test_auth(), &[], &tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
     let conn = rt::within("the connect", connect)
         .await
         .expect("USB connects through connect_tls as it does through connect");
@@ -1532,7 +1556,13 @@ async fn a_device_that_hangs_up_mid_handshake_is_not_said_to_refuse_the_key() {
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
     let tls = client_config();
-    let connect = Connection::connect_tls(transport, test_auth(), &[], &tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
     let Err(err) = rt::within("the connect", connect).await else {
         panic!("a device that hung up must not hand out a connection");
     };
@@ -1552,7 +1582,13 @@ async fn failed_connect(
     tls: &TlsClientConfig,
 ) -> Error<TlsError<std::io::Error>> {
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let connect = Connection::connect_tls(transport, test_auth(), &[], tls);
+    let connect = Connection::connect_tls(
+        transport,
+        test_auth(),
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        tls,
+    );
     let outcome = rt::timeout_ms(5000, connect)
         .await
         .expect("the connect hung");
@@ -1931,7 +1967,14 @@ async fn a_real_device_serves_a_split_connection_over_tls() {
     let tls = TlsClientConfig::adb(&identity).unwrap();
 
     let transport = MaybeTls::plain(rt::wrap(rt::connect(addr).await));
-    let conn = rt::within("the connect", Connection::connect_tls(transport, key, &[], &tls))
+    let connect = Connection::connect_tls(
+        transport,
+        key,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+        &tls,
+    );
+    let conn = rt::within("the connect", connect)
         .await
         .expect("the device accepts a key it was shown over USB");
     assert!(conn.transport().is_tls());

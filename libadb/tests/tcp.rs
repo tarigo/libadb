@@ -3,7 +3,10 @@
 use libadb::error::AuthError;
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
 use libadb::shell::v2 as shell_v2;
-use libadb::{abb, cmd, exec, logcat, track_app, Connection, Error, Feature, ProtocolError};
+use libadb::{
+    abb, cmd, exec, logcat, track_app, Connection, ConnectionConfig, Error, Feature, HostBanner,
+    ProtocolError,
+};
 
 #[path = "rt/rt.rs"]
 mod rt;
@@ -57,7 +60,13 @@ async fn a_token_that_is_not_a_sha1_prehash_is_refused_before_signing() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    let Err(err) = Connection::connect(
+        wrap(stream),
+        TestAuth,
+        HostBanner::Raw(b"host::"),
+        ConnectionConfig::new(),
+    )
+    .await
     else {
         panic!("expected the handshake to refuse the token");
     };
@@ -96,7 +105,13 @@ async fn a_signer_that_refuses_says_why() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), Refuses, b"host::").await
+    let Err(err) = Connection::connect(
+        wrap(stream),
+        Refuses,
+        HostBanner::Raw(b"host::"),
+        ConnectionConfig::new(),
+    )
+    .await
     else {
         panic!("expected the handshake to fail");
     };
@@ -118,7 +133,13 @@ async fn a_device_that_demands_tls_is_reported_as_tls_required() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    let Err(err) = Connection::connect(
+        wrap(stream),
+        TestAuth,
+        HostBanner::Raw(b"host::"),
+        ConnectionConfig::new(),
+    )
+    .await
     else {
         panic!("expected the handshake to refuse a TLS-only device");
     };
@@ -530,7 +551,8 @@ async fn connect_encodes_host_features_into_cnxn_banner() {
     let _conn = Connection::connect(
         wrap(stream),
         TestAuth,
-        &[Feature::ShellV2, Feature::Cmd, Feature::DelayedAck],
+        HostBanner::Features(&[Feature::ShellV2, Feature::Cmd, Feature::DelayedAck]),
+        ConnectionConfig::new(),
     )
     .await
     .unwrap();
@@ -540,12 +562,19 @@ async fn connect_encodes_host_features_into_cnxn_banner() {
 }
 
 rt_test! {
-async fn connect_with_no_host_features_emits_empty_features_value() {
+async fn no_host_features_leave_the_features_value_empty() {
     let (handle, addr) = FakeDevice::new().bind().await;
     let device = rt::spawn(async move { handle.accept().await.host_banner().to_vec() });
 
     let stream = rt::connect(addr).await;
-    let _conn = Connection::connect(wrap(stream), TestAuth, &[]).await.unwrap();
+    let _conn = Connection::connect(
+        wrap(stream),
+        TestAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(rt::join(device).await, b"host::features=");
 }
@@ -692,7 +721,7 @@ async fn shell_v2_open_succeeds_when_feature_advertised() {
 }
 
 rt_test! {
-async fn require_feature_works_after_connect_with_raw_banner() {
+async fn require_feature_works_after_a_raw_banner() {
     let dev = FakeDevice::new().banner(b"device::features=shell_v2,cmd".to_vec());
     let (conn, device) =
         session(dev, b"host::features=shell_v2", |_| async {}).await;

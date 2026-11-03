@@ -13,7 +13,9 @@
 //! ```ignore
 //! use libadb::keys::rsa::rand_core::OsRng;
 //! use libadb::transport::tls::MaybeTls;
-//! use libadb::{Connection, Feature, TlsClientConfig, TlsIdentity, TokioTcp};
+//! use libadb::{
+//!     Connection, ConnectionConfig, Feature, HostBanner, TlsClientConfig, TlsIdentity, TokioTcp,
+//! };
 //!
 //! // Once per key: building the identity signs a certificate.
 //! let identity = TlsIdentity::from_key(&key, &mut OsRng)?;
@@ -21,7 +23,14 @@
 //!
 //! let tcp = tokio::net::TcpStream::connect(addr).await?;
 //! let transport = MaybeTls::plain(TokioTcp::new(tcp));
-//! let conn = Connection::connect_tls(transport, key, &[Feature::ShellV2], &tls).await?;
+//! let conn = Connection::connect_tls(
+//!     transport,
+//!     key,
+//!     HostBanner::Features(&[Feature::ShellV2]),
+//!     ConnectionConfig::new(),
+//!     &tls,
+//! )
+//! .await?;
 //! ```
 //!
 //! # What authenticates whom

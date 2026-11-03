@@ -282,7 +282,13 @@ mod incoming {
     fn connected(host: &'static [u8], device: &str) -> Connection<Mock> {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with(device));
-        now(Connection::connect_with_raw_banner(mock, NoAuth, host)).unwrap()
+        now(Connection::connect(
+            mock,
+            NoAuth,
+            HostBanner::Raw(host),
+            ConnectionConfig::new(),
+        ))
+        .unwrap()
     }
 
     fn open_pkt(remote_id: u32, credit: u32, dest: &[u8]) -> Packet {
@@ -351,10 +357,10 @@ mod incoming {
     fn a_full_queue_refuses_new_opens_on_arrival() {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2"));
-        let mut conn = now(Connection::connect_with_raw_banner_and_config(
+        let mut conn = now(Connection::connect(
             mock,
             NoAuth,
-            b"host::features=shell_v2",
+            HostBanner::Raw(b"host::features=shell_v2"),
             ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
@@ -411,10 +417,11 @@ mod incoming {
         // CNXN writes header+payload (two calls); the empty-payload READY
         // that accept sends is the very next write.
         mock.stall_write(2);
-        let mut conn = now(Connection::connect_with_raw_banner(
+        let mut conn = now(Connection::connect(
             mock,
             NoAuth,
-            b"host::features=shell_v2",
+            HostBanner::Raw(b"host::features=shell_v2"),
+            ConnectionConfig::new(),
         ))
         .unwrap();
 
@@ -445,10 +452,10 @@ mod incoming {
         let config = ConnectionConfig::new()
             .with_initial_ack_bytes(32 * 1024 * 1024)
             .with_max_rx_per_channel(1024 * 1024);
-        let mut conn = now(Connection::connect_with_raw_banner_and_config(
+        let mut conn = now(Connection::connect(
             mock,
             NoAuth,
-            b"host::features=shell_v2,delayed_ack",
+            HostBanner::Raw(b"host::features=shell_v2,delayed_ack"),
             config,
         ))
         .unwrap();
@@ -467,10 +474,10 @@ mod incoming {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2"));
         mock.feed(&crate::base::mock::okay(1));
-        let mut conn = now(Connection::connect_with_raw_banner_and_config(
+        let mut conn = now(Connection::connect(
             mock,
             NoAuth,
-            b"host::features=shell_v2",
+            HostBanner::Raw(b"host::features=shell_v2"),
             ConnectionConfig::new().with_max_channels(1),
         ))
         .unwrap();
@@ -492,7 +499,12 @@ fn a_device_that_answers_the_handshake_with_stls_says_it_wants_tls() {
     let mut mock = Mock::new();
     mock.feed(&stls());
 
-    let Err(err) = now(Connection::connect(mock, NoAuth, &[])) else {
+    let Err(err) = now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )) else {
         panic!("expected the handshake to refuse a TLS-only device");
     };
 
@@ -516,7 +528,12 @@ fn the_banner_property_cap_comes_from_the_config() {
             banner.to_vec(),
         ));
         let config = ConnectionConfig::new().with_max_banner_properties(cap);
-        now(Connection::connect_with_config(mock, NoAuth, &[], config))
+        now(Connection::connect(
+            mock,
+            NoAuth,
+            HostBanner::Features(&[]),
+            config,
+        ))
     };
 
     let Err(err) = connect(1) else {
@@ -542,7 +559,12 @@ fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
     mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
     mock.feed(&Packet::new(Command::Auth, AUTH_SIGNATURE, 0, vec![]));
 
-    let Err(err) = now(Connection::connect(mock, Signs, &[])) else {
+    let Err(err) = now(Connection::connect(
+        mock,
+        Signs,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )) else {
         panic!("a stray AUTH must not become a connection");
     };
 
@@ -561,7 +583,12 @@ fn a_withheld_key_ends_the_handshake_untrusted_before_it_reaches_the_device() {
     mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
     mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x6b; 20]));
 
-    let Err(err) = now(Connection::connect(&mut mock, Withholds, &[])) else {
+    let Err(err) = now(Connection::connect(
+        &mut mock,
+        Withholds,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )) else {
         panic!("an untrusted key must not become a connection");
     };
 
@@ -589,8 +616,13 @@ fn a_trusted_key_connects_without_being_offered() {
     mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x5a; 20]));
     mock.feed(&cnxn());
 
-    now(Connection::connect(mock, Withholds, &[]))
-        .expect("a device that accepts the signature never asks for the key");
+    now(Connection::connect(
+        mock,
+        Withholds,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .expect("a device that accepts the signature never asks for the key");
 }
 
 #[test]
@@ -600,7 +632,12 @@ fn a_borrowed_authenticator_withholds_its_key_as_the_owned_one_does() {
     mock.feed(&Packet::new(Command::Auth, AUTH_TOKEN, 0, vec![0x6b; 20]));
     let mut auth = Withholds;
 
-    let Err(err) = now(Connection::connect(mock, &mut auth, &[])) else {
+    let Err(err) = now(Connection::connect(
+        mock,
+        &mut auth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )) else {
         panic!("an untrusted key must not become a connection");
     };
 

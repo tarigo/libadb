@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use libadb::protocol::features::Feature;
-use libadb::{Connection, Error};
+use libadb::{Connection, ConnectionConfig, Error, HostBanner};
 
 /// shell_v2 wire frame IDs.
 pub const SH_STDOUT: u8 = 1;
@@ -35,9 +35,14 @@ pub async fn handshake(
     let (handle, addr) = FakeDevice::new().banner(banner.into_bytes()).bind().await;
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
-    let conn = Connection::connect(wrap(stream), TestAuth, host_features)
-        .await
-        .unwrap();
+    let conn = Connection::connect(
+        wrap(stream),
+        TestAuth,
+        HostBanner::Features(host_features),
+        ConnectionConfig::new(),
+    )
+    .await
+    .unwrap();
     (conn, device)
 }
 

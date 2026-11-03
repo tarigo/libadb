@@ -13,7 +13,7 @@ compile_error!("this example requires --features tokio,host-keys or --features s
 
 use std::{env, process};
 
-use libadb::{track_app, Connection, Error, Feature};
+use libadb::{track_app, Connection, ConnectionConfig, Error, Feature, HostBanner};
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
@@ -34,9 +34,14 @@ async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::connect(transport, auth, &[Feature::TrackApp, Feature::AppInfo])
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut conn = Connection::connect(
+        transport,
+        auth,
+        HostBanner::Features(&[Feature::TrackApp, Feature::AppInfo]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .map_err(|e| format!("connect: {e}"))?;
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 

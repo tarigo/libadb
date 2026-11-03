@@ -13,7 +13,7 @@
 use base64ct::{Base64, Encoding};
 use libadb::keys::AdbKey;
 use libadb::protocol::command::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE};
-use libadb::Connection;
+use libadb::{Connection, ConnectionConfig, HostBanner};
 use rand_chacha::ChaCha8Rng;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::rand_core::SeedableRng;
@@ -88,7 +88,12 @@ async fn a_real_key_completes_the_pubkey_handshake_with_a_verifiable_signature()
     let (handle, addr) = dev.bind().await;
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
-    let conn = Connection::connect_with_raw_banner(wrap(stream), key, b"host::")
+    let conn = Connection::connect(
+        wrap(stream),
+        key,
+        HostBanner::Raw(b"host::"),
+        ConnectionConfig::new(),
+    )
         .await
         .unwrap();
 

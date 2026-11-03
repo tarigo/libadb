@@ -25,7 +25,7 @@ use std::io::{self, Write};
 use std::{env, process};
 
 use libadb::logcat;
-use libadb::{Connection, Error, Feature};
+use libadb::{Connection, ConnectionConfig, Error, Feature, HostBanner};
 
 #[path = "common/adb_key_auth.rs"]
 mod adb_key_auth;
@@ -46,9 +46,14 @@ async fn run(addr: &str, extra_args: &[String]) -> Result<(), Box<dyn std::error
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::connect(transport, auth, &[Feature::ShellV2])
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut conn = Connection::connect(
+        transport,
+        auth,
+        HostBanner::Features(&[Feature::ShellV2]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .map_err(|e| format!("connect: {e}"))?;
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 

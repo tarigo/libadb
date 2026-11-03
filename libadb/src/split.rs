@@ -1714,7 +1714,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::connection::Connection;
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
     use crate::base::mock::{abandon, now, okay, split_with_channel, Mock, NoAuth, SharedMock};
 
     /// Stage one OPEN out of the queue, then deliver more packets —
@@ -1732,7 +1732,13 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
         let ch = now(reader.open_channel(b"shell:\0")).unwrap();
 
@@ -1799,7 +1805,13 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn());
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
 
         seen.feed(&Packet::new(Command::Open, 90, 0, b"tcp:90\0".to_vec()));
@@ -1828,10 +1840,10 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::connect_with_config(
+        let conn = now(Connection::connect(
             seen.clone(),
             NoAuth,
-            &[],
+            HostBanner::Features(&[]),
             ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
@@ -1890,10 +1902,10 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::connect_with_config(
+        let conn = now(Connection::connect(
             seen.clone(),
             NoAuth,
-            &[],
+            HostBanner::Features(&[]),
             ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
@@ -1967,10 +1979,10 @@ mod tests {
         let seen = SharedMock::new(mock);
         // Two incoming slots: OPENs 70 and 71 fill the queue, 72
         // overflows it and has to be refused with CLSE.
-        let conn = now(Connection::connect_with_config(
+        let conn = now(Connection::connect(
             seen.clone(),
             NoAuth,
-            &[],
+            HostBanner::Features(&[]),
             ConnectionConfig::new().with_max_channels(2),
         ))
         .unwrap();
@@ -2060,7 +2072,13 @@ mod tests {
             .feed(&okay(1))
             .feed(&okay(2))
             .stall_write(6 + 1);
-        let conn = now(Connection::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
         let (mut reader, writer) = conn.split().unwrap();
         let a = now(reader.open_channel(b"shell:\0")).unwrap();
         let b = now(reader.open_channel(b"shell:\0")).unwrap();
@@ -2168,7 +2186,13 @@ mod tests {
             .feed(&Packet::new(Command::Ready, 43, 2, Vec::new()))
             .feed(&Packet::new(Command::Write, 42, 1, b"x".to_vec()));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
         let (mut reader, writer) = conn.split().unwrap();
         let ch = now(reader.open_channel(b"shell:\0")).unwrap();
         {
@@ -2214,10 +2238,10 @@ mod tests {
             .with_initial_ack_bytes(1024);
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
-        let conn = now(Connection::connect_with_config(
+        let conn = now(Connection::connect(
             SharedMock::new(mock),
             NoAuth,
-            &[],
+            HostBanner::Features(&[]),
             config,
         ))
         .unwrap();

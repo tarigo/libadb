@@ -5,7 +5,7 @@ use super::*;
 use alloc::{format, vec};
 use core::cell::Cell;
 
-use crate::base::connection::Connection;
+use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::error::ProtocolError;
 use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth};
 use crate::base::protocol::Packet;
@@ -339,7 +339,13 @@ fn device_sending(wrtes: &[&[u8]]) -> Connection<Mock> {
     for payload in wrtes {
         mock.feed(&wrte(1, payload));
     }
-    now(Connection::connect(mock, NoAuth, &[])).unwrap()
+    now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap()
 }
 
 /// Every entry up to the end of logcat's stream, and the bytes moved
@@ -556,7 +562,13 @@ fn a_channel_that_closes_before_the_exit_status_fails() {
         .feed(&okay(1))
         .feed(&wrte(1, &wire))
         .feed(&Packet::close(42, 1));
-    let mut conn = now(Connection::connect(mock, NoAuth, &[])).unwrap();
+    let mut conn = now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
     let mut buf = [0u8; 128];
     let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
 

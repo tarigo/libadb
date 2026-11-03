@@ -25,7 +25,7 @@ use std::{env, process};
 
 use libadb::channel::SelectResult;
 use libadb::shell::v1 as shell_v1;
-use libadb::Connection;
+use libadb::{Connection, ConnectionConfig, HostBanner};
 
 #[cfg(feature = "tokio")]
 use tokio::sync::mpsc;
@@ -75,9 +75,14 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::connect(transport, auth, &[])
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut conn = Connection::connect(
+        transport,
+        auth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .map_err(|e| format!("connect: {e}"))?;
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 
@@ -158,9 +163,14 @@ async fn run_command(addr: &str, command: &str) -> Result<(), Box<dyn std::error
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::connect(transport, auth, &[])
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
+    let mut conn = Connection::connect(
+        transport,
+        auth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )
+    .await
+    .map_err(|e| format!("connect: {e}"))?;
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 

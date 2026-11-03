@@ -17,7 +17,6 @@ use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
 use crate::base::protocol::constant::STLS_VERSION;
-use crate::base::protocol::features::Feature;
 use crate::base::protocol::{Checksum, Packet};
 use crate::base::wire::{send_pkt, DesyncFlag};
 use crate::tls::TlsClientConfig;
@@ -40,8 +39,9 @@ where
     /// [`MaybeTls::plain`](crate::transport::tls::MaybeTls::plain), or a
     /// [`Transport`](crate::transport::common::Transport) after
     /// [`tls_ready`](crate::transport::common::Transport::tls_ready).
-    /// `auth` answers an AUTH challenge, as it does for `connect`, and
-    /// `tls` is used only if the device sends `STLS`. Build both from
+    /// `auth` answers an AUTH challenge, `banner` goes out in the CNXN
+    /// and `config` sets the limits, as they do for `connect`; `tls` is
+    /// used only if the device sends `STLS`. Build `auth` and `tls` from
     /// the same key: the certificate in `tls` must carry the key that
     /// authenticates over USB, or the device will not have it.
     ///
@@ -66,43 +66,11 @@ where
     ///   [`TlsError::HandshakeClosed`](crate::transport::tls::TlsError::HandshakeClosed)
     ///   when the device hangs up in the middle of it.
     pub async fn connect_tls<A: Authenticator>(
-        transport: T,
-        auth: A,
-        features: &[Feature],
-        tls: &TlsClientConfig,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_tls_with_config(transport, auth, features, tls, ConnectionConfig::new()).await
-    }
-
-    /// [`connect_tls`](Self::connect_tls) with explicit resource limits.
-    pub async fn connect_tls_with_config<A: Authenticator>(
-        transport: T,
-        auth: A,
-        features: &[Feature],
-        tls: &TlsClientConfig,
-        config: ConnectionConfig,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_tls_banner(transport, auth, HostBanner::Features(features), tls, config).await
-    }
-
-    /// [`connect_tls`](Self::connect_tls) with a caller-supplied banner
-    /// and explicit resource limits.
-    pub async fn connect_tls_with_raw_banner_and_config<A: Authenticator>(
-        transport: T,
-        auth: A,
-        banner: &[u8],
-        tls: &TlsClientConfig,
-        config: ConnectionConfig,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_tls_banner(transport, auth, HostBanner::Raw(banner), tls, config).await
-    }
-
-    async fn connect_tls_banner<A: Authenticator>(
         mut transport: T,
         mut auth: A,
         banner: HostBanner<'_>,
-        tls: &TlsClientConfig,
         config: ConnectionConfig,
+        tls: &TlsClientConfig,
     ) -> Result<Self, Error<<T as ErrorType>::Error>> {
         let banner = banner.to_bytes();
         let desync = DesyncFlag::new();

@@ -32,7 +32,7 @@
 //!
 //! ```ignore
 //! use libadb::shell::v2;
-//! use libadb::{Connection, Feature, TokioTcp};
+//! use libadb::{Connection, ConnectionConfig, Feature, HostBanner, TokioTcp};
 //!
 //! let tcp = tokio::net::TcpStream::connect("127.0.0.1:5555").await?;
 //! tcp.set_nodelay(true)?; // ADB is chatty; Nagle costs a round per exchange
@@ -41,7 +41,13 @@
 //! // `auth` is any `libadb::auth::Authenticator`. With the `keys`
 //! // feature the crate ships one: `keys::AdbKey`, parsed from the
 //! // key `adb` keeps in `~/.android/adbkey` or generated on the spot.
-//! let mut conn = Connection::connect(transport, auth, &[Feature::ShellV2]).await?;
+//! let mut conn = Connection::connect(
+//!     transport,
+//!     auth,
+//!     HostBanner::Features(&[Feature::ShellV2]),
+//!     ConnectionConfig::new(),
+//! )
+//! .await?;
 //!
 //! let mut rx = [0u8; 64 * 1024];
 //! let out = v2::exec(&mut conn, "getprop ro.product.model", &mut rx).await?;
@@ -67,9 +73,13 @@
 //! [`ConnectionConfig::embedded`] fits a microcontroller:
 //!
 //! ```ignore
-//! let conn = Connection::connect_with_config(
-//!     transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
-//! ).await?;
+//! let conn = Connection::connect(
+//!     transport,
+//!     auth,
+//!     HostBanner::Features(&[Feature::ShellV2]),
+//!     ConnectionConfig::embedded(),
+//! )
+//! .await?;
 //! ```
 //!
 //! On a microcontroller-sized heap the default config is unusable: one

@@ -7,7 +7,7 @@ use crate::base::auth::Authenticator;
 use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{self, Command};
-use crate::base::protocol::features::{self, Feature};
+use crate::base::protocol::features;
 use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
@@ -41,73 +41,38 @@ where
     ///
     /// * `transport` — an async read/write stream (TCP, USB, etc.)
     /// * `auth` — authenticator providing RSA signing and public key
-    /// * `features` — features this host advertises; use
-    ///   [`DEFAULT_HOST_FEATURES`](crate::protocol::features::DEFAULT_HOST_FEATURES)
-    ///   for the conservative set of features this library implements.
+    /// * `banner` — what this host sends in its CNXN:
+    ///   [`HostBanner::Features`] builds `host::features=<csv>` from a
+    ///   list, [`HostBanner::Raw`] sends bytes of your own, and
+    ///   [`HostBanner::default()`] advertises
+    ///   [`DEFAULT_HOST_FEATURES`](crate::DEFAULT_HOST_FEATURES), the set
+    ///   this library implements.
+    /// * `config` — resource limits. [`ConnectionConfig::new`] keeps the
+    ///   desktop defaults; [`ConnectionConfig::embedded`] is the starting
+    ///   point on memory-tight targets. `config.max_payload()` is what
+    ///   this host advertises in CNXN, so it bounds how large an inbound
+    ///   packet — and therefore the receive buffer — can get.
     ///
-    /// Builds the identity banner as `host::features=<csv>` from the
-    /// supplied list, then delegates to [`connect_with_raw_banner`].
-    /// Delayed ACK (credit-based flow control) is enabled only when
-    /// [`Feature::DelayedAck`] is in `features` and the device also advertises it.
+    /// Delayed ACK (credit-based flow control) is enabled only when the
+    /// banner names [`Feature::DelayedAck`](crate::Feature::DelayedAck)
+    /// and the device also advertises it.
     ///
     /// A device that answers with `STLS`, as Android 11+ wireless
     /// debugging does, fails this with [`ProtocolError::TlsRequired`];
     /// with the `tls` feature, `connect_tls` serves both kinds.
     ///
-    /// [`connect_with_raw_banner`]: Self::connect_with_raw_banner
+    /// ```ignore
+    /// use libadb::{Connection, ConnectionConfig, Feature, HostBanner};
+    ///
+    /// let conn = Connection::connect(
+    ///     transport,
+    ///     auth,
+    ///     HostBanner::Features(&[Feature::ShellV2]),
+    ///     ConnectionConfig::new(),
+    /// )
+    /// .await?;
+    /// ```
     pub async fn connect<A: Authenticator>(
-        transport: T,
-        auth: A,
-        features: &[Feature],
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_with_config(transport, auth, features, ConnectionConfig::new()).await
-    }
-
-    /// Like [`connect`](Self::connect), but with explicit resource
-    /// limits instead of the desktop defaults.
-    ///
-    /// `config.max_payload()` is what this host advertises to the device
-    /// in CNXN, so it directly bounds how large an inbound packet — and
-    /// therefore the receive buffer — can get. Use
-    /// [`ConnectionConfig::embedded`] as a starting point on memory-tight
-    /// targets.
-    pub async fn connect_with_config<A: Authenticator>(
-        transport: T,
-        auth: A,
-        features: &[Feature],
-        config: ConnectionConfig,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_banner(transport, auth, HostBanner::Features(features), config).await
-    }
-
-    /// Connect to an ADB device with a caller-supplied raw identity
-    /// banner (e.g. `b"host::features=shell_v2,delayed_ack"`).
-    ///
-    /// Escape hatch for callers that need properties beyond a plain
-    /// feature list; prefer [`connect`](Self::connect) for the common
-    /// case. A device that wants TLS fails this with
-    /// [`ProtocolError::TlsRequired`], as it fails `connect`.
-    pub async fn connect_with_raw_banner<A: Authenticator>(
-        transport: T,
-        auth: A,
-        banner: &[u8],
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_with_raw_banner_and_config(transport, auth, banner, ConnectionConfig::new())
-            .await
-    }
-
-    /// [`connect_with_raw_banner`](Self::connect_with_raw_banner) with
-    /// explicit resource limits.
-    pub async fn connect_with_raw_banner_and_config<A: Authenticator>(
-        transport: T,
-        auth: A,
-        banner: &[u8],
-        config: ConnectionConfig,
-    ) -> Result<Self, Error<<T as ErrorType>::Error>> {
-        Self::connect_banner(transport, auth, HostBanner::Raw(banner), config).await
-    }
-
-    async fn connect_banner<A: Authenticator>(
         mut transport: T,
         mut auth: A,
         banner: HostBanner<'_>,

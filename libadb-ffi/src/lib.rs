@@ -58,9 +58,7 @@ use std::sync::Mutex;
 
 use libadb::base::auth::Authenticator;
 use libadb::base::channel::ChannelId;
-use libadb::base::connection::Connection;
-#[cfg(feature = "tls")]
-use libadb::base::connection::ConnectionConfig;
+use libadb::base::connection::{Connection, ConnectionConfig, HostBanner};
 use libadb::reverse;
 use libadb::split::{Reader, SplitIncoming, Writer};
 use libadb::Splittable;
@@ -295,8 +293,13 @@ fn connect_plain<A: Authenticator>(
     auth: A,
     banner: &[u8],
 ) -> Result<Connection<FfiTransport>, AdbStatus> {
-    block_on::block_on(Connection::connect_with_raw_banner(t, auth, banner))
-        .map_err(error::fail_error)
+    block_on::block_on(Connection::connect(
+        t,
+        auth,
+        HostBanner::Raw(banner),
+        ConnectionConfig::new(),
+    ))
+    .map_err(error::fail_error)
 }
 
 /// What `adb_connect` runs: TLS if a TCP device asks for it. adbd never
@@ -311,12 +314,12 @@ fn connect_with_key(
     match t {
         FfiTransport::Tcp(_) => {
             let tls = auth.tls_config().map_err(error::fail_internal)?;
-            block_on::block_on(Connection::connect_tls_with_raw_banner_and_config(
+            block_on::block_on(Connection::connect_tls(
                 t,
                 auth,
-                banner,
-                &tls,
+                HostBanner::Raw(banner),
                 ConnectionConfig::new(),
+                &tls,
             ))
             .map_err(error::fail_error)
         }

@@ -23,7 +23,7 @@
 mod adb_key_auth;
 
 use libadb::channel::SelectResult;
-use libadb::{Connection, Error, TokioTcp};
+use libadb::{Connection, ConnectionConfig, Error, HostBanner, TokioTcp};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tokio::main(flavor = "current_thread")]
@@ -40,7 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
     tcp.set_nodelay(true)?;
     let auth = adb_key_auth::load_or_generate()?;
-    let mut conn = Connection::connect(TokioTcp::new(tcp), auth, &[]).await?;
+    let mut conn = Connection::connect(
+        TokioTcp::new(tcp),
+        auth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    )
+    .await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port)).await?;
     println!("[*] listening on 127.0.0.1:{local_port} -> {remote_spec}");
