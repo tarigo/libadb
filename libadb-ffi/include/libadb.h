@@ -2,9 +2,15 @@
  * libadb — C API for the ADB wire-protocol library.
  *
  * All functions are synchronous and block the calling thread until the
- * underlying async operation completes. Handles are thread-safe: the
- * inner state is guarded by a mutex, so calls from multiple threads
- * serialise (full-duplex from two threads is NOT supported).
+ * underlying async operation completes.
+ *
+ * Handles may be passed between threads and used from several at once.
+ * The calls that wait on the device for an answer — adb_open_channel(),
+ * adb_read_channel(), adb_accept_channel(), the reverse calls,
+ * adb_shell_open() and adb_shell_read_frame() — hold the connection's
+ * read lock, so two of them serialise. Writes and closes never take it:
+ * a thread blocked in a read does not keep another from writing. The
+ * metadata queries take no lock at all.
  *
  * On error, functions return a non-zero adb_status_t and set a
  * thread-local error string retrievable via adb_last_error().
