@@ -35,9 +35,9 @@ use alloc::vec::Vec;
 
 use crate::abb;
 use crate::base::destination::{self, DestinationError};
-use crate::base::error::Error;
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
+use crate::error::Error;
 use crate::shell::v2::Shell;
 
 fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {

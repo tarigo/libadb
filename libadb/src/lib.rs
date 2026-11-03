@@ -126,6 +126,7 @@ extern crate std;
 pub mod abb;
 pub mod base;
 pub mod cmd;
+pub mod error;
 pub mod exec;
 #[cfg(feature = "keys")]
 pub mod keys;
@@ -144,13 +145,13 @@ pub mod transport;
 pub mod uri;
 
 // Structural: expose private `base::*` submodules as top-level modules.
-pub use base::{auth, channel, connection, device_banner, error, protocol, session};
+pub use base::{auth, channel, connection, device_banner, protocol, session};
 
 // Core types used in every non-trivial caller.
 pub use base::connection::{Connection, ConnectionConfig, HostBanner, Incoming};
-pub use base::error::{Error, ProtocolError};
 pub use base::protocol::features::{Feature, DEFAULT_HOST_FEATURES};
 pub use base::session::Session;
+pub use error::{Error, ProtocolError};
 pub use transport::Splittable;
 
 #[cfg(feature = "keys")]

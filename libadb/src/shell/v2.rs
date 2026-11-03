@@ -20,9 +20,9 @@ use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
 use crate::base::destination::build_shell_v2_destination;
-use crate::base::error::{Error, ProtocolError};
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
+use crate::error::{Error, ProtocolError};
 
 /// Stdin payload from host to device.
 pub const STDIN: u8 = 0;

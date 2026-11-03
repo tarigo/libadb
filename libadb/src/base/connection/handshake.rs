@@ -5,13 +5,13 @@ use embedded_io_async::{Read, Write};
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::channel_table::ChannelTable;
-use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::incoming::IncomingQueue;
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::{self, AuthKind, Command};
 use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
+use crate::error::{AuthError, Error, ProtocolError};
 
 impl<T> Connection<T>
 where

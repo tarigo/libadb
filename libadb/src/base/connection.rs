@@ -8,7 +8,6 @@ use embedded_io_async::{Read, Write};
 use super::channel::{Channel, ChannelId, SelectResult};
 use super::channel_table::{ChannelTable, DispatchOutcome};
 use super::device_banner::DeviceBanner;
-use super::error::Error;
 use super::ids::{ChannelIds, RemoteId};
 use super::incoming::{IncomingQueue, PendingOpen};
 use super::negotiated::Negotiated;
@@ -17,6 +16,7 @@ use super::protocol::features::Feature;
 use super::protocol::Packet;
 use super::slot::{ChannelSlot, PendingAck};
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
+use crate::error::Error;
 pub use banner::HostBanner;
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 

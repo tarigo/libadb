@@ -6,8 +6,8 @@ use alloc::{format, vec};
 use core::cell::Cell;
 
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
-use crate::base::error::ProtocolError;
 use crate::base::mock::{clse, cnxn, now, okay, wrte, Mock, MockError, NoAuth};
+use crate::error::ProtocolError;
 
 std::thread_local! {
     /// Bytes `Logcat` has moved within its buffer on this thread, for

@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
-use crate::base::error::Error;
 use crate::base::ids::{ChannelIds, LocalId, RemoteId};
 use crate::base::mock::{
     abandon, now, okay, split_with_channel, withdraw, Mock, NoAuth, SharedMock,
@@ -11,6 +10,7 @@ use crate::base::mock::{
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::slot::{AckDecision, ChannelFault};
+use crate::error::Error;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
@@ -403,7 +403,7 @@ fn a_cancelled_write_wakes_reads_waiting_on_other_channels() {
 
 #[test]
 fn a_ready_without_credit_fails_a_writer_open_on_a_reader_driven_connection() {
-    use crate::base::error::ProtocolError;
+    use crate::error::ProtocolError;
     use core::task::{Context, Waker};
 
     // Queued behind the first channel's grant: the device's answer

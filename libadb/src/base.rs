@@ -35,7 +35,6 @@ pub mod connection;
 
 pub(crate) mod destination;
 pub mod device_banner;
-pub mod error;
 pub(crate) mod ids;
 pub(crate) mod incoming;
 #[cfg(test)]
@@ -48,3 +47,7 @@ pub(crate) mod send_queue;
 pub mod session;
 pub(crate) mod slot;
 pub(crate) mod wire;
+
+// The crate-wide error once lived here; `libadb::base::error` still
+// names it.
+pub use crate::error;

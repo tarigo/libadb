@@ -30,8 +30,8 @@ use alloc::vec::Vec;
 use core::future::Future;
 
 use crate::base::channel::ChannelId;
-use crate::base::error::{Error, ProtocolError, ReverseError};
 use crate::base::session::Session;
+use crate::error::{Error, ProtocolError, ReverseError};
 
 /// Replies are tiny (a port number, a listing); anything past this is
 /// not the service we think we are talking to.

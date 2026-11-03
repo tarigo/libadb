@@ -1,6 +1,6 @@
 use super::channel::Channel;
-use super::error::Error;
 use super::session::Session;
+use crate::error::Error;
 
 pub(crate) struct RecvBuf<'b> {
     pub buf: &'b mut [u8],

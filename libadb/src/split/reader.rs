@@ -14,7 +14,6 @@ use super::SplitIncoming;
 use crate::base::channel::ChannelId;
 use crate::base::channel_table::DispatchOutcome;
 use crate::base::connection::ConnectionConfig;
-use crate::base::error::Error;
 use crate::base::ids::{ChannelIds, RemoteId};
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
@@ -22,6 +21,7 @@ use crate::base::protocol::Packet;
 use crate::base::slot::ChannelFault;
 use crate::base::wire::{recv_pkt, send_pkt};
 use crate::device_banner::DeviceBanner;
+use crate::error::Error;
 
 #[cfg(doc)]
 use super::{IncomingListener, Writer};

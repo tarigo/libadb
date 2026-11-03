@@ -49,11 +49,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
-use crate::base::error::Error;
 use crate::base::protobuf::{self as proto, DecodeError};
 use crate::base::protocol::features::Feature;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
+use crate::error::Error;
 
 /// A single process entry from the device.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

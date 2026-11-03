@@ -1,8 +1,8 @@
 use core::future::Future;
 
-use super::error::Error;
 use super::ids::LocalId;
 use super::session::Session;
+use crate::error::Error;
 
 /// Result of [`Channel::select`] / [`Session::select_channel`].
 #[derive(Debug)]

@@ -62,4 +62,4 @@ pub(crate) use shared::Shared;
 pub use writer::Writer;
 
 #[cfg(doc)]
-use crate::base::error::Error;
+use crate::error::Error;

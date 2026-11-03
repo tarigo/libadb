@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::error::ProtocolError;
+use crate::error::ProtocolError;
 
 pub(crate) fn build_shell_v2_destination(
     pty: bool,
@@ -28,7 +28,7 @@ pub(crate) enum DestinationError {
     Nul,
 }
 
-impl<E> From<DestinationError> for super::error::Error<E> {
+impl<E> From<DestinationError> for crate::error::Error<E> {
     fn from(e: DestinationError) -> Self {
         match e {
             DestinationError::TooLong => Self::ReceiveBufferFull,

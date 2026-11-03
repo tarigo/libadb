@@ -30,8 +30,8 @@ use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
 use crate::base::destination::{self, DestinationError};
-use crate::base::error::Error;
 use crate::base::session::Session;
+use crate::error::Error;
 
 fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, DestinationError> {
     destination::write_destination(buf, &[b"exec:", command.as_bytes()], &[])

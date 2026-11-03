@@ -7,7 +7,6 @@ use core::task::Poll;
 use bytes::BytesMut;
 use embedded_io_async::{Read, Write};
 
-use super::error::{Error, ProtocolError};
 use super::ids::ChannelIds;
 use super::negotiated::AckMode;
 use super::protocol::command::Command;
@@ -15,6 +14,7 @@ use super::protocol::constant::MAX_PAYLOAD;
 use super::protocol::Packet;
 use super::protocol::{Checksum, MESSAGE_SIZE};
 use super::slot::PendingAck;
+use crate::error::{Error, ProtocolError};
 
 /// Floor on how much to ask the transport for. A request smaller than
 /// this is padded up to it, so a header-sized read does not split a

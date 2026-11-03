@@ -61,8 +61,8 @@
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
-use crate::base::error::{Error, ProtocolError};
 use crate::base::session::Session;
+use crate::error::{Error, ProtocolError};
 use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
 
 /// A live `logcat -B` streaming session.

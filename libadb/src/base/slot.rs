@@ -3,10 +3,10 @@
 
 use bytes::{Buf, BytesMut};
 
-use super::error::{Error, ProtocolError, RxOverflow};
 use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::{AckMode, RxPolicy};
 use super::send_queue::SendQueue;
+use crate::error::{Error, ProtocolError, RxOverflow};
 
 /// AOSP's adbd always sends the 4-byte credit; when a peer omits it,
 /// the operation that received the packet fails with

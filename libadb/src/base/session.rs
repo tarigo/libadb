@@ -3,8 +3,8 @@
 use core::future::Future;
 
 use super::channel::{Channel, ChannelId, SelectResult};
-use super::error::Error;
 use super::protocol::features::Feature;
+use crate::error::Error;
 
 /// A connection the protocol helpers open their channels on.
 ///

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::base::error::ProtocolError;
+use crate::error::ProtocolError;
 
 use super::{parse_header, Frame, EXIT, HEADER_SIZE, STDERR, STDOUT};
 

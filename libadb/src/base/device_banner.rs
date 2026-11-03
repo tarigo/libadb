@@ -3,7 +3,8 @@ use core::ops::Range;
 
 use bytes::Bytes;
 
-use super::{error::ProtocolError, protocol::features::Feature};
+use super::protocol::features::Feature;
+use crate::error::ProtocolError;
 
 /// Parsed CNXN identity banner: `<state>:<serial>:<prop>=<value>;...`.
 ///
@@ -166,9 +167,9 @@ fn range_of(base: &str, sub: &str) -> Range<usize> {
 mod tests {
     use bytes::Bytes;
 
-    use super::super::{
-        device_banner::DeviceBanner, error::ProtocolError, protocol::features::Feature,
-    };
+    use crate::error::ProtocolError;
+
+    use super::super::{device_banner::DeviceBanner, protocol::features::Feature};
 
     /// A property cap no banner below reaches unless it tests the cap.
     const ROOM: usize = 8;

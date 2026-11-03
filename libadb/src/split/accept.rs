@@ -12,11 +12,11 @@ use alloc::vec::Vec;
 
 use super::shared::Shared;
 use crate::base::channel::ChannelId;
-use crate::base::error::Error;
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::wire::send_pkt;
+use crate::error::Error;
 
 #[cfg(doc)]
 use super::{Reader, Writer};

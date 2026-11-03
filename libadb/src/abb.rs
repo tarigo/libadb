@@ -38,9 +38,9 @@ use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
 use crate::base::destination::build_nul_destination;
-use crate::base::error::Error;
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
+use crate::error::Error;
 use crate::shell::v2::Shell;
 
 /// Open a raw `abb_exec:` channel. The device sends plain stdout bytes
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn destination_rejects_nul_in_arg() {
-        use crate::base::error::ProtocolError;
+        use crate::error::ProtocolError;
         assert_eq!(
             build_nul_destination("abb_exec:", &["bad\0arg"]),
             Err(ProtocolError::InvalidDestination)

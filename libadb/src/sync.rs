@@ -55,9 +55,9 @@
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
-use crate::base::error::{Error, SyncError};
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
+use crate::error::{Error, SyncError};
 
 /// A sync session over an open `sync:\0` channel.
 ///

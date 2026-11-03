@@ -5,13 +5,13 @@ use core::future::Future;
 use core::task::Poll;
 
 use super::*;
-use crate::base::error::{AuthError, ProtocolError};
 use crate::base::mock::{
     abandon, cnxn, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
     two_channels_delayed_ack, wrte, Mock, NoAuth, Signs, Withholds,
 };
 use crate::base::protocol::command::{Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
 use crate::base::protocol::Packet;
+use crate::error::{AuthError, ProtocolError};
 
 #[test]
 fn a_write_cancelled_between_header_and_payload_desyncs_the_connection() {

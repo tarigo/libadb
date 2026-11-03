@@ -1,7 +1,7 @@
-use super::super::error::ProtocolError;
 use super::super::ids::{ChannelIds, RemoteId};
 use super::checksum::payload_checksum;
 use super::{command::AuthKind, constant::MAX_PAYLOAD, Command, Message, MESSAGE_SIZE};
+use crate::error::ProtocolError;
 use bytes::{Buf, Bytes, BytesMut};
 
 #[cfg(test)]
@@ -171,8 +171,8 @@ impl Packet {
 mod tests {
     extern crate std;
 
-    use super::super::super::error::ProtocolError;
     use super::super::{constant::MAX_PAYLOAD, packet::Packet, Checksum, Command, MESSAGE_SIZE};
+    use crate::error::ProtocolError;
     use bytes::{BufMut, Bytes, BytesMut};
 
     /// Decode with the library-wide limit; tests that care about a

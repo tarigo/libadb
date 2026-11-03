@@ -2,10 +2,10 @@
 
 use super::connection::ConnectionConfig;
 use super::device_banner::DeviceBanner;
-use super::error::{Error, ProtocolError};
 use super::protocol::command;
 use super::protocol::features::{self, Feature};
 use super::protocol::{Checksum, Packet};
+use crate::error::{Error, ProtocolError};
 
 /// How inbound data is acknowledged, fixed by the handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,10 +1,10 @@
 use alloc::vec::Vec;
 use core::fmt::{self};
 
-use super::protocol::features::Feature;
-use super::protocol::Command;
+use crate::base::protocol::features::Feature;
+use crate::base::protocol::Command;
 
-pub use super::protobuf::DecodeError;
+pub use crate::base::protobuf::DecodeError;
 
 /// ADB protocol error, parameterized over the transport IO error type.
 #[derive(Debug)]

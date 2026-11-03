@@ -1,6 +1,6 @@
 //! ADB protocol command constants.
 //! Each command is the ASCII bytes of its name interpreted as a little-endian u32.
-use super::super::error::ProtocolError;
+use crate::error::ProtocolError;
 
 /// Synchronization command (`"SYNC"` as little-endian `u32`).
 ///
@@ -155,11 +155,11 @@ pub const fn magic(command: u32) -> u32 {
 mod tests {
     extern crate std;
 
-    use super::super::super::error::ProtocolError;
     use super::{
         magic, AuthKind, Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, CMD_AUTH,
         CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_STLS, CMD_SYNC, CMD_WRTE,
     };
+    use crate::error::ProtocolError;
 
     const ALL_VARIANTS: [(Command, u32); 8] = [
         (Command::Sync, CMD_SYNC),

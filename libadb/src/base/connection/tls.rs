@@ -13,10 +13,10 @@ use embedded_io::ErrorType;
 use super::handshake::{Handshake, Verdict};
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
-use crate::base::error::{AuthError, Error, ProtocolError};
 use crate::base::protocol::command::{AuthKind, Command};
 use crate::base::protocol::constant::STLS_VERSION;
 use crate::base::protocol::Packet;
+use crate::error::{AuthError, Error, ProtocolError};
 use crate::tls::TlsClientConfig;
 use crate::transport::tls::StartTls;
 

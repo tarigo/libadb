@@ -1,4 +1,4 @@
-use super::super::error::ProtocolError;
+use crate::error::ProtocolError;
 
 macro_rules! features {
     ($($variant:ident => $wire:literal,)*) => {

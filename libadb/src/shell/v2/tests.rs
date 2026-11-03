@@ -69,7 +69,7 @@ fn make_frame_extracts_exit_code_from_first_byte() {
 
 #[test]
 fn make_frame_rejects_empty_exit_payload() {
-    use crate::base::error::ProtocolError;
+    use crate::error::ProtocolError;
     assert!(matches!(
         make_frame(EXIT, Vec::new()),
         Err(ProtocolError::ShortExitPayload)
