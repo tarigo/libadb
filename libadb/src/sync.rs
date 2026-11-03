@@ -63,6 +63,7 @@ pub use format::*;
 use alloc::vec::Vec;
 
 use crate::base::channel::Channel;
+use crate::base::protocol::features::Feature;
 use crate::base::recv_buf::RecvBuf;
 use crate::base::session::Session;
 use crate::error::Error;
@@ -205,11 +206,14 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Stat a file (v2).
     ///
     /// Returns full metadata including uid/gid and 64-bit size.
-    /// Requires the device to advertise `stat_v2`.
+    /// Requires the device to advertise `stat_v2`: one whose banner
+    /// does not fails with [`Error::MissingFeature`] before anything is
+    /// sent.
     ///
     /// Returns [`SyncError::RemoteErrno`] when the device reports a
     /// non-zero error code (e.g. `ENOENT`).
     pub async fn stat_v2(&mut self, path: &str) -> Result<StatV2, Error<S::IoError>> {
+        self.channel.session.require_feature(Feature::StatV2)?;
         self.rx.compact();
         self.write_request(SyncId::Sta2, &[path.as_bytes()]).await?;
         self.read_next_id(&[SyncId::Sta2]).await?;
@@ -269,10 +273,12 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// List a directory (v2).
     ///
-    /// Requires the device to advertise `ls_v2`.  Entries whose stat
-    /// failed on the device have a non-zero `stat.error` field but are
-    /// still included in the result.
+    /// Requires the device to advertise `ls_v2`, failing with
+    /// [`Error::MissingFeature`] before anything is sent otherwise.
+    /// Entries whose stat failed on the device have a non-zero
+    /// `stat.error` field but are still included in the result.
     pub async fn list_v2(&mut self, path: &str) -> Result<Vec<DirEntryV2>, Error<S::IoError>> {
+        self.channel.session.require_feature(Feature::LsV2)?;
         self.rx.compact();
         self.write_request(SyncId::Lis2, &[path.as_bytes()]).await?;
 
@@ -311,6 +317,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `RCV2` (v2) pull.
     ///
+    /// Requires the device to advertise `sendrecv_v2`, failing with
+    /// [`Error::MissingFeature`] before anything is sent otherwise.
     /// `flags` combines [`SyncFlags`]; [`SyncFlags::NONE`] pulls
     /// uncompressed.
     pub async fn recv_v2_start(
@@ -318,6 +326,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         path: &str,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
+        self.channel.session.require_feature(Feature::SendrecvV2)?;
         let path_bytes = path.as_bytes();
         self.rx.compact();
         self.write_header(SyncId::Rcv2, path_bytes.len() as u32)
@@ -401,6 +410,8 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `SND2` (v2) push.
     ///
+    /// Requires the device to advertise `sendrecv_v2`, failing with
+    /// [`Error::MissingFeature`] before anything is sent otherwise.
     /// `mode` is as in [`send_start`](Self::send_start). `flags`
     /// combines [`SyncFlags`]; [`SyncFlags::NONE`] pushes uncompressed.
     pub async fn send_v2_start(
@@ -409,6 +420,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         mode: FileMode,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
+        self.channel.session.require_feature(Feature::SendrecvV2)?;
         let path_bytes = path.as_bytes();
         self.rx.compact();
         self.write_header(SyncId::Snd2, path_bytes.len() as u32)

@@ -1,8 +1,8 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::error::SyncError;
-use libadb::sync::{self, FileMode};
-use libadb::Error;
+use libadb::sync::{self, FileMode, SyncFlags};
+use libadb::{Error, Feature};
 
 #[path = "rt/rt.rs"]
 mod rt;
@@ -13,6 +13,7 @@ use fake_device::{session, FakeChannel, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
+use common::expect_missing_feature;
 
 // ---------------------------------------------------------------------------
 // Tests: sync protocol (stat, list, recv, send)
@@ -40,6 +41,11 @@ fn encode_stat_v2_rest(mode: u32, uid: u32, gid: u32, size: u64, mtime: i64) -> 
     b[32..40].copy_from_slice(&size.to_le_bytes());
     b[48..56].copy_from_slice(&mtime.to_le_bytes());
     b
+}
+
+/// A device that advertises every v2 sync feature.
+fn v2_device() -> FakeDevice {
+    FakeDevice::new().banner(b"device::features=stat_v2,ls_v2,sendrecv_v2".to_vec())
 }
 
 /// Expect a sync request WRTE with the given 4-byte id and path payload.
@@ -124,7 +130,7 @@ async fn sync_stat_v1_returns_decoded_fields() {
 
 rt_test! {
 async fn sync_stat_v2_returns_full_metadata() {
-    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+    let (mut conn, device) = session(v2_device(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"sync:\0").await;
 
         expect_sync_req(&mut ch, b"STA2", b"/dir").await;
@@ -153,7 +159,7 @@ async fn sync_stat_v2_returns_full_metadata() {
 
 rt_test! {
 async fn sync_stat_v2_maps_remote_errno_to_sync_error() {
-    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+    let (mut conn, device) = session(v2_device(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"sync:\0").await;
 
         ch.expect_write_ack().await;
@@ -170,6 +176,35 @@ async fn sync_stat_v2_maps_remote_errno_to_sync_error() {
     let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
     let err = sync.stat_v2("/missing").await.unwrap_err();
     assert!(matches!(err, Error::Sync(SyncError::RemoteErrno(2))));
+
+    sync.quit().await.unwrap();
+    rt::join(device).await;
+}
+}
+
+rt_test! {
+async fn sync_v2_requests_need_their_features() {
+    // The default banner lists no features, so every v2 call fails
+    // before it writes: the one request the device sees is QUIT.
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"sync:\0").await;
+        expect_sync_quit(&mut ch).await;
+    })
+    .await;
+
+    let mut buf = [0u8; 256];
+    let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+    expect_missing_feature(sync.stat_v2("/f").await, Feature::StatV2);
+    expect_missing_feature(sync.list_v2("/d").await, Feature::LsV2);
+    expect_missing_feature(
+        sync.recv_v2("/f", SyncFlags::NONE).await,
+        Feature::SendrecvV2,
+    );
+    expect_missing_feature(
+        sync.send_v2("/f", FileMode(0o100644), 0, SyncFlags::NONE, b"x")
+            .await,
+        Feature::SendrecvV2,
+    );
 
     sync.quit().await.unwrap();
     rt::join(device).await;
@@ -404,7 +439,7 @@ async fn sync_session_survives_a_list_v1() {
 
 rt_test! {
 async fn sync_session_survives_a_list_v2() {
-    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+    let (mut conn, device) = session(v2_device(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"sync:\0").await;
 
         expect_sync_req(&mut ch, b"LIS2", b"/dir").await;
