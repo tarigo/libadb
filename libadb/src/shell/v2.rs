@@ -30,26 +30,73 @@ use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
 use crate::error::{Error, ProtocolError};
 
-/// Stdin payload from host to device.
-pub const STDIN: u8 = 0;
-/// Stdout payload from device to host.
-pub const STDOUT: u8 = 1;
-/// Stderr payload from device to host.
-pub const STDERR: u8 = 2;
-/// Exit code (1-byte payload) from device to host.
-pub const EXIT: u8 = 3;
-/// Host signals that no more stdin will be sent.
-pub const CLOSE_STDIN: u8 = 4;
-/// Host notifies device of a terminal resize.
-pub const WINDOW_SIZE_CHANGE: u8 = 5;
+/// The first byte of a frame: which stream or signal its payload
+/// belongs to.
+///
+/// `FrameId::try_from` reads the byte and fails with the byte itself
+/// for an id this enum does not name; `u8::from` gives the byte back.
+///
+/// ```
+/// use libadb::shell::v2::FrameId;
+///
+/// assert_eq!(FrameId::try_from(1), Ok(FrameId::Stdout));
+/// assert_eq!(u8::from(FrameId::Exit), 3);
+/// assert_eq!(FrameId::try_from(9), Err(9));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FrameId {
+    /// 0: stdin payload from host to device.
+    Stdin,
+    /// 1: stdout payload from device to host.
+    Stdout,
+    /// 2: stderr payload from device to host.
+    Stderr,
+    /// 3: exit code (1-byte payload) from device to host.
+    Exit,
+    /// 4: host signals that no more stdin will be sent.
+    CloseStdin,
+    /// 5: host notifies device of a terminal resize.
+    WindowSizeChange,
+}
+
+impl TryFrom<u8> for FrameId {
+    type Error = u8;
+
+    fn try_from(id: u8) -> Result<Self, u8> {
+        Ok(match id {
+            0 => Self::Stdin,
+            1 => Self::Stdout,
+            2 => Self::Stderr,
+            3 => Self::Exit,
+            4 => Self::CloseStdin,
+            5 => Self::WindowSizeChange,
+            other => return Err(other),
+        })
+    }
+}
+
+impl From<FrameId> for u8 {
+    fn from(id: FrameId) -> Self {
+        match id {
+            FrameId::Stdin => 0,
+            FrameId::Stdout => 1,
+            FrameId::Stderr => 2,
+            FrameId::Exit => 3,
+            FrameId::CloseStdin => 4,
+            FrameId::WindowSizeChange => 5,
+        }
+    }
+}
 
 /// Size of the framing header in bytes.
 pub const HEADER_SIZE: usize = 5;
 
-pub(crate) fn parse_header(buf: &[u8; HEADER_SIZE]) -> (u8, u32) {
-    let id = buf[0];
+/// A header's id, or the byte it holds when [`FrameId`] does not name
+/// it, and its payload length.
+pub(crate) fn parse_header(buf: &[u8; HEADER_SIZE]) -> (Result<FrameId, u8>, u32) {
     let length = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
-    (id, length)
+    (FrameId::try_from(buf[0]), length)
 }
 
 pub(crate) fn encode_window_size(rows: u16, cols: u16) -> [u8; 8] {
@@ -67,9 +114,13 @@ pub enum Frame {
     Stderr(Vec<u8>),
     /// `EXIT` payload — the device process exit code.
     Exit(u8),
-    /// Frame with an unrecognized id; the raw payload is returned as-is.
+    /// A frame that is neither stdout, stderr nor exit: one with an id
+    /// [`FrameId`] does not name, or one only a host sends. The raw
+    /// payload is returned as-is.
     Other {
+        /// The id byte as it arrived.
         id: u8,
+        /// The payload, untouched.
         payload: Vec<u8>,
     },
 }
@@ -145,11 +196,15 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// payload are written as two separate channel writes (still
     /// zero-alloc — shell_v2 is stream-oriented so the receiver
     /// reassembles from the byte stream regardless of WRTE boundaries).
-    pub async fn send_frame(&mut self, id: u8, payload: &[u8]) -> Result<(), Error<S::IoError>> {
+    pub async fn send_frame(
+        &mut self,
+        id: FrameId,
+        payload: &[u8],
+    ) -> Result<(), Error<S::IoError>> {
         let len_u32 = u32::try_from(payload.len()).map_err(|_| ProtocolError::PayloadTooLarge)?;
         let hdr: [u8; HEADER_SIZE] = {
             let b = len_u32.to_le_bytes();
-            [id, b[0], b[1], b[2], b[3]]
+            [id.into(), b[0], b[1], b[2], b[3]]
         };
         let total = HEADER_SIZE + payload.len();
 
@@ -172,7 +227,7 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
 
     /// Send a `STDIN` frame.
     pub async fn write_stdin(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
-        self.send_frame(STDIN, data).await
+        self.send_frame(FrameId::Stdin, data).await
     }
 
     /// Send a `CLOSE_STDIN` frame, telling the device that no further
@@ -185,7 +240,7 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// channel a fault closed fails all the same, with that fault's
     /// error, such as [`Error::ChannelRxOverflow`].
     pub async fn close_stdin(&mut self) -> Result<(), Error<S::IoError>> {
-        match self.send_frame(CLOSE_STDIN, &[]).await {
+        match self.send_frame(FrameId::CloseStdin, &[]).await {
             Err(Error::ChannelClosed) => Ok(()),
             sent => sent,
         }
@@ -194,7 +249,7 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// Send a `WINDOW_SIZE_CHANGE` frame.
     pub async fn set_window_size(&mut self, rows: u16, cols: u16) -> Result<(), Error<S::IoError>> {
         let payload = encode_window_size(rows, cols);
-        self.send_frame(WINDOW_SIZE_CHANGE, &payload).await
+        self.send_frame(FrameId::WindowSizeChange, &payload).await
     }
 
     /// Read the next decoded frame, blocking until one is available.
@@ -245,7 +300,8 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
 
     /// Zero-alloc counterpart to [`try_next_frame`](Self::try_next_frame):
     /// returns the raw `(id, payload)` pair with `payload` borrowing
-    /// the shell's receive buffer.
+    /// the shell's receive buffer. `id` is the byte itself when
+    /// [`FrameId`] does not name it.
     ///
     /// The returned slice is valid until the next call that pumps or
     /// compacts the buffer. Typical usage:
@@ -257,7 +313,9 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// }
     /// ```
     #[allow(clippy::type_complexity)]
-    pub fn try_next_raw_ref(&mut self) -> Result<Option<(u8, &[u8])>, Error<S::IoError>> {
+    pub fn try_next_raw_ref(
+        &mut self,
+    ) -> Result<Option<(Result<FrameId, u8>, &[u8])>, Error<S::IoError>> {
         self.decoder
             .try_next_raw_ref(self.rx)
             .map_err(Error::Protocol)
@@ -356,8 +414,9 @@ pub async fn open<'a, 'b, S: Session>(
 ///   to start a login shell.
 /// * `term` — value for the `TERM` environment variable on the device
 ///   (e.g. `"xterm-256color"`). Pass an empty string to omit it.
-/// * `window_size` — if `Some((rows, cols))`, a [`WINDOW_SIZE_CHANGE`]
-///   frame is sent right after the channel opens so the device PTY has
+/// * `window_size` — if `Some((rows, cols))`, a
+///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
+///   right after the channel opens so the device PTY has
 ///   the correct dimensions from the start.
 /// * `rx` — caller-owned receive buffer; see [`Shell::new`] for
 ///   sizing advice.

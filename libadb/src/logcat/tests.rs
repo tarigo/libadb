@@ -315,9 +315,9 @@ fn destination_buffer_too_small() {
     );
 }
 
-fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+fn frame(id: FrameId, payload: &[u8]) -> Vec<u8> {
     let mut f = Vec::with_capacity(shell_v2::HEADER_SIZE + payload.len());
-    f.push(id);
+    f.push(id.into());
     f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     f.extend_from_slice(payload);
     f
@@ -374,8 +374,8 @@ fn a_frame_of_small_entries_is_not_moved() {
     // burst like `logcat -d` arrives as one frame of many entries,
     // spread over many WRTEs.
     let stdout = entries(2340, HEADER_V4_SIZE);
-    let mut wire = frame(shell_v2::STDOUT, &stdout);
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, &stdout);
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let wrtes: Vec<&[u8]> = wire.chunks(1000).collect();
     let mut conn = device_sending(&wrtes);
     let mut buf = vec![0u8; wire.len() + 64];
@@ -391,11 +391,11 @@ fn entries_read_on_when_no_frame_ends_where_an_entry_does() {
     // Each frame stops one byte into the next entry, so part of an
     // entry is always left waiting while the stream goes on.
     let stdout = entries(100, HEADER_V4_SIZE);
-    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 1]);
+    let mut wire = frame(FrameId::Stdout, &stdout[..HEADER_V4_SIZE + 1]);
     for piece in stdout[HEADER_V4_SIZE + 1..].chunks(HEADER_V4_SIZE) {
-        wire.extend_from_slice(&frame(shell_v2::STDOUT, piece));
+        wire.extend_from_slice(&frame(FrameId::Stdout, piece));
     }
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
 
@@ -411,9 +411,9 @@ fn a_wrte_of_one_entry_frames_is_not_moved() {
     let stdout = entries(1985, HEADER_V4_SIZE);
     let mut wire = Vec::new();
     for entry in stdout.chunks(HEADER_V4_SIZE) {
-        wire.extend_from_slice(&frame(shell_v2::STDOUT, entry));
+        wire.extend_from_slice(&frame(FrameId::Stdout, entry));
     }
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = vec![0u8; wire.len() + 64];
 
@@ -427,9 +427,9 @@ fn a_wrte_of_one_entry_frames_is_not_moved() {
 fn a_frame_a_device_never_sends_is_refused() {
     // Only stdout, stderr and exit come from the device; any other id
     // means the stream has slipped out of step.
-    let mut wire = frame(shell_v2::WINDOW_SIZE_CHANGE, &[0; 8]);
-    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE)));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::WindowSizeChange, &[0; 8]);
+    wire.extend_from_slice(&frame(FrameId::Stdout, &entries(1, HEADER_V4_SIZE)));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 256];
 
@@ -452,9 +452,9 @@ fn read_cut(
     wrte_cut: usize,
     buf_len: usize,
 ) -> Result<Vec<LogEntry>, Error<MockError>> {
-    let mut wire = frame(shell_v2::STDOUT, &stdout[..frame_cut]);
-    wire.extend_from_slice(&frame(shell_v2::STDOUT, &stdout[frame_cut..]));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, &stdout[..frame_cut]);
+    wire.extend_from_slice(&frame(FrameId::Stdout, &stdout[frame_cut..]));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire[..wrte_cut], &wire[wrte_cut..]]);
     let mut buf = vec![0u8; buf_len];
     read_to_end(&mut conn, &mut buf).0
@@ -484,12 +484,12 @@ fn a_buffer_four_bytes_longer_than_an_entry_reads_every_cut() {
 #[test]
 fn empty_stdout_and_stderr_frames_between_entries_are_harmless() {
     let entry = entries(1, HEADER_V4_SIZE);
-    let mut wire = frame(shell_v2::STDOUT, &[]);
-    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entry));
-    wire.extend_from_slice(&frame(shell_v2::STDERR, &[]));
-    wire.extend_from_slice(&frame(shell_v2::STDOUT, &[]));
-    wire.extend_from_slice(&frame(shell_v2::STDOUT, &entry));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, &[]);
+    wire.extend_from_slice(&frame(FrameId::Stdout, &entry));
+    wire.extend_from_slice(&frame(FrameId::Stderr, &[]));
+    wire.extend_from_slice(&frame(FrameId::Stdout, &[]));
+    wire.extend_from_slice(&frame(FrameId::Stdout, &entry));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
 
@@ -500,8 +500,8 @@ fn empty_stdout_and_stderr_frames_between_entries_are_harmless() {
 
 #[test]
 fn an_entry_longer_than_the_buffer_fails_instead_of_waiting() {
-    let mut wire = frame(shell_v2::STDOUT, &entries(1, 200));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, &entries(1, 200));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
 
@@ -512,8 +512,8 @@ fn an_entry_longer_than_the_buffer_fails_instead_of_waiting() {
 
 #[test]
 fn an_exit_frame_without_a_status_is_refused() {
-    let mut wire = frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[]));
+    let mut wire = frame(FrameId::Stdout, &entries(1, HEADER_V4_SIZE));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
 
@@ -528,8 +528,8 @@ fn an_exit_frame_without_a_status_is_refused() {
 #[test]
 fn the_stream_ends_at_the_status_byte_of_a_longer_exit_frame() {
     // Only the first byte is the status; nothing after it is waited for.
-    let mut wire = frame(shell_v2::STDOUT, &entries(1, HEADER_V4_SIZE));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0; 100])[..shell_v2::HEADER_SIZE + 1]);
+    let mut wire = frame(FrameId::Stdout, &entries(1, HEADER_V4_SIZE));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0; 100])[..shell_v2::HEADER_SIZE + 1]);
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
 
@@ -540,9 +540,9 @@ fn the_stream_ends_at_the_status_byte_of_a_longer_exit_frame() {
 
 #[test]
 fn the_exit_error_keeps_the_first_kib_of_stderr() {
-    let mut wire = frame(shell_v2::STDERR, b"abc");
-    wire.extend_from_slice(&frame(shell_v2::STDERR, &[b'e'; 2000]));
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[1]));
+    let mut wire = frame(FrameId::Stderr, b"abc");
+    wire.extend_from_slice(&frame(FrameId::Stderr, &[b'e'; 2000]));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[1]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 256];
 
@@ -557,7 +557,7 @@ fn the_exit_error_keeps_the_first_kib_of_stderr() {
 
 #[test]
 fn a_channel_that_closes_before_the_exit_status_fails() {
-    let wire = frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE));
+    let wire = frame(FrameId::Stdout, &entries(2, HEADER_V4_SIZE));
     let mut mock = Mock::new();
     mock.feed(&cnxn())
         .feed(&okay(1))
@@ -584,7 +584,7 @@ fn a_channel_that_closes_before_the_exit_status_fails() {
 
 #[test]
 fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
-    let mut conn = device_sending(&[&frame(shell_v2::STDOUT, &entries(2, HEADER_V4_SIZE))]);
+    let mut conn = device_sending(&[&frame(FrameId::Stdout, &entries(2, HEADER_V4_SIZE))]);
     let mut buf = [0u8; 128];
 
     let (got, _) = read_to_end(&mut conn, &mut buf);
@@ -595,8 +595,8 @@ fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
 #[test]
 fn an_entry_cut_short_by_a_clean_exit_is_reported() {
     let stdout = entries(2, HEADER_V4_SIZE);
-    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
     let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
@@ -612,8 +612,8 @@ fn an_entry_cut_short_by_a_clean_exit_is_reported() {
 #[test]
 fn a_failed_exit_wins_over_the_entry_it_cut_short() {
     let stdout = entries(2, HEADER_V4_SIZE);
-    let mut wire = frame(shell_v2::STDOUT, &stdout[..HEADER_V4_SIZE + 10]);
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[1]));
+    let mut wire = frame(FrameId::Stdout, &stdout[..HEADER_V4_SIZE + 10]);
+    wire.extend_from_slice(&frame(FrameId::Exit, &[1]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 128];
     let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
@@ -631,8 +631,8 @@ fn text_in_place_of_entries_is_refused() {
     // `-g` makes logcat print its buffer sizes as text, then exit 0.
     let text = b"main: ring buffer is 256 KiB (12 KiB consumed, 12 KiB readable), \
                  max entry is 5120 B, max payload is 4068 B\n";
-    let mut wire = frame(shell_v2::STDOUT, text);
-    wire.extend_from_slice(&frame(shell_v2::EXIT, &[0]));
+    let mut wire = frame(FrameId::Stdout, text);
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
     let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 256];
 

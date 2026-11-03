@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use libadb::base::channel::ChannelId;
 use libadb::base::error::{Error, ProtocolError};
-use libadb::shell::v2::{FrameDecoder, CLOSE_STDIN, STDIN, WINDOW_SIZE_CHANGE};
+use libadb::shell::v2::{FrameDecoder, FrameId};
 
 use crate::block_on;
 use crate::connection::{lock_poisoned, FfiReader, FfiWriter};
@@ -57,8 +57,14 @@ impl ParseState {
         }
     }
 
+    /// The next frame, its id as the byte C sees whether or not
+    /// [`FrameId`] names it.
     fn try_next_frame(&mut self) -> Result<Option<(u8, Vec<u8>)>, Error<FfiTransportError>> {
-        self.decoder.try_next_raw(&self.rx).map_err(Error::Protocol)
+        let frame = self
+            .decoder
+            .try_next_raw(&self.rx)
+            .map_err(Error::Protocol)?;
+        Ok(frame.map(|(id, payload)| (id.map_or_else(|byte| byte, u8::from), payload)))
     }
 
     fn ensure_writable(&mut self) -> Result<(), Error<FfiTransportError>> {
@@ -132,13 +138,13 @@ async fn send_frame_async(
     writer: &FfiWriter,
     send_lock: &Mutex<()>,
     channel_id: ChannelId,
-    id: u8,
+    id: FrameId,
     payload: &[u8],
 ) -> Result<(), Error<FfiTransportError>> {
     let len = u32::try_from(payload.len())
         .map_err(|_| Error::Protocol(ProtocolError::PayloadTooLarge))?;
     let b = len.to_le_bytes();
-    let hdr = [id, b[0], b[1], b[2], b[3]];
+    let hdr = [id.into(), b[0], b[1], b[2], b[3]];
     let _turn = lock_poisoned(send_lock);
     writer.write_channel(channel_id, &hdr).await?;
     if !payload.is_empty() {
@@ -224,7 +230,7 @@ pub unsafe extern "C" fn adb_shell_open(
             &writer,
             &send_lock,
             channel_id,
-            WINDOW_SIZE_CHANGE,
+            FrameId::WindowSizeChange,
             &payload,
         ));
         if let Err(e) = res {
@@ -331,7 +337,7 @@ pub unsafe extern "C" fn adb_shell_write_stdin(
     // SAFETY: readable for `len` bytes when non-null, per `# Safety`.
     let payload = unsafe { super::slice::from_ptr(data, len) };
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    unsafe { send_frame_payload(sh, STDIN, payload) }
+    unsafe { send_frame_payload(sh, FrameId::Stdin, payload) }
 }
 
 /// Send a `CLOSE_STDIN` frame — no more stdin will follow.
@@ -345,7 +351,7 @@ pub unsafe extern "C" fn adb_shell_close_stdin(sh: *mut adb_shell_t) -> AdbStatu
         return error::fail_invalid_arg("null handle");
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    unsafe { send_frame_payload(sh, CLOSE_STDIN, &[]) }
+    unsafe { send_frame_payload(sh, FrameId::CloseStdin, &[]) }
 }
 
 /// Send a `WINDOW_SIZE_CHANGE` frame.
@@ -364,7 +370,7 @@ pub unsafe extern "C" fn adb_shell_set_window_size(
     }
     let payload = encode_window_size(rows, cols);
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    unsafe { send_frame_payload(sh, WINDOW_SIZE_CHANGE, &payload) }
+    unsafe { send_frame_payload(sh, FrameId::WindowSizeChange, &payload) }
 }
 
 /// Close the underlying channel. Subsequent read/write ops on this
@@ -394,7 +400,7 @@ pub unsafe extern "C" fn adb_shell_close(sh: *mut adb_shell_t) -> AdbStatus {
 
 /// # Safety
 /// `sh` must be a valid handle.
-unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: u8, payload: &[u8]) -> AdbStatus {
+unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: FrameId, payload: &[u8]) -> AdbStatus {
     // SAFETY: a valid handle, per `# Safety`.
     let sh = unsafe { &*sh };
     if sh.closed.load(Ordering::Acquire) {

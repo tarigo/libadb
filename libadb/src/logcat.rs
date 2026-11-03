@@ -69,7 +69,7 @@ use alloc::vec::Vec;
 use crate::base::channel::Channel;
 use crate::base::session::Session;
 use crate::error::{Error, ProtocolError};
-use crate::shell::v2::{self as shell_v2, CommandOutput, Shell};
+use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell};
 
 /// A live `logcat -B` streaming session.
 ///
@@ -88,7 +88,7 @@ pub struct Logcat<'a, 'b, S> {
     acc_end: usize,
     head: usize,
     tail: usize,
-    frame_id: u8,
+    frame_id: FrameId,
     frame_left: usize,
     end: End,
     stderr: Vec<u8>,
@@ -116,7 +116,8 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             acc_end: 0,
             head: 0,
             tail: 0,
-            frame_id: 0,
+            // Read only while `frame_left` is non-zero.
+            frame_id: FrameId::Stdout,
             frame_left: 0,
             end: End::NotYet,
             stderr: Vec::new(),
@@ -182,12 +183,12 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                 End::ClosedWithoutExit => return Err(LogcatError::ClosedWithoutExit.into()),
             }
             if self.frame_left > 0 && self.head < self.tail {
-                if self.frame_id == shell_v2::EXIT {
+                if self.frame_id == FrameId::Exit {
                     self.end = End::Exited(self.buf[self.head]);
                     continue;
                 }
                 let n = self.frame_left.min(self.tail - self.head);
-                if self.frame_id == shell_v2::STDOUT {
+                if self.frame_id == FrameId::Stdout {
                     if self.acc_start == self.acc_end {
                         self.acc_start = self.head;
                         self.acc_end = self.head;
@@ -210,13 +211,16 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                     .try_into()
                     .unwrap();
                 let (id, len) = shell_v2::parse_header(&hdr);
-                match id {
-                    shell_v2::EXIT if len == 0 => {
+                let id = match id {
+                    Ok(FrameId::Exit) if len == 0 => {
                         return Err(ProtocolError::ShortExitPayload.into())
                     }
-                    shell_v2::STDOUT | shell_v2::STDERR | shell_v2::EXIT => {}
-                    other => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
-                }
+                    Ok(id @ (FrameId::Stdout | FrameId::Stderr | FrameId::Exit)) => id,
+                    Ok(other) => {
+                        return Err(ProtocolError::UnexpectedShellFrame(other.into()).into())
+                    }
+                    Err(other) => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
+                };
                 self.head += shell_v2::HEADER_SIZE;
                 self.frame_id = id;
                 self.frame_left = len as usize;

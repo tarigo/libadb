@@ -5,19 +5,26 @@ use alloc::vec::Vec;
 
 use crate::error::ProtocolError;
 
-use super::{parse_header, Frame, EXIT, HEADER_SIZE, STDERR, STDOUT};
+use super::{parse_header, Frame, FrameId, HEADER_SIZE};
 
-pub(super) fn make_frame(id: u8, payload: Vec<u8>) -> Result<Frame, ProtocolError> {
+pub(super) fn make_frame(
+    id: Result<FrameId, u8>,
+    payload: Vec<u8>,
+) -> Result<Frame, ProtocolError> {
     Ok(match id {
-        STDOUT => Frame::Stdout(payload),
-        STDERR => Frame::Stderr(payload),
-        EXIT => Frame::Exit(
+        Ok(FrameId::Stdout) => Frame::Stdout(payload),
+        Ok(FrameId::Stderr) => Frame::Stderr(payload),
+        Ok(FrameId::Exit) => Frame::Exit(
             payload
                 .first()
                 .copied()
                 .ok_or(ProtocolError::ShortExitPayload)?,
         ),
-        other => Frame::Other { id: other, payload },
+        Ok(other) => Frame::Other {
+            id: other.into(),
+            payload,
+        },
+        Err(other) => Frame::Other { id: other, payload },
     })
 }
 
@@ -26,18 +33,31 @@ pub(super) fn make_frame(id: u8, payload: Vec<u8>) -> Result<Frame, ProtocolErro
 /// frame" split state; operates on a caller-supplied byte slice so it
 /// can be exercised by unit tests and fuzzers without building a
 /// [`Shell`](super::Shell).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct FrameDecoder {
     pub(crate) head: usize,
     pub(crate) tail: usize,
-    pub(crate) large_id: u8,
+    pub(crate) large_id: Result<FrameId, u8>,
     pub(crate) large_remaining: usize,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrameDecoder {
     /// A decoder over an empty buffer, with no frame part-delivered.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            head: 0,
+            tail: 0,
+            // Read only while `large_remaining` is non-zero, and set
+            // whenever it becomes so.
+            large_id: Ok(FrameId::Stdout),
+            large_remaining: 0,
+        }
     }
 
     /// Bytes already decoded from `rx` — safe to overwrite.
@@ -72,7 +92,9 @@ impl FrameDecoder {
     }
 
     /// Try to decode one frame from the buffered bytes in `rx` and
-    /// return `(id, payload)` where `payload` borrows from `rx`.
+    /// return `(id, payload)` where `payload` borrows from `rx` and
+    /// `id` is `Err` with the byte itself for an id [`FrameId`] does not
+    /// name.
     ///
     /// Zero-alloc primitive — the returned slice stays valid until the
     /// next call that mutates the decoder or `rx` (typically
@@ -81,10 +103,11 @@ impl FrameDecoder {
     /// When a frame (header + payload) does not fit in `rx` — i.e. when
     /// `HEADER_SIZE + payload_len > rx.len()` — it is delivered in
     /// multiple consecutive chunks that share the same `id`.
+    #[allow(clippy::type_complexity)]
     pub fn try_next_raw_ref<'a>(
         &mut self,
         rx: &'a [u8],
-    ) -> Result<Option<(u8, &'a [u8])>, ProtocolError> {
+    ) -> Result<Option<(Result<FrameId, u8>, &'a [u8])>, ProtocolError> {
         if self.large_remaining > 0 {
             let buffered = self.tail - self.head;
             if buffered == 0 {
@@ -139,13 +162,21 @@ impl FrameDecoder {
     /// `try_next_raw` is kept for call sites that need an owned payload
     /// across subsequent decoder calls (e.g. because they decode into a
     /// `Frame`).
-    pub fn try_next_raw(&mut self, rx: &[u8]) -> Result<Option<(u8, Vec<u8>)>, ProtocolError> {
+    #[allow(clippy::type_complexity)]
+    pub fn try_next_raw(
+        &mut self,
+        rx: &[u8],
+    ) -> Result<Option<(Result<FrameId, u8>, Vec<u8>)>, ProtocolError> {
         Ok(self
             .try_next_raw_ref(rx)?
             .map(|(id, payload)| (id, payload.to_vec())))
     }
 
-    fn consume_large_ref<'a>(&mut self, rx: &'a [u8], available: usize) -> (u8, &'a [u8]) {
+    fn consume_large_ref<'a>(
+        &mut self,
+        rx: &'a [u8],
+        available: usize,
+    ) -> (Result<FrameId, u8>, &'a [u8]) {
         let take = available.min(self.large_remaining);
         let id = self.large_id;
         let start = self.head;
