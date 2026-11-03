@@ -298,9 +298,10 @@ pub(super) const LOGGER_ENTRY_MAX_LEN: usize = 5 * 1024;
 /// decoded, `Ok(None)` when the buffer does not yet contain enough
 /// bytes, or `Err` on an unrecoverable format error.
 ///
-/// This function is also usable standalone for parsing binary logcat
-/// data obtained through other means (e.g. a file captured with
-/// `logcat -B -f`).
+/// It reads nothing but `buf`, and [`Logcat`](super::Logcat) is its one
+/// caller outside the tests: it is not exported, so binary logcat
+/// obtained by other means (a file captured with `logcat -B -f`, say)
+/// has no parser in the public API.
 pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, LogcatError> {
     const HEADER_PREFIX: usize = 4;
     if buf.len() < HEADER_PREFIX {
