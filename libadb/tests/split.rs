@@ -1,14 +1,14 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_OPEN, CMD_WRTE};
-use libadb::{Connection, ConnectionConfig, Error, ProtocolError};
+use libadb::{ConnectionConfig, Error, ProtocolError};
 
 #[path = "rt/rt.rs"]
 mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{session, session_with_config, wrap, FakeDevice, TestAuth};
+use fake_device::{session, session_with_config, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
@@ -258,17 +258,13 @@ async fn split_delayed_ack_partial_budget_progresses() {
 //
 // `Reader::open_channel` reserves a slot before sending OPEN, so when the
 // table is full the caller must see `NoFreeChannels` before any wire
-// traffic — the device never sees a third OPEN. Uses the low-level
-// `bind()` path because `session()` pins the `MAX_CHANNELS` const to
-// its default.
+// traffic — the device never sees a third OPEN.
 // ---------------------------------------------------------------------------
 
 rt_test! {
 async fn split_open_channel_no_free_slots_when_table_is_full() {
-    let (handle, addr) = FakeDevice::new().bind().await;
-
-    let device = rt::spawn(async move {
-        let mut s = handle.accept().await;
+    let config = ConnectionConfig::new().with_max_channels(2);
+    let (conn, device) = session_with_config(FakeDevice::new(), b"host::", config, |mut s| async move {
         let mut pairs: Vec<(u32, u32)> = Vec::new();
 
         for did in [100u32, 200u32] {
@@ -283,17 +279,8 @@ async fn split_open_channel_no_free_slots_when_table_is_full() {
             let (_, did) = pairs.iter().find(|(c, _)| *c == hdr.arg0).copied().unwrap();
             assert_eq!(hdr.arg1, did);
         }
-    });
-
-    let stream = rt::connect(addr).await;
-    let conn = Connection::<_>::connect_with_raw_banner_and_config(
-        wrap(stream),
-        TestAuth,
-        b"host::",
-        ConnectionConfig::new().with_max_channels(2),
-    )
-    .await
-    .unwrap();
+    })
+    .await;
     let (mut reader, writer) = conn.split().unwrap();
 
     let ch1 = reader.open_channel(b"svc1:\0").await.unwrap();

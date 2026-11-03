@@ -57,7 +57,7 @@ async fn a_token_that_is_not_a_sha1_prehash_is_refused_before_signing() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
     else {
         panic!("expected the handshake to refuse the token");
     };
@@ -96,7 +96,7 @@ async fn a_signer_that_refuses_says_why() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), Refuses, b"host::").await
+    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), Refuses, b"host::").await
     else {
         panic!("expected the handshake to fail");
     };
@@ -118,7 +118,7 @@ async fn a_device_that_demands_tls_is_reported_as_tls_required() {
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
 
-    let Err(err) = Connection::<_>::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
+    let Err(err) = Connection::connect_with_raw_banner(wrap(stream), TestAuth, b"host::").await
     else {
         panic!("expected the handshake to refuse a TLS-only device");
     };
@@ -527,7 +527,7 @@ async fn connect_encodes_host_features_into_cnxn_banner() {
     let device = rt::spawn(async move { handle.accept().await.host_banner().to_vec() });
 
     let stream = rt::connect(addr).await;
-    let _conn = Connection::<_>::connect(
+    let _conn = Connection::connect(
         wrap(stream),
         TestAuth,
         &[Feature::ShellV2, Feature::Cmd, Feature::DelayedAck],
@@ -545,7 +545,7 @@ async fn connect_with_no_host_features_emits_empty_features_value() {
     let device = rt::spawn(async move { handle.accept().await.host_banner().to_vec() });
 
     let stream = rt::connect(addr).await;
-    let _conn = Connection::<_>::connect(wrap(stream), TestAuth, &[]).await.unwrap();
+    let _conn = Connection::connect(wrap(stream), TestAuth, &[]).await.unwrap();
 
     assert_eq!(rt::join(device).await, b"host::features=");
 }

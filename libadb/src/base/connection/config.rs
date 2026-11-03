@@ -20,7 +20,7 @@ pub const MIN_MAX_PAYLOAD: u32 = 1024;
 /// use libadb::{Connection, ConnectionConfig, Feature};
 ///
 /// let config = ConnectionConfig::embedded().with_max_payload(4 * 1024);
-/// let conn = Connection::<_>::connect_with_config(
+/// let conn = Connection::connect_with_config(
 ///     transport, auth, &[Feature::ShellV2], config,
 /// ).await?;
 /// ```

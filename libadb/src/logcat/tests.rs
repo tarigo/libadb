@@ -339,7 +339,7 @@ fn device_sending(wrtes: &[&[u8]]) -> Connection<Mock> {
     for payload in wrtes {
         mock.feed(&wrte(1, payload));
     }
-    now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap()
+    now(Connection::connect(mock, NoAuth, &[])).unwrap()
 }
 
 /// Every entry up to the end of logcat's stream, and the bytes moved
@@ -556,7 +556,7 @@ fn a_channel_that_closes_before_the_exit_status_fails() {
         .feed(&okay(1))
         .feed(&wrte(1, &wire))
         .feed(&Packet::close(42, 1));
-    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let mut conn = now(Connection::connect(mock, NoAuth, &[])).unwrap();
     let mut buf = [0u8; 128];
     let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
 

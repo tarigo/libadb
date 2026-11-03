@@ -75,7 +75,7 @@ async fn run_interactive(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::<_>::connect(transport, auth, &[])
+    let mut conn = Connection::connect(transport, auth, &[])
         .await
         .map_err(|e| format!("connect: {e}"))?;
 
@@ -158,7 +158,7 @@ async fn run_command(addr: &str, command: &str) -> Result<(), Box<dyn std::error
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::<_>::connect(transport, auth, &[])
+    let mut conn = Connection::connect(transport, auth, &[])
         .await
         .map_err(|e| format!("connect: {e}"))?;
 

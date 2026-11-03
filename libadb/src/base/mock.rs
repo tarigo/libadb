@@ -401,7 +401,7 @@ pub(crate) fn connected_with_channel(stall: Option<usize>) -> (Connection<Mock>,
     if let Some(index) = stall {
         mock.stall_write(4 + index);
     }
-    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let mut conn = now(Connection::connect(mock, NoAuth, &[])).unwrap();
     let ch = now(conn.open_channel(b"shell:\0")).unwrap();
     (conn, ch)
 }
@@ -423,7 +423,7 @@ pub(crate) fn split_with_channel(
     if let Some(index) = stall {
         mock.stall_write(4 + index);
     }
-    let conn = now(Connection::<_>::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
+    let conn = now(Connection::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
     let (mut reader, writer) = conn.split().unwrap();
     let ch = now(reader.open_channel(b"shell:\0")).unwrap();
     (reader, writer, ch)
@@ -451,7 +451,7 @@ pub(crate) fn split_one_channel_delayed_ack(
     }
     let transport = SharedMock::new(mock);
     let seen = transport.clone();
-    let conn = now(Connection::<_>::connect_with_raw_banner(
+    let conn = now(Connection::connect_with_raw_banner(
         transport,
         NoAuth,
         b"host::features=shell_v2,delayed_ack",
@@ -489,7 +489,7 @@ pub(crate) fn connected_for_select(
 ) -> (Connection<Mock>, ChannelId) {
     let mut mock = Mock::new();
     mock.feed(&cnxn()).feed(&okay(1));
-    let mut conn = now(Connection::<_>::connect(mock, NoAuth, &[])).unwrap();
+    let mut conn = now(Connection::connect(mock, NoAuth, &[])).unwrap();
     let ch = now(conn.open_channel(b"shell:\0")).unwrap();
     let transport = conn.transport_mut();
     transport.feed(&wrte(1, b"hello"));
@@ -511,7 +511,7 @@ pub(crate) fn two_channels_delayed_ack(
     for pkt in pushes {
         mock.feed(pkt);
     }
-    let mut conn = now(Connection::<_>::connect_with_raw_banner(
+    let mut conn = now(Connection::connect_with_raw_banner(
         mock,
         NoAuth,
         b"host::features=shell_v2,delayed_ack",
@@ -535,7 +535,7 @@ pub(crate) fn two_channels_classic(
     for pkt in pushes {
         mock.feed(pkt);
     }
-    let mut conn = now(Connection::<_>::connect_with_raw_banner_and_config(
+    let mut conn = now(Connection::connect_with_raw_banner_and_config(
         mock,
         NoAuth,
         b"host::features=shell_v2",
@@ -568,7 +568,7 @@ pub(crate) fn split_two_channels_delayed_ack(
     }
     let transport = SharedMock::new(mock);
     let seen = transport.clone();
-    let conn = now(Connection::<_>::connect_with_raw_banner(
+    let conn = now(Connection::connect_with_raw_banner(
         transport,
         NoAuth,
         b"host::features=shell_v2,delayed_ack",

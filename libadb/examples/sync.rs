@@ -50,7 +50,7 @@ async fn connect(addr: &str) -> Result<Connection<Tcp>, Box<dyn std::error::Erro
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let conn = Connection::<_>::connect(
+    let conn = Connection::connect(
         transport,
         auth,
         &[

@@ -21,7 +21,7 @@
 //!
 //! let tcp = tokio::net::TcpStream::connect(addr).await?;
 //! let transport = MaybeTls::plain(TokioTcp::new(tcp));
-//! let conn = Connection::<_>::connect_tls(transport, key, &[Feature::ShellV2], &tls).await?;
+//! let conn = Connection::connect_tls(transport, key, &[Feature::ShellV2], &tls).await?;
 //! ```
 //!
 //! # What authenticates whom

@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
     tcp.set_nodelay(true)?;
     let auth = adb_key_auth::load_or_generate()?;
-    let mut conn = Connection::<_>::connect(TokioTcp::new(tcp), auth, &[]).await?;
+    let mut conn = Connection::connect(TokioTcp::new(tcp), auth, &[]).await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port)).await?;
     println!("[*] listening on 127.0.0.1:{local_port} -> {remote_spec}");

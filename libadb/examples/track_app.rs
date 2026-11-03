@@ -34,10 +34,9 @@ async fn run(addr: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn =
-        Connection::<_>::connect(transport, auth, &[Feature::TrackApp, Feature::AppInfo])
-            .await
-            .map_err(|e| format!("connect: {e}"))?;
+    let mut conn = Connection::connect(transport, auth, &[Feature::TrackApp, Feature::AppInfo])
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 

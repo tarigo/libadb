@@ -43,7 +43,7 @@ async fn run_exec(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error::E
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::<_>::connect(
+    let mut conn = Connection::connect(
         transport,
         auth,
         &[Feature::ShellV2, Feature::AbbExec, Feature::Abb],
@@ -81,7 +81,7 @@ async fn run_stream(addr: &str, args: &[&str]) -> Result<(), Box<dyn std::error:
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::<_>::connect(
+    let mut conn = Connection::connect(
         transport,
         auth,
         &[Feature::ShellV2, Feature::AbbExec, Feature::Abb],

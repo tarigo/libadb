@@ -75,7 +75,7 @@ let tcp = tokio::net::TcpStream::connect("127.0.0.1:5555").await?;
 tcp.set_nodelay(true)?; // ADB болтлив: Нейгл стоит round-trip на каждый обмен
 let transport = TokioTcp::new(tcp);
 
-let mut conn = Connection::<_>::connect(
+let mut conn = Connection::connect(
     transport,
     auth, // ваша реализация `libadb::auth::Authenticator`
     &[Feature::ShellV2],
@@ -141,7 +141,7 @@ let auth = store::load_or_generate(&dir, &mut rng, "user@host")?;
 ```rust,ignore
 use libadb::{Connection, ConnectionConfig, Feature};
 
-let conn = Connection::<_>::connect_with_config(
+let conn = Connection::connect_with_config(
     transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
 ).await?;
 ```

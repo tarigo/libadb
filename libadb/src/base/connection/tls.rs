@@ -23,8 +23,7 @@ use crate::base::wire::{send_pkt, DesyncFlag};
 use crate::tls::TlsClientConfig;
 use crate::transport::tls::StartTls;
 
-impl<T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Connection<T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
+impl<T> Connection<T>
 where
     T: StartTls,
 {

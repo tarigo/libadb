@@ -96,8 +96,7 @@ impl<S: Session> ReverseChannel for S {
 }
 
 #[cfg(feature = "split")]
-impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> ReverseChannel
-    for crate::split::Reader<RH, WH, MC, MP, MF>
+impl<RH, WH> ReverseChannel for crate::split::Reader<RH, WH>
 where
     RH: embedded_io_async::Read,
     WH: embedded_io_async::Write<Error = <RH as embedded_io::ErrorType>::Error>,

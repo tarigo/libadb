@@ -72,9 +72,7 @@ use crate::base::channel::{
     channel_ids_of, clse_closes, dispatch_packet, slot_for_mut, ChannelFault, ChannelId,
     ChannelSlot, ChannelState, DispatchOutcome, PendingOpen, SelectResult,
 };
-use crate::base::connection::{
-    ConnectionConfig, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_FEATURES, DEFAULT_MAX_PROPERTIES,
-};
+use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Checksum;
@@ -109,7 +107,7 @@ impl FlowSignal {
     }
 }
 
-pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> {
+pub(crate) struct Shared<WH> {
     pub(crate) write_half: AsyncMutex<WH>,
     pub(crate) channels: Mutex<Box<[Option<ChannelSlot>]>>,
     /// One per slot of `channels`.
@@ -141,7 +139,7 @@ pub(crate) struct Shared<WH, const MC: usize, const MP: usize, const MF: usize> 
     pub(crate) owed_closes: Mutex<Vec<(u32, u32)>>,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, MF> {
+impl<WH> Shared<WH> {
     fn next_local_id(&self) -> u32 {
         loop {
             let id = self.local_id_counter.fetch_add(1, Ordering::Relaxed);
@@ -173,7 +171,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     async fn send_open(
         self: &Arc<Self>,
         destination: &[u8],
-    ) -> Result<(ChannelId, SlotGuard<WH, MC, MP, MF>), Error<<WH as ErrorType>::Error>>
+    ) -> Result<(ChannelId, SlotGuard<WH>), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
     {
@@ -317,7 +315,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     /// Wrap a request that never reached the queue in its owned
     /// holder, registering it so a device cancellation can still find
     /// it.
-    fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH, MC, MP, MF>
+    fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH>
     where
         WH: Write,
     {
@@ -326,7 +324,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 
     /// Take the oldest queued device-initiated OPEN into its owned
     /// holder.
-    fn take_incoming(self: &Arc<Self>) -> Option<SplitIncoming<WH, MC, MP, MF>>
+    fn take_incoming(self: &Arc<Self>) -> Option<SplitIncoming<WH>>
     where
         WH: Write,
     {
@@ -341,7 +339,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     /// device withdrawal racing this — `run` handles them while a
     /// listener accepts from another task — finds the request in one
     /// place or the other, never in between.
-    fn take_incoming_past(self: &Arc<Self>, cap: usize) -> Option<SplitIncoming<WH, MC, MP, MF>>
+    fn take_incoming_past(self: &Arc<Self>, cap: usize) -> Option<SplitIncoming<WH>>
     where
         WH: Write,
     {
@@ -358,7 +356,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
         self: &Arc<Self>,
         pending: PendingOpen,
         staged: &mut Vec<(u32, Arc<AtomicBool>)>,
-    ) -> SplitIncoming<WH, MC, MP, MF>
+    ) -> SplitIncoming<WH>
     where
         WH: Write,
     {
@@ -401,9 +399,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
     }
 
     /// Take the write half for one packet, once the owed CLSEs are out.
-    async fn lock_write(
-        &self,
-    ) -> Result<WriteLock<'_, WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>>
+    async fn lock_write(&self) -> Result<WriteLock<'_, WH>, Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
     {
@@ -431,14 +427,12 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Shared<WH, MC, MP, M
 /// its future dropped, or the transport failing mid-write —
 /// desynchronizes the connection, and letting go then wakes every
 /// waiter to see that rather than wait for traffic that cannot come.
-struct WriteLock<'a, WH, const MC: usize, const MP: usize, const MF: usize> {
+struct WriteLock<'a, WH> {
     guard: async_lock::MutexGuard<'a, WH>,
-    shared: &'a Shared<WH, MC, MP, MF>,
+    shared: &'a Shared<WH>,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> core::ops::Deref
-    for WriteLock<'_, WH, MC, MP, MF>
-{
+impl<WH> core::ops::Deref for WriteLock<'_, WH> {
     type Target = WH;
 
     fn deref(&self) -> &WH {
@@ -446,15 +440,13 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> core::ops::Deref
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> core::ops::DerefMut
-    for WriteLock<'_, WH, MC, MP, MF>
-{
+impl<WH> core::ops::DerefMut for WriteLock<'_, WH> {
     fn deref_mut(&mut self) -> &mut WH {
         &mut self.guard
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for WriteLock<'_, WH, MC, MP, MF> {
+impl<WH> Drop for WriteLock<'_, WH> {
     fn drop(&mut self) {
         if self.shared.desync.check::<Infallible>().is_err() {
             self.shared.wake_all();
@@ -462,14 +454,14 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for WriteLock<'
     }
 }
 
-struct SlotGuard<WH, const MC: usize, const MP: usize, const MF: usize> {
-    shared: Arc<Shared<WH, MC, MP, MF>>,
+struct SlotGuard<WH> {
+    shared: Arc<Shared<WH>>,
     idx: usize,
     armed: bool,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> SlotGuard<WH, MC, MP, MF> {
-    fn new(shared: Arc<Shared<WH, MC, MP, MF>>, idx: usize) -> Self {
+impl<WH> SlotGuard<WH> {
+    fn new(shared: Arc<Shared<WH>>, idx: usize) -> Self {
         Self {
             shared,
             idx,
@@ -482,7 +474,7 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> SlotGuard<WH, MC, MP
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for SlotGuard<WH, MC, MP, MF> {
+impl<WH> Drop for SlotGuard<WH> {
     fn drop(&mut self) {
         if !self.armed {
             return;
@@ -501,15 +493,15 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for SlotGuard<W
     }
 }
 
-struct CreditGuard<'a, WH, const MC: usize, const MP: usize, const MF: usize> {
-    shared: &'a Shared<WH, MC, MP, MF>,
+struct CreditGuard<'a, WH> {
+    shared: &'a Shared<WH>,
     ch: ChannelId,
     n: usize,
     committed: bool,
 }
 
-impl<'a, WH, const MC: usize, const MP: usize, const MF: usize> CreditGuard<'a, WH, MC, MP, MF> {
-    fn new(shared: &'a Shared<WH, MC, MP, MF>, ch: ChannelId, n: usize) -> Self {
+impl<'a, WH> CreditGuard<'a, WH> {
+    fn new(shared: &'a Shared<WH>, ch: ChannelId, n: usize) -> Self {
         Self {
             shared,
             ch,
@@ -523,9 +515,7 @@ impl<'a, WH, const MC: usize, const MP: usize, const MF: usize> CreditGuard<'a, 
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
-    for CreditGuard<'_, WH, MC, MP, MF>
-{
+impl<WH> Drop for CreditGuard<'_, WH> {
     fn drop(&mut self) {
         if self.committed {
             return;
@@ -545,16 +535,14 @@ impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
 /// A place in a channel's send queue. Leaving without being served —
 /// the write future was dropped mid-wait — gives the turn up, so the
 /// queue keeps moving.
-struct QueueGuard<'a, WH, const MC: usize, const MP: usize, const MF: usize> {
-    shared: &'a Shared<WH, MC, MP, MF>,
+struct QueueGuard<'a, WH> {
+    shared: &'a Shared<WH>,
     ch: ChannelId,
     place: u64,
     served: bool,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
-    for QueueGuard<'_, WH, MC, MP, MF>
-{
+impl<WH> Drop for QueueGuard<'_, WH> {
     fn drop(&mut self) {
         if self.served {
             return;
@@ -590,31 +578,22 @@ enum OnFault {
 ///
 /// Drives packet reception, dispatching OKAY/CLSE/WRTE packets for all
 /// channels. Only one Reader exists per connection.
-pub struct Reader<
-    RH,
-    WH,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
+pub struct Reader<RH, WH>
+where
     RH: Read,
     WH: Write<Error = <RH as ErrorType>::Error>,
 {
     read_half: RH,
     recv_buf: BytesMut,
-    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
+    shared: Arc<Shared<WH>>,
 }
 
-impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> Reader<RH, WH, MC, MP, MF>
+impl<RH, WH> Reader<RH, WH>
 where
     RH: Read,
     WH: Write<Error = <RH as ErrorType>::Error>,
 {
-    pub(crate) fn new(
-        read_half: RH,
-        recv_buf: BytesMut,
-        shared: Arc<Shared<WH, MC, MP, MF>>,
-    ) -> Self {
+    pub(crate) fn new(read_half: RH, recv_buf: BytesMut, shared: Arc<Shared<WH>>) -> Self {
         Self {
             read_half,
             recv_buf,
@@ -704,7 +683,7 @@ where
     async fn await_open_ack(
         &mut self,
         ch: ChannelId,
-        guard: &mut SlotGuard<WH, MC, MP, MF>,
+        guard: &mut SlotGuard<WH>,
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         self.drain_overflow().await?;
         loop {
@@ -895,7 +874,7 @@ where
     /// [`read_channel`](Self::read_channel).
     pub async fn accept_incoming(
         &mut self,
-    ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<RH as ErrorType>::Error>> {
+    ) -> Result<SplitIncoming<WH>, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         loop {
             if let Some(incoming) = self.shared.take_incoming() {
@@ -913,7 +892,7 @@ where
 
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
     /// takes a request that already arrived, if any.
-    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH, MC, MP, MF>> {
+    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH>> {
         self.shared.take_incoming()
     }
 
@@ -1079,7 +1058,7 @@ where
     }
 }
 
-impl<RH, WH, const MC: usize, const MP: usize, const MF: usize> Drop for Reader<RH, WH, MC, MP, MF>
+impl<RH, WH> Drop for Reader<RH, WH>
 where
     RH: Read,
     WH: Write<Error = <RH as ErrorType>::Error>,
@@ -1093,15 +1072,11 @@ where
 /// connection. Owns the request — holding it does not borrow the
 /// [`Reader`]. Dropping it undecided puts the request back at the head
 /// of the queue.
-pub struct SplitIncoming<
-    WH,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
+pub struct SplitIncoming<WH>
+where
     WH: Write,
 {
-    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
+    shared: Arc<Shared<WH>>,
     pending: Option<PendingOpen>,
     /// A slot reserved by `accept` before READY is on the wire. If the
     /// future is cancelled or errors before that, `Drop` frees it —
@@ -1112,7 +1087,7 @@ pub struct SplitIncoming<
     cancelled: Arc<AtomicBool>,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> SplitIncoming<WH, MC, MP, MF>
+impl<WH> SplitIncoming<WH>
 where
     WH: Write,
 {
@@ -1245,7 +1220,7 @@ where
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop for SplitIncoming<WH, MC, MP, MF>
+impl<WH> Drop for SplitIncoming<WH>
 where
     WH: Write,
 {
@@ -1278,18 +1253,14 @@ where
 ///
 /// Cheaply cloneable (an `Arc` bump). Methods take `&self`, so a single
 /// `Writer` can be shared across threads with no additional wrapping.
-pub struct Writer<
-    WH,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
+pub struct Writer<WH>
+where
     WH: Write,
 {
-    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
+    shared: Arc<Shared<WH>>,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Clone for Writer<WH, MC, MP, MF>
+impl<WH> Clone for Writer<WH>
 where
     WH: Write,
 {
@@ -1300,11 +1271,11 @@ where
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Writer<WH, MC, MP, MF>
+impl<WH> Writer<WH>
 where
     WH: Write,
 {
-    pub(crate) fn new(shared: Arc<Shared<WH, MC, MP, MF>>) -> Self {
+    pub(crate) fn new(shared: Arc<Shared<WH>>) -> Self {
         Self { shared }
     }
 
@@ -1348,7 +1319,7 @@ where
     /// reverse`) on a connection whose [`Reader::run`] dispatches
     /// packets. While the listener lives, `run` keeps them for its
     /// [`accept`](IncomingListener::accept) instead of refusing them.
-    pub fn listen_incoming(&self) -> IncomingListener<WH, MC, MP, MF> {
+    pub fn listen_incoming(&self) -> IncomingListener<WH> {
         self.shared.listeners.fetch_add(1, Ordering::AcqRel);
         IncomingListener {
             shared: Arc::clone(&self.shared),
@@ -1382,7 +1353,7 @@ where
     async fn await_open_ack(
         &self,
         ch: ChannelId,
-        guard: &mut SlotGuard<WH, MC, MP, MF>,
+        guard: &mut SlotGuard<WH>,
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let signal = &self.shared.signals[ch.slot];
         loop {
@@ -1657,18 +1628,14 @@ where
 /// [`Writer::listen_incoming`]; while any listener lives, `run` keeps
 /// such requests for it — up to the channel table's size, past which
 /// they are refused on arrival — and refuses them once none does.
-pub struct IncomingListener<
-    WH,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
+pub struct IncomingListener<WH>
+where
     WH: Write,
 {
-    shared: Arc<Shared<WH, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>>,
+    shared: Arc<Shared<WH>>,
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> IncomingListener<WH, MC, MP, MF>
+impl<WH> IncomingListener<WH>
 where
     WH: Write,
 {
@@ -1678,9 +1645,7 @@ where
     /// [`Writer`] like any other.
     ///
     /// Cancellation-safe: a request is only taken once it is returned.
-    pub async fn accept(
-        &self,
-    ) -> Result<SplitIncoming<WH, MC, MP, MF>, Error<<WH as ErrorType>::Error>> {
+    pub async fn accept(&self) -> Result<SplitIncoming<WH>, Error<<WH as ErrorType>::Error>> {
         let mut listener: Option<EventListener> = None;
         loop {
             // A request taken now could get no verdict out: it would only
@@ -1699,8 +1664,7 @@ where
     }
 }
 
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Drop
-    for IncomingListener<WH, MC, MP, MF>
+impl<WH> Drop for IncomingListener<WH>
 where
     WH: Write,
 {
@@ -1711,8 +1675,8 @@ where
 
 /// Send CLSE for `ch` and free its slot: the close path shared by
 /// [`Writer::close_channel`] and [`Reader::close_channel`].
-async fn close_channel_via<WH, const MC: usize, const MP: usize, const MF: usize>(
-    shared: &Shared<WH, MC, MP, MF>,
+async fn close_channel_via<WH>(
+    shared: &Shared<WH>,
     ch: ChannelId,
 ) -> Result<(), Error<<WH as ErrorType>::Error>>
 where
@@ -1768,7 +1732,7 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_>::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
         let ch = now(reader.open_channel(b"shell:\0")).unwrap();
 
@@ -1835,7 +1799,7 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn());
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_>::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
         let (mut reader, _writer) = conn.split().unwrap();
 
         seen.feed(&Packet::new(Command::Open, 90, 0, b"tcp:90\0".to_vec()));
@@ -1864,7 +1828,7 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_>::connect_with_config(
+        let conn = now(Connection::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
@@ -1926,7 +1890,7 @@ mod tests {
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_>::connect_with_config(
+        let conn = now(Connection::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
@@ -2003,7 +1967,7 @@ mod tests {
         let seen = SharedMock::new(mock);
         // Two incoming slots: OPENs 70 and 71 fill the queue, 72
         // overflows it and has to be refused with CLSE.
-        let conn = now(Connection::<_>::connect_with_config(
+        let conn = now(Connection::connect_with_config(
             seen.clone(),
             NoAuth,
             &[],
@@ -2096,7 +2060,7 @@ mod tests {
             .feed(&okay(1))
             .feed(&okay(2))
             .stall_write(6 + 1);
-        let conn = now(Connection::<_>::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(SharedMock::new(mock), NoAuth, &[])).unwrap();
         let (mut reader, writer) = conn.split().unwrap();
         let a = now(reader.open_channel(b"shell:\0")).unwrap();
         let b = now(reader.open_channel(b"shell:\0")).unwrap();
@@ -2204,7 +2168,7 @@ mod tests {
             .feed(&Packet::new(Command::Ready, 43, 2, Vec::new()))
             .feed(&Packet::new(Command::Write, 42, 1, b"x".to_vec()));
         let seen = SharedMock::new(mock);
-        let conn = now(Connection::<_>::connect(seen.clone(), NoAuth, &[])).unwrap();
+        let conn = now(Connection::connect(seen.clone(), NoAuth, &[])).unwrap();
         let (mut reader, writer) = conn.split().unwrap();
         let ch = now(reader.open_channel(b"shell:\0")).unwrap();
         {
@@ -2250,7 +2214,7 @@ mod tests {
             .with_initial_ack_bytes(1024);
         let mut mock = Mock::new();
         mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
-        let conn = now(Connection::<_>::connect_with_config(
+        let conn = now(Connection::connect_with_config(
             SharedMock::new(mock),
             NoAuth,
             &[],

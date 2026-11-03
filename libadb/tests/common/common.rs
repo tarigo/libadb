@@ -35,7 +35,7 @@ pub async fn handshake(
     let (handle, addr) = FakeDevice::new().banner(banner.into_bytes()).bind().await;
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
-    let conn = Connection::<_>::connect(wrap(stream), TestAuth, host_features)
+    let conn = Connection::connect(wrap(stream), TestAuth, host_features)
         .await
         .unwrap();
     (conn, device)

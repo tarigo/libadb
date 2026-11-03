@@ -644,7 +644,7 @@ where
         scenario(s).await
     });
     let stream = rt::connect(addr).await;
-    let conn = libadb::Connection::<_>::connect_with_raw_banner_and_config(
+    let conn = libadb::Connection::connect_with_raw_banner_and_config(
         wrap(stream),
         TestAuth,
         host_banner,

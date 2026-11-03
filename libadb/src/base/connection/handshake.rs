@@ -45,8 +45,7 @@ pub(crate) async fn recv_handshake_pkt<T: Read>(
     }
 }
 
-impl<T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Connection<T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
+impl<T> Connection<T>
 where
     T: Read + Write,
 {

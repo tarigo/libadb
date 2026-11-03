@@ -94,8 +94,7 @@ pub trait Session {
     }
 }
 
-impl<T, const MC: usize, const MP: usize, const MF: usize> Session
-    for super::connection::Connection<T, MC, MP, MF>
+impl<T> Session for super::connection::Connection<T>
 where
     T: embedded_io_async::Read + embedded_io_async::Write + crate::transport::ReadCancelSafety,
 {
@@ -143,8 +142,7 @@ where
 }
 
 #[cfg(feature = "split")]
-impl<WH, const MC: usize, const MP: usize, const MF: usize> Session
-    for crate::split::Writer<WH, MC, MP, MF>
+impl<WH> Session for crate::split::Writer<WH>
 where
     WH: embedded_io_async::Write,
 {

@@ -41,7 +41,7 @@
 //! // `auth` is any `libadb::auth::Authenticator`. With the `keys`
 //! // feature the crate ships one: `keys::AdbKey`, parsed from the
 //! // key `adb` keeps in `~/.android/adbkey` or generated on the spot.
-//! let mut conn = Connection::<_>::connect(transport, auth, &[Feature::ShellV2]).await?;
+//! let mut conn = Connection::connect(transport, auth, &[Feature::ShellV2]).await?;
 //!
 //! let mut rx = [0u8; 64 * 1024];
 //! let out = v2::exec(&mut conn, "getprop ro.product.model", &mut rx).await?;
@@ -67,7 +67,7 @@
 //! [`ConnectionConfig::embedded`] fits a microcontroller:
 //!
 //! ```ignore
-//! let conn = Connection::<_>::connect_with_config(
+//! let conn = Connection::connect_with_config(
 //!     transport, auth, &[Feature::ShellV2], ConnectionConfig::embedded(),
 //! ).await?;
 //! ```

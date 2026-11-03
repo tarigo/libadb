@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tcp = tokio::net::TcpStream::connect(&addr).await?;
     tcp.set_nodelay(true)?;
     let auth = adb_key_auth::load_or_generate()?;
-    let mut conn = Connection::<_>::connect(TokioTcp::new(tcp), auth, &[]).await?;
+    let mut conn = Connection::connect(TokioTcp::new(tcp), auth, &[]).await?;
 
     let host_spec = format!("tcp:{local_port}");
     let assigned = libadb::reverse::establish(&mut conn, &device_spec, &host_spec).await?;

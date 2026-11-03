@@ -46,7 +46,7 @@ async fn run(addr: &str, extra_args: &[String]) -> Result<(), Box<dyn std::error
     };
 
     eprintln!("[*] connecting to {addr} ...");
-    let mut conn = Connection::<_>::connect(transport, auth, &[Feature::ShellV2])
+    let mut conn = Connection::connect(transport, auth, &[Feature::ShellV2])
         .await
         .map_err(|e| format!("connect: {e}"))?;
 

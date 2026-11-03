@@ -162,7 +162,7 @@ async fn open_connection(
         .map_err(|e| format!("transport: {e}"))?;
 
     #[cfg(not(feature = "tls"))]
-    let conn = Connection::<_>::connect(transport, auth, &[Feature::ShellV2])
+    let conn = Connection::connect(transport, auth, &[Feature::ShellV2])
         .await
         .map_err(|e| format!("connect: {e}"))?;
 
@@ -176,7 +176,7 @@ async fn open_connection(
         let identity = TlsIdentity::from_key(&auth, &mut OsRng).map_err(|e| format!("tls: {e}"))?;
         let tls = TlsClientConfig::adb(&identity).map_err(|e| format!("tls: {e}"))?;
 
-        Connection::<_>::connect_tls(transport.tls_ready(), auth, &[Feature::ShellV2], &tls)
+        Connection::connect_tls(transport.tls_ready(), auth, &[Feature::ShellV2], &tls)
             .await
             .map_err(|e| format!("connect: {e}"))?
     };

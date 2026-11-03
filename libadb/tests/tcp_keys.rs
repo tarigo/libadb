@@ -88,7 +88,7 @@ async fn a_real_key_completes_the_pubkey_handshake_with_a_verifiable_signature()
     let (handle, addr) = dev.bind().await;
     let device = rt::spawn(async move { handle.accept().await });
     let stream = rt::connect(addr).await;
-    let conn = Connection::<_>::connect_with_raw_banner(wrap(stream), key, b"host::")
+    let conn = Connection::connect_with_raw_banner(wrap(stream), key, b"host::")
         .await
         .unwrap();
 

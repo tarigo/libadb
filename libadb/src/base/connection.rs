@@ -21,17 +21,9 @@ use super::protocol::Packet;
 use super::wire::{recv_pkt, recv_pkt_or, send_okay_to, send_pkt, send_raw, DesyncFlag, Received};
 pub use config::{ConnectionConfig, MIN_MAX_PAYLOAD};
 
-pub const DEFAULT_MAX_CHANNELS: usize = ConnectionConfig::DEFAULT_MAX_CHANNELS;
-pub const DEFAULT_MAX_PROPERTIES: usize = ConnectionConfig::DEFAULT_MAX_BANNER_PROPERTIES;
-pub const DEFAULT_MAX_FEATURES: usize = 24;
-
 /// ADB connection over an async transport.
-pub struct Connection<
-    T,
-    const MAX_CHANNELS: usize = DEFAULT_MAX_CHANNELS,
-    const MAX_PROPERTIES: usize = DEFAULT_MAX_PROPERTIES,
-    const MAX_FEATURES: usize = DEFAULT_MAX_FEATURES,
-> where
+pub struct Connection<T>
+where
     T: Read + Write,
 {
     transport: T,
@@ -58,11 +50,11 @@ pub struct Connection<
 /// Borrow of the connection: decide with [`accept`](Self::accept) or
 /// [`reject`](Self::reject). Dropping it undecided puts the request
 /// back at the head of the queue.
-pub struct Incoming<'c, T, const MC: usize, const MP: usize, const MF: usize>
+pub struct Incoming<'c, T>
 where
     T: Read + Write,
 {
-    conn: &'c mut Connection<T, MC, MP, MF>,
+    conn: &'c mut Connection<T>,
     pending: Option<PendingOpen>,
     /// A slot reserved by `accept` before READY is on the wire. If the
     /// future is cancelled or errors before that, `Drop` frees it —
@@ -70,7 +62,7 @@ where
     reserved: Option<usize>,
 }
 
-impl<T, const MC: usize, const MP: usize, const MF: usize> Incoming<'_, T, MC, MP, MF>
+impl<T> Incoming<'_, T>
 where
     T: Read + Write,
 {
@@ -168,7 +160,7 @@ where
     }
 }
 
-impl<T, const MC: usize, const MP: usize, const MF: usize> Drop for Incoming<'_, T, MC, MP, MF>
+impl<T> Drop for Incoming<'_, T>
 where
     T: Read + Write,
 {
@@ -255,8 +247,7 @@ async fn dispatch_to<T: Write>(
     Ok(())
 }
 
-impl<T, const MAX_CHANNELS: usize, const MAX_PROPERTIES: usize, const MAX_FEATURES: usize>
-    Connection<T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>
+impl<T> Connection<T>
 where
     T: Read + Write,
 {
@@ -359,16 +350,8 @@ where
             crate::split::Reader<
                 <T as crate::Splittable>::ReadHalf,
                 <T as crate::Splittable>::WriteHalf,
-                MAX_CHANNELS,
-                MAX_PROPERTIES,
-                MAX_FEATURES,
             >,
-            crate::split::Writer<
-                <T as crate::Splittable>::WriteHalf,
-                MAX_CHANNELS,
-                MAX_PROPERTIES,
-                MAX_FEATURES,
-            >,
+            crate::split::Writer<<T as crate::Splittable>::WriteHalf>,
         ),
         Error<<T as ErrorType>::Error>,
     >
@@ -628,10 +611,7 @@ where
     /// refused with CLSE on arrival.
     pub async fn accept_incoming(
         &mut self,
-    ) -> Result<
-        Incoming<'_, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>,
-        Error<<T as ErrorType>::Error>,
-    > {
+    ) -> Result<Incoming<'_, T>, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
         loop {
             if let Some(pending) = self.incoming.pop_front() {
@@ -653,9 +633,7 @@ where
 
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
     /// takes a request that already arrived, if any.
-    pub fn try_accept_incoming(
-        &mut self,
-    ) -> Option<Incoming<'_, T, MAX_CHANNELS, MAX_PROPERTIES, MAX_FEATURES>> {
+    pub fn try_accept_incoming(&mut self) -> Option<Incoming<'_, T>> {
         let pending = self.incoming.pop_front()?;
         Some(Incoming {
             conn: self,
