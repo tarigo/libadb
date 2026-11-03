@@ -158,13 +158,9 @@ fn a_wrong_code_parts_the_two_sides_without_saying_so() {
 }
 
 #[test]
-fn a_message_of_the_wrong_shape_is_refused() {
+fn a_message_that_is_not_a_point_is_refused() {
     let alice = || Spake2::new(Role::Alice, CLIENT, SERVER, b"592781", &mut seed(0));
 
-    assert_eq!(
-        alice().finish(&[0u8; 31]),
-        Err(Spake2Error::MessageLength(31))
-    );
     // y = 2 satisfies no point on the curve.
     let mut not_a_point = [0u8; 32];
     not_a_point[0] = 2;

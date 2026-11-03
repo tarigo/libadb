@@ -15,7 +15,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::thread::JoinHandle;
 
 use libadb::keys::rsa::rand_core::OsRng;
-use libadb::pairing::{pair, PairingError, Role, Spake2};
+use libadb::pairing::{pair, PairingError, Role, Spake2, Spake2Error};
 use libadb::tls::rustls::{ServerConnection, StreamOwned};
 use libadb::transport::tls::MaybeTls;
 
@@ -123,6 +123,30 @@ fn spawn_pairing_device(code: &'static str) -> (SocketAddr, JoinHandle<DeviceOut
     (addr, handle)
 }
 
+/// A device that answers the host's SPAKE2 message with one a byte
+/// short.
+fn spawn_short_spake2_device() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = std::thread::spawn(move || {
+        let config = device_config(KeyPolicy::Accept);
+        let socket = tls_device::accept(&listener);
+        let mut tls = StreamOwned::new(ServerConnection::new(config).unwrap(), socket);
+
+        let mut theirs = [0u8; 6 + 32];
+        if tls.read_exact(&mut theirs).is_err() {
+            return;
+        }
+        tls.write_all(&frame(0, &[0u8; 31])).unwrap();
+        tls.flush().unwrap();
+        // Until the host hangs up.
+        let _ = tls.read(&mut [0u8; 1]);
+    });
+
+    (addr, handle)
+}
+
 fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![1u8, kind];
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -205,6 +229,28 @@ async fn the_right_code_hands_the_device_our_key() {
         key.public_key_line(),
         "the device learned the same key a USB prompt would have approved"
     );
+}
+}
+
+rt_test! {
+async fn a_spake2_message_of_the_wrong_size_is_refused() {
+    let (addr, device) = spawn_short_spake2_device();
+
+    let mut transport = client(addr).await;
+    let (config, key) = (client_config(), host_key());
+    let mut rng = OsRng;
+    let pairing = pair(&mut transport, &config, &key, "592781", &mut rng);
+    let outcome = rt::within("the pairing", pairing).await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(PairingError::Spake2(Spake2Error::MessageLength(31)))
+        ),
+        "got {outcome:?}"
+    );
+    drop(transport);
+    device.join().unwrap();
 }
 }
 

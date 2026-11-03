@@ -71,7 +71,9 @@ pub enum Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Spake2Error {
-    /// The peer's message was not 32 bytes.
+    /// The peer's message was not 32 bytes. [`pair`](crate::pairing::pair)
+    /// reports a SPAKE2 packet of any other size this way;
+    /// [`Spake2::finish`] takes exactly 32.
     MessageLength(usize),
     /// The peer's message was 32 bytes that are not a curve point.
     NotAPoint,
@@ -238,12 +240,8 @@ impl Spake2 {
     /// for one peer only, and everything secret it holds is zeroed on
     /// the way out. Take [`message`](Self::message) first if it is
     /// still needed. The result zeroes itself when dropped.
-    pub fn finish(self, their_msg: &[u8]) -> Result<Zeroizing<[u8; 64]>, Spake2Error> {
-        let their_msg: [u8; 32] = their_msg
-            .try_into()
-            .map_err(|_| Spake2Error::MessageLength(their_msg.len()))?;
-
-        let masked = CompressedEdwardsY(their_msg)
+    pub fn finish(self, their_msg: &[u8; 32]) -> Result<Zeroizing<[u8; 64]>, Spake2Error> {
+        let masked = CompressedEdwardsY(*their_msg)
             .decompress()
             .ok_or(Spake2Error::NotAPoint)?;
 
@@ -257,8 +255,8 @@ impl Spake2 {
         let shared = Zeroizing::new(mul_raw(&unmasked, &self.private_key).compress().to_bytes());
 
         let (alice_name, bob_name, alice_msg, bob_msg) = match self.role {
-            Role::Alice => (&self.my_name, &self.their_name, &self.my_msg, &their_msg),
-            Role::Bob => (&self.their_name, &self.my_name, &their_msg, &self.my_msg),
+            Role::Alice => (&self.my_name, &self.their_name, &self.my_msg, their_msg),
+            Role::Bob => (&self.their_name, &self.my_name, their_msg, &self.my_msg),
         };
 
         // Always in Alice's order, whichever side is building it.

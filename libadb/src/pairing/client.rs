@@ -153,9 +153,13 @@ where
     let spake2 = Spake2::new(Role::Alice, CLIENT_NAME, SERVER_NAME, &password, rng);
     send(transport, PacketType::Spake2Msg, spake2.message()).await?;
     let theirs = recv(transport, PacketType::Spake2Msg).await?;
+    let theirs: &[u8; 32] = theirs
+        .as_slice()
+        .try_into()
+        .map_err(|_| PairingError::Spake2(Spake2Error::MessageLength(theirs.len())))?;
 
-    let key_material = spake2.finish(&theirs).map_err(PairingError::Spake2)?;
-    let mut cipher = Cipher::new(key_material.as_ref());
+    let key_material = spake2.finish(theirs).map_err(PairingError::Spake2)?;
+    let mut cipher = Cipher::new(&key_material);
 
     let mine = peer_info::encode(PeerInfoType::RsaPublicKey, key.public_key_line())
         .map_err(PairingError::PeerInfo)?;

@@ -38,7 +38,7 @@ pub(crate) struct Cipher {
 impl Cipher {
     /// Stretch the 64 bytes SPAKE2 agreed on into a session key. No
     /// salt, as in AOSP.
-    pub(crate) fn new(key_material: &[u8]) -> Self {
+    pub(crate) fn new(key_material: &[u8; 64]) -> Self {
         let hkdf = Hkdf::<Sha256>::new(None, key_material);
         let mut key = Zeroizing::new([0u8; KEY_LEN]);
         hkdf.expand(HKDF_INFO, key.as_mut())
