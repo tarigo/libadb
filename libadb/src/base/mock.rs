@@ -412,6 +412,23 @@ pub(crate) fn connected_with_channel(stall: Option<usize>) -> (Connection<Mock>,
     (conn, ch)
 }
 
+/// A connection with a single channel slot to a device advertising
+/// `features`, which answers the first OPEN and then sends `then`.
+pub(crate) fn one_slot(features: &str, then: &[Packet]) -> Connection<Mock> {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn_with(features)).feed(&okay(1));
+    for pkt in then {
+        mock.feed(pkt);
+    }
+    now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new().with_max_channels(1),
+    ))
+    .unwrap()
+}
+
 /// A split connection with one open channel, over a mock that stalls on
 /// the write with the given index (counted from the first write after
 /// the handshake and OPEN).

@@ -131,4 +131,32 @@ impl<S: Session> Channel<'_, S> {
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.session.close_channel(self.id).await
     }
+
+    /// Read until the device closes the channel, filling `buf` from its
+    /// start, then close the channel. Returns the number of bytes read.
+    ///
+    /// The close is sent on every way out — the device closing, `buf`
+    /// filling up, any other error — since the device's CLSE only marks
+    /// the slot closed and `Channel` has no `Drop` to free it later: a
+    /// slot left open stays taken until the connection runs out of them
+    /// with [`Error::NoFreeChannels`]. It is best-effort, its own result
+    /// dropped in favour of what the reads came to.
+    ///
+    /// A `buf` that fills up before the device closes the channel is
+    /// [`Error::ReceiveBufferFull`], with what was read left in it.
+    pub(crate) async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
+        let mut tail = 0;
+        let read = loop {
+            if tail >= buf.len() {
+                break Err(Error::ReceiveBufferFull);
+            }
+            match self.read(&mut buf[tail..]).await {
+                Ok(n) => tail += n,
+                Err(Error::ChannelClosed) => break Ok(tail),
+                Err(e) => break Err(e),
+            }
+        };
+        let _ = self.close().await;
+        read
+    }
 }

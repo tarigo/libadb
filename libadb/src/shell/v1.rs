@@ -136,27 +136,41 @@ pub async fn exec<S: Session>(
 ) -> Result<usize, Error<S::IoError>> {
     let dest_len = write_destination(buf, command)?;
     let channel = session.open(&buf[..dest_len]).await?;
-    let mut shell = Shell { channel };
-
-    let mut tail = 0;
-    loop {
-        if tail >= buf.len() {
-            return Err(Error::ReceiveBufferFull);
-        }
-        match shell.read(&mut buf[tail..]).await {
-            Ok(n) => tail += n,
-            Err(Error::ChannelClosed) => {
-                let _ = shell.close().await;
-                return Ok(tail);
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    channel.read_to_end(buf).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::mock::{now, okay, one_slot, wrte, MockError};
+    use crate::base::protocol::Packet;
+
+    /// Run a one-shot `exec` the device answers with `answer` on a
+    /// connection of one channel slot, then open another channel in that
+    /// slot. Returns how the exec failed.
+    fn exec_fails_then_slot_reopens(answer: &[Packet]) -> Error<MockError> {
+        let mut conn = one_slot("shell_v2", answer);
+        let mut buf = [0u8; 16];
+        let err = now(exec(&mut conn, "yes", &mut buf)).unwrap_err();
+
+        conn.transport_mut().feed(&okay(2));
+        now(conn.open_channel(b"shell:\0")).expect("the failed exec kept its slot");
+        err
+    }
+
+    #[test]
+    fn exec_frees_its_slot_when_the_buffer_fills() {
+        let err = exec_fails_then_slot_reopens(&[wrte(1, &[b'y'; 16])]);
+        assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
+    }
+
+    #[test]
+    fn exec_frees_its_slot_when_a_read_fails() {
+        // Nothing follows the OKAY: the read runs into the end of the
+        // transport.
+        let err = exec_fails_then_slot_reopens(&[]);
+        assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+    }
 
     #[test]
     fn destination_empty_command() {
