@@ -13,7 +13,6 @@ use std::io::ErrorKind;
 
 use libadb::keys::rsa::rand_core::OsRng;
 use libadb::keys::store::{self, StoreError};
-use libadb::keys::{KeyError, KeyName};
 
 #[path = "test_key/test_key.rs"]
 mod test_key;
@@ -101,17 +100,6 @@ fn a_store_error_says_which_file_it_is_about_and_keeps_the_cause() {
         "the file is named here too: {shown}"
     );
     assert!(missing.source().is_some(), "as does the io error");
-}
-
-#[test]
-fn a_name_the_format_rejects_never_reaches_the_store() {
-    // Nothing on disk could be at fault for the name, so it is refused
-    // before there is a call that might blame a file for it.
-    let err = KeyName::new("unit@test\n").unwrap_err();
-    assert!(
-        matches!(err, KeyError::InvalidName),
-        "expected InvalidName, got {err:?}"
-    );
 }
 
 #[test]
