@@ -102,3 +102,19 @@ fn format_u32_single_digit() {
     let mut buf = [0u8; 10];
     assert_eq!(format_u32(7, &mut buf), b"7");
 }
+
+#[test]
+fn a_data_length_past_any_buffer_is_receive_buffer_full() {
+    use crate::base::mock::{now, one_slot, wrte};
+
+    // With its 8-byte header the chunk is 2^32 bytes: past `usize` on a
+    // 32-bit target, past the buffer on any.
+    let mut header = *b"DATA\0\0\0\0";
+    header[4..].copy_from_slice(&(u32::MAX - 7).to_le_bytes());
+    let mut conn = one_slot("", &[wrte(1, &header)]);
+    let mut buf = [0u8; 16];
+    let mut sync = now(open(&mut conn, &mut buf)).unwrap();
+
+    let err = now(sync.recv_next()).unwrap_err();
+    assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
+}

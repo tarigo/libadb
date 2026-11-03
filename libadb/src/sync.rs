@@ -337,7 +337,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// internal buffer and is valid until the next method call.
     ///
     /// Must be called after [`recv_start`](Self::recv_start) or
-    /// [`recv_v2_start`](Self::recv_v2_start).
+    /// [`recv_v2_start`](Self::recv_v2_start). A chunk that does not
+    /// fit the buffer together with its header is
+    /// [`Error::ReceiveBufferFull`].
     pub async fn recv_next(&mut self) -> Result<Option<&[u8]>, Error<S::IoError>> {
         self.rx.compact();
         if self.read_next_id(&[SyncId::Data, SyncId::Done]).await? == SyncId::Done {
@@ -346,9 +348,12 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         }
 
         let data_len = self.peek_u32(4) as usize;
-        self.rx
-            .fill_at_least(&mut self.channel, HEADER_SIZE + data_len)
-            .await?;
+        // On a 32-bit target a length near `u32::MAX` overflows the sum;
+        // no buffer holds such a chunk on any target.
+        let chunk_len = HEADER_SIZE
+            .checked_add(data_len)
+            .ok_or(Error::ReceiveBufferFull)?;
+        self.rx.fill_at_least(&mut self.channel, chunk_len).await?;
         self.rx.advance(HEADER_SIZE);
         Ok(Some(self.rx.take(data_len)))
     }
