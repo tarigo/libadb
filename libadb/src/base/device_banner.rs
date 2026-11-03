@@ -109,6 +109,7 @@ impl DeviceBanner {
         self.str_at(&self.serial)
     }
 
+    /// The value of the first property named `key`, if any.
     pub fn property(&self, key: &str) -> Option<&str> {
         self.properties.iter().find_map(|(k, v)| {
             if self.str_at(k) == key {
@@ -119,6 +120,8 @@ impl DeviceBanner {
         })
     }
 
+    /// Every `key=value` property, in banner order and repeats included;
+    /// the `features=` entry is not one of them.
     pub fn properties(&self) -> impl Iterator<Item = (&str, &str)> {
         self.properties
             .iter()
@@ -131,22 +134,27 @@ impl DeviceBanner {
         self.features.as_slice()
     }
 
+    /// The `ro.product.name` property, if the banner carries it.
     pub fn product_name(&self) -> Option<&str> {
         self.property("ro.product.name")
     }
 
+    /// The `ro.product.model` property, if the banner carries it.
     pub fn product_model(&self) -> Option<&str> {
         self.property("ro.product.model")
     }
 
+    /// The `ro.product.device` property, if the banner carries it.
     pub fn product_device(&self) -> Option<&str> {
         self.property("ro.product.device")
     }
 
+    /// Whether `feature` is among [`features`](Self::features).
     pub fn has_feature(&self, feature: &Feature) -> bool {
         self.features.iter().any(|f| f == feature)
     }
 
+    /// The bytes the banner was parsed from, as they were given.
     pub fn raw(&self) -> &[u8] {
         self.raw.as_ref()
     }
