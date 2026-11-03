@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::ops::{BitOr, BitOrAssign};
 
 /// Size of the basic sync header: `id(4) + arg(4)`.
 pub const HEADER_SIZE: usize = 8;
@@ -127,14 +128,52 @@ pub struct DirEntryV2 {
     pub stat: StatV2,
 }
 
-/// Compression / behaviour flags for `SND2` and `RCV2`.
-pub mod flags {
-    pub const NONE: u32 = 0;
-    pub const BROTLI: u32 = 1;
-    pub const LZ4: u32 = 2;
-    pub const ZSTD: u32 = 4;
-    /// Dry-run: validate but do not write (SND2 only).
-    pub const DRY_RUN: u32 = 0x8000_0000;
+/// Compression and behaviour flags for `SND2` and `RCV2`, combined
+/// with `|`.
+///
+/// libadb neither compresses nor decompresses: with a compression flag
+/// set, the `DATA` chunks pushed and pulled are the compressed stream.
+///
+/// ```
+/// use libadb::sync::SyncFlags;
+///
+/// let flags = SyncFlags::ZSTD | SyncFlags::DRY_RUN;
+/// assert_eq!(flags.bits(), 0x8000_0004);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SyncFlags(u32);
+
+impl SyncFlags {
+    /// Nothing set: an uncompressed transfer.
+    pub const NONE: Self = Self(0);
+    /// Brotli compression (`sendrecv_v2_brotli`).
+    pub const BROTLI: Self = Self(1);
+    /// LZ4 compression (`sendrecv_v2_lz4`).
+    pub const LZ4: Self = Self(2);
+    /// Zstandard compression (`sendrecv_v2_zstd`).
+    pub const ZSTD: Self = Self(4);
+    /// Dry-run: validate but do not write (SND2 only;
+    /// `sendrecv_v2_dry_run_send`).
+    pub const DRY_RUN: Self = Self(0x8000_0000);
+
+    /// The flags as the request carries them.
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+impl BitOr for SyncFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for SyncFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 pub(super) fn u32_at(buf: &[u8], off: usize) -> u32 {

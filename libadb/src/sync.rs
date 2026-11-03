@@ -311,15 +311,19 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `RCV2` (v2) pull.
     ///
-    /// `flags` is a combination of [`flags`] constants.  Pass
-    /// [`flags::NONE`] for uncompressed transfer.
-    pub async fn recv_v2_start(&mut self, path: &str, flags: u32) -> Result<(), Error<S::IoError>> {
+    /// `flags` combines [`SyncFlags`]; [`SyncFlags::NONE`] pulls
+    /// uncompressed.
+    pub async fn recv_v2_start(
+        &mut self,
+        path: &str,
+        flags: SyncFlags,
+    ) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
         self.write_header(SyncId::Rcv2, path_bytes.len() as u32)
             .await?;
         self.channel.write(path_bytes).await?;
-        self.channel.write(&flags.to_le_bytes()).await?;
+        self.channel.write(&flags.bits().to_le_bytes()).await?;
         Ok(())
     }
 
@@ -365,8 +369,13 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         Ok(data)
     }
 
-    /// Pull a file into memory (v2 `RCV2`).
-    pub async fn recv_v2(&mut self, path: &str, flags: u32) -> Result<Vec<u8>, Error<S::IoError>> {
+    /// Pull a file into memory (v2 `RCV2`), with `flags` as in
+    /// [`recv_v2_start`](Self::recv_v2_start).
+    pub async fn recv_v2(
+        &mut self,
+        path: &str,
+        flags: SyncFlags,
+    ) -> Result<Vec<u8>, Error<S::IoError>> {
         self.recv_v2_start(path, flags).await?;
         let mut data = Vec::new();
         while let Some(chunk) = self.recv_next().await? {
@@ -387,12 +396,13 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `SND2` (v2) push.
     ///
-    /// `flags` is a combination of [`flags`] constants.
+    /// `flags` combines [`SyncFlags`]; [`SyncFlags::NONE`] pushes
+    /// uncompressed.
     pub async fn send_v2_start(
         &mut self,
         path: &str,
         mode: u32,
-        flags: u32,
+        flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
         let path_bytes = path.as_bytes();
         self.rx.compact();
@@ -401,7 +411,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.channel.write(path_bytes).await?;
         let mut info = [0u8; 8];
         info[0..4].copy_from_slice(&mode.to_le_bytes());
-        info[4..8].copy_from_slice(&flags.to_le_bytes());
+        info[4..8].copy_from_slice(&flags.bits().to_le_bytes());
         self.channel.write(&info).await?;
         Ok(())
     }
@@ -446,13 +456,14 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.send_done(mtime).await
     }
 
-    /// Push a file to the device (v2 `SND2`).
+    /// Push a file to the device (v2 `SND2`), with `flags` as in
+    /// [`send_v2_start`](Self::send_v2_start).
     pub async fn send_v2(
         &mut self,
         path: &str,
         mode: u32,
         mtime: u32,
-        flags: u32,
+        flags: SyncFlags,
         data: &[u8],
     ) -> Result<(), Error<S::IoError>> {
         self.send_v2_start(path, mode, flags).await?;

@@ -63,11 +63,20 @@ fn sizes_match_protocol() {
 
 #[test]
 fn flags_values() {
-    assert_eq!(flags::NONE, 0);
-    assert_eq!(flags::BROTLI, 1);
-    assert_eq!(flags::LZ4, 2);
-    assert_eq!(flags::ZSTD, 4);
-    assert_eq!(flags::DRY_RUN, 0x8000_0000);
+    assert_eq!(SyncFlags::NONE.bits(), 0);
+    assert_eq!(SyncFlags::BROTLI.bits(), 1);
+    assert_eq!(SyncFlags::LZ4.bits(), 2);
+    assert_eq!(SyncFlags::ZSTD.bits(), 4);
+    assert_eq!(SyncFlags::DRY_RUN.bits(), 0x8000_0000);
+    assert_eq!(SyncFlags::default(), SyncFlags::NONE);
+}
+
+#[test]
+fn flags_combine_with_or() {
+    let mut flags = SyncFlags::LZ4 | SyncFlags::DRY_RUN;
+    assert_eq!(flags.bits(), 0x8000_0002);
+    flags |= SyncFlags::BROTLI;
+    assert_eq!(flags.bits(), 0x8000_0003);
 }
 
 #[test]
