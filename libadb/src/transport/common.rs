@@ -1,3 +1,6 @@
+//! [`Transport`], one connection type over either TCP or USB, and
+//! [`NoUsb`] for the USB half of a build or call site that has none.
+
 use embedded_io::{ErrorKind, ErrorType};
 use embedded_io_async::{Read, Write};
 
