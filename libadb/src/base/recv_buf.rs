@@ -9,11 +9,11 @@ use crate::error::Error;
 /// `buf[head..tail]` is what arrived and has not been consumed.
 pub(crate) struct RecvBuf<'b> {
     /// The caller's buffer.
-    pub buf: &'b mut [u8],
-    /// Where the bytes not consumed yet start; the parser moves it on.
-    pub head: usize,
+    buf: &'b mut [u8],
+    /// Where the bytes not consumed yet start.
+    head: usize,
     /// One past the last byte read in.
-    pub tail: usize,
+    tail: usize,
 }
 
 impl<'b> RecvBuf<'b> {
@@ -24,6 +24,49 @@ impl<'b> RecvBuf<'b> {
             head: 0,
             tail: 0,
         }
+    }
+
+    /// How many bytes the buffer holds in all: the longest reply
+    /// [`fill_at_least`](Self::fill_at_least) can wait for.
+    pub fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// The first `n` bytes not consumed yet, left in place.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `n` are buffered: fill first.
+    pub fn peek(&self, n: usize) -> &[u8] {
+        &self.buf[self.head..self.tail][..n]
+    }
+
+    /// Consume the first `n` bytes not consumed yet and return them.
+    /// They stay valid until the next call that reads into the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `n` are buffered.
+    pub fn take(&mut self, n: usize) -> &[u8] {
+        let start = self.head;
+        self.head += self.peek(n).len();
+        &self.buf[start..self.head]
+    }
+
+    /// Consume the first `n` bytes not consumed yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `n` are buffered.
+    pub fn advance(&mut self, n: usize) {
+        self.take(n);
+    }
+
+    /// The free space past the buffered bytes, for a caller to build an
+    /// outgoing message in without allocating. [`compact`](Self::compact)
+    /// first to make it as large as it gets.
+    pub fn window(&mut self) -> &mut [u8] {
+        &mut self.buf[self.tail..]
     }
 
     /// Move the bytes not consumed yet to the front of `buf`, freeing
@@ -128,6 +171,53 @@ mod tests {
         assert_eq!(rb.head, 0);
         assert_eq!(rb.tail, 2);
         assert_eq!(&rb.buf[..2], &[30, 40]);
+    }
+
+    #[test]
+    fn take_consumes_what_peek_shows() {
+        let mut storage = [1u8, 2, 3, 4, 5, 6];
+        let mut rb = RecvBuf::new(&mut storage);
+        rb.tail = 5;
+
+        assert_eq!(rb.peek(2), &[1, 2]);
+        assert_eq!(rb.take(3), &[1, 2, 3]);
+        rb.advance(1);
+
+        assert_eq!(rb.head, 4);
+        assert_eq!(rb.peek(1), &[5]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn peek_past_the_buffered_bytes_panics() {
+        let mut storage = [0u8; 8];
+        let mut rb = RecvBuf::new(&mut storage);
+        rb.tail = 2;
+
+        rb.peek(3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn advance_past_the_buffered_bytes_panics() {
+        let mut storage = [0u8; 8];
+        let mut rb = RecvBuf::new(&mut storage);
+        rb.tail = 2;
+
+        rb.advance(3);
+    }
+
+    #[test]
+    fn the_window_is_the_space_past_the_buffered_bytes() {
+        let mut storage = [0u8; 8];
+        let mut rb = RecvBuf::new(&mut storage);
+        rb.head = 1;
+        rb.tail = 3;
+
+        assert_eq!(rb.window().len(), 5);
+        rb.window()[0] = 9;
+        assert_eq!(rb.buf[3], 9);
+        assert_eq!(rb.capacity(), 8);
     }
 
     #[test]

@@ -98,13 +98,11 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     }
 
     fn peek_id(&self) -> [u8; 4] {
-        let mut id = [0u8; 4];
-        id.copy_from_slice(&self.rx.buf[self.rx.head..self.rx.head + 4]);
-        id
+        self.rx.peek(4).try_into().expect("peeked four bytes")
     }
 
     fn peek_u32(&self, offset: usize) -> u32 {
-        u32_at(self.rx.buf, self.rx.head + offset)
+        u32_at(self.rx.peek(offset + 4), offset)
     }
 
     async fn write_header(&mut self, id: SyncId, arg: u32) -> Result<(), Error<S::IoError>> {
@@ -123,18 +121,17 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         let total = HEADER_SIZE + arg_len;
 
         self.rx.compact();
-        let free = self.rx.buf.len() - self.rx.tail;
+        let window = self.rx.window();
 
-        if total <= free {
-            let s = self.rx.tail;
-            self.rx.buf[s..s + 4].copy_from_slice(&id.as_bytes());
-            self.rx.buf[s + 4..s + 8].copy_from_slice(&(arg_len as u32).to_le_bytes());
-            let mut off = s + HEADER_SIZE;
+        if total <= window.len() {
+            window[..4].copy_from_slice(&id.as_bytes());
+            window[4..8].copy_from_slice(&(arg_len as u32).to_le_bytes());
+            let mut off = HEADER_SIZE;
             for p in parts {
-                self.rx.buf[off..off + p.len()].copy_from_slice(p);
+                window[off..off + p.len()].copy_from_slice(p);
                 off += p.len();
             }
-            self.channel.write(&self.rx.buf[s..s + total]).await
+            self.channel.write(&window[..total]).await
         } else {
             self.write_header(id, arg_len as u32).await?;
             for p in parts {
@@ -163,22 +160,21 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<S::IoError>> {
         let msg_len = self.peek_u32(4) as usize;
-        self.rx.head += HEADER_SIZE;
+        self.rx.advance(HEADER_SIZE);
         // The device's message outranks a buffer complaint: keep what
         // fits and drain the rest, so the error surfaces truncated
         // rather than masked by ReceiveBufferFull — and the stream
         // stays consistent for whatever the caller does next.
-        let take = msg_len.min(self.rx.buf.len());
-        if take > 0 {
-            self.rx.fill_at_least(&mut self.channel, take).await?;
+        let kept = msg_len.min(self.rx.capacity());
+        if kept > 0 {
+            self.rx.fill_at_least(&mut self.channel, kept).await?;
         }
-        let msg = self.rx.buf[self.rx.head..self.rx.head + take].to_vec();
-        self.rx.head += take;
-        let mut left = msg_len - take;
+        let msg = self.rx.take(kept).to_vec();
+        let mut left = msg_len - kept;
         while left > 0 {
-            let chunk = left.min(self.rx.buf.len());
+            let chunk = left.min(self.rx.capacity());
             self.rx.fill_at_least(&mut self.channel, chunk).await?;
-            self.rx.head += chunk;
+            self.rx.advance(chunk);
             left -= chunk;
         }
         Ok(msg)
@@ -199,7 +195,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         let mode = FileMode(self.peek_u32(4));
         let size = self.peek_u32(8);
         let mtime = self.peek_u32(12);
-        self.rx.head += STAT_V1_SIZE;
+        self.rx.advance(STAT_V1_SIZE);
         Ok(StatV1 { mode, size, mtime })
     }
 
@@ -221,9 +217,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.rx
             .fill_at_least(&mut self.channel, STAT_V2_SIZE)
             .await?;
-        let body = &self.rx.buf[self.rx.head + 4..self.rx.head + STAT_V2_SIZE];
+        let body = &self.rx.peek(STAT_V2_SIZE)[4..];
         let stat = parse_stat_v2_body(body.try_into().expect("checked STAT_V2_SIZE bytes"));
-        self.rx.head += STAT_V2_SIZE;
+        self.rx.advance(STAT_V2_SIZE);
 
         if stat.error != 0 {
             return Err(SyncError::RemoteErrno(stat.error).into());
@@ -245,7 +241,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
                 self.rx
                     .fill_at_least(&mut self.channel, DENT_V1_SIZE)
                     .await?;
-                self.rx.head += DENT_V1_SIZE;
+                self.rx.advance(DENT_V1_SIZE);
                 return Ok(entries);
             }
 
@@ -256,11 +252,10 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             let size = self.peek_u32(8);
             let mtime = self.peek_u32(12);
             let namelen = self.peek_u32(16) as usize;
-            self.rx.head += DENT_V1_SIZE;
+            self.rx.advance(DENT_V1_SIZE);
 
             self.rx.fill_at_least(&mut self.channel, namelen).await?;
-            let name = self.rx.buf[self.rx.head..self.rx.head + namelen].to_vec();
-            self.rx.head += namelen;
+            let name = self.rx.take(namelen).to_vec();
 
             entries.push(DirEntry {
                 name,
@@ -289,21 +284,20 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
                 self.rx
                     .fill_at_least(&mut self.channel, DENT_V2_SIZE)
                     .await?;
-                self.rx.head += DENT_V2_SIZE;
+                self.rx.advance(DENT_V2_SIZE);
                 return Ok(entries);
             }
 
             self.rx
                 .fill_at_least(&mut self.channel, DENT_V2_SIZE)
                 .await?;
-            let body = &self.rx.buf[self.rx.head + 4..self.rx.head + STAT_V2_SIZE];
+            let body = &self.rx.peek(STAT_V2_SIZE)[4..];
             let stat = parse_stat_v2_body(body.try_into().expect("checked STAT_V2_SIZE bytes"));
             let namelen = self.peek_u32(72) as usize;
-            self.rx.head += DENT_V2_SIZE;
+            self.rx.advance(DENT_V2_SIZE);
 
             self.rx.fill_at_least(&mut self.channel, namelen).await?;
-            let name = self.rx.buf[self.rx.head..self.rx.head + namelen].to_vec();
-            self.rx.head += namelen;
+            let name = self.rx.take(namelen).to_vec();
 
             entries.push(DirEntryV2 { name, stat });
         }
@@ -347,21 +341,16 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     pub async fn recv_next(&mut self) -> Result<Option<&[u8]>, Error<S::IoError>> {
         self.rx.compact();
         if self.read_next_id(&[SyncId::Data, SyncId::Done]).await? == SyncId::Done {
-            self.rx.head += HEADER_SIZE;
+            self.rx.advance(HEADER_SIZE);
             return Ok(None);
         }
 
         let data_len = self.peek_u32(4) as usize;
-        let total = HEADER_SIZE + data_len;
-        if total > self.rx.buf.len() {
-            return Err(Error::ReceiveBufferFull);
-        }
-        self.rx.fill_at_least(&mut self.channel, total).await?;
-
-        let data_start = self.rx.head + HEADER_SIZE;
-        let data_end = data_start + data_len;
-        self.rx.head = data_end;
-        Ok(Some(&self.rx.buf[data_start..data_end]))
+        self.rx
+            .fill_at_least(&mut self.channel, HEADER_SIZE + data_len)
+            .await?;
+        self.rx.advance(HEADER_SIZE);
+        Ok(Some(self.rx.take(data_len)))
     }
 
     /// Pull a file into memory (v1 `RECV`).
@@ -454,7 +443,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.write_header(SyncId::Done, mtime).await?;
         self.rx.compact();
         self.read_next_id(&[SyncId::Okay]).await?;
-        self.rx.head += HEADER_SIZE;
+        self.rx.advance(HEADER_SIZE);
         Ok(())
     }
 

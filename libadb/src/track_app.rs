@@ -102,10 +102,10 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
         self.rx
             .fill_at_least(&mut self.channel, HEX_LEN_PREFIX)
             .await?;
-        let payload_len =
-            proto::parse_hex4(&self.rx.buf[self.rx.head..self.rx.head + HEX_LEN_PREFIX])
-                .ok_or(Error::Decode(DecodeError::InvalidLengthPrefix))? as usize;
-        self.rx.head += HEX_LEN_PREFIX;
+        let payload_len = proto::parse_hex4(self.rx.peek(HEX_LEN_PREFIX))
+            .ok_or(Error::Decode(DecodeError::InvalidLengthPrefix))?
+            as usize;
+        self.rx.advance(HEX_LEN_PREFIX);
 
         if payload_len == 0 {
             return Ok(Vec::new());
@@ -113,10 +113,8 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
         self.rx
             .fill_at_least(&mut self.channel, payload_len)
             .await?;
-        let payload = &self.rx.buf[self.rx.head..self.rx.head + payload_len];
-
-        let entries = decode_app_processes(payload).map_err(Error::Decode)?;
-        self.rx.head += payload_len;
+        let entries = decode_app_processes(self.rx.peek(payload_len)).map_err(Error::Decode)?;
+        self.rx.advance(payload_len);
         Ok(entries)
     }
 
