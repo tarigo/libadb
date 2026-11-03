@@ -4,7 +4,7 @@
 //! the exact frames a real adbd was probed to send.
 
 use libadb::error::ReverseError;
-use libadb::reverse;
+use libadb::reverse::{self, ReverseRule};
 use libadb::{Error, ProtocolError};
 
 #[path = "rt/rt.rs"]
@@ -171,7 +171,7 @@ async fn every_call_frees_its_channel_slot() {
 }
 
 rt_test! {
-async fn list_strips_the_length_prefix() {
+async fn list_parses_each_rule() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"reverse:list-forward\0").await;
         ch.send_write(b"001ahost-19 tcp:6100 tcp:6100\n").await;
@@ -182,7 +182,14 @@ async fn list_strips_the_length_prefix() {
     .await;
 
     let listing = reverse::list(&mut conn).await.unwrap();
-    assert_eq!(listing, b"host-19 tcp:6100 tcp:6100\n");
+    assert_eq!(
+        listing,
+        [ReverseRule {
+            serial: "host-19".into(),
+            remote: "tcp:6100".into(),
+            local: "tcp:6100".into(),
+        }]
+    );
 
     rt::join(device).await;
 }
