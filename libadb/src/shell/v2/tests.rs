@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 
 use super::decoder::make_frame;
 use super::{
-    destination, parse_header, Frame, FrameDecoder, FrameId, ShellMode, WindowSize, HEADER_SIZE,
+    destination, parse_header, EncodedWindowSize, Frame, FrameDecoder, FrameId, ShellMode,
+    WindowSize, HEADER_SIZE,
 };
 use crate::error::ProtocolError;
 
@@ -108,24 +109,25 @@ fn parse_header_keeps_an_unknown_id_byte() {
 }
 
 #[test]
-fn a_window_size_packs_rows_then_cols_and_pads_with_zeros() {
-    let bytes = WindowSize { rows: 24, cols: 80 }.encode();
-    assert_eq!(bytes, [24, 0, 80, 0, 0, 0, 0, 0]);
+fn a_window_size_is_rows_then_cols_as_adbd_scans_them() {
+    let size = WindowSize { rows: 24, cols: 80 }.encode();
+    assert_eq!(size.as_bytes(), b"24x80,0x0\0");
 }
 
 #[test]
-fn a_window_size_of_zero_encodes_as_zeros() {
-    assert_eq!(WindowSize::default().encode(), [0; 8]);
+fn a_window_size_of_zero_still_has_all_four_fields() {
+    assert_eq!(WindowSize::default().encode().as_bytes(), b"0x0,0x0\0");
 }
 
 #[test]
 fn a_window_size_keeps_the_full_u16_range() {
-    let bytes = WindowSize {
+    let size = WindowSize {
         rows: u16::MAX,
         cols: u16::MAX,
     }
     .encode();
-    assert_eq!(bytes, [0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
+    assert_eq!(size.as_bytes(), b"65535x65535,0x0\0");
+    assert_eq!(size.as_bytes().len(), EncodedWindowSize::MAX_LEN);
 }
 
 #[test]

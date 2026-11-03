@@ -214,7 +214,7 @@ pub unsafe extern "C" fn adb_shell_open(
             &send_lock,
             channel_id,
             FrameId::WindowSizeChange,
-            &payload,
+            payload.as_bytes(),
         ));
         if let Err(e) = res {
             let _ = block_on::block_on(writer.close_channel(channel_id));
@@ -353,7 +353,7 @@ pub unsafe extern "C" fn adb_shell_set_window_size(
     }
     let payload = WindowSize { rows, cols }.encode();
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    unsafe { send_frame_payload(sh, FrameId::WindowSizeChange, &payload) }
+    unsafe { send_frame_payload(sh, FrameId::WindowSizeChange, payload.as_bytes()) }
 }
 
 /// Close the underlying channel. Subsequent read/write ops on this

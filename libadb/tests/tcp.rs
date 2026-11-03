@@ -22,7 +22,7 @@ use fake_device::{
 mod common;
 use common::{
     expect_missing_feature, handshake, poll_once, shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT,
-    SH_STDOUT,
+    SH_STDOUT, SH_WINDOW_SIZE_CHANGE,
 };
 
 // ---------------------------------------------------------------------------
@@ -752,6 +752,29 @@ async fn shell_v2_open_succeeds_when_feature_advertised() {
         .await;
     let mut rx = [0u8; 1024];
     let _shell = shell_v2::open(&mut conn, "ls", &mut rx).await.unwrap();
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
+async fn shell_v2_open_interactive_sends_the_size_as_adbd_scans_it() {
+    // adbd reads the size with sscanf("%dx%d,%dx%d") and drops anything
+    // else, so the frame has to be that text, NUL and all.
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let (mut conn, device) =
+        session(dev, b"host::features=shell_v2", |mut s| async move {
+            let mut ch = s.accept_open(b"shell,v2,pty,TERM=xterm:\0").await;
+            let frame = ch.expect_write_ack().await;
+            assert_eq!(frame, shell_v2_encode(SH_WINDOW_SIZE_CHANGE, b"24x80,0x0\0"));
+            ch.send_close().await;
+        })
+        .await;
+    let mut rx = [0u8; 1024];
+    let size = shell_v2::WindowSize { rows: 24, cols: 80 };
+    let _shell = shell_v2::open_interactive(&mut conn, "", Some("xterm"), Some(size), &mut rx)
+        .await
+        .unwrap();
 
     rt::join(device).await;
 }

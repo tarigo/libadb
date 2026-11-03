@@ -24,6 +24,7 @@ pub use decoder::FrameDecoder;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
@@ -156,20 +157,81 @@ pub struct WindowSize {
 }
 
 impl WindowSize {
-    /// The frame's 8-byte payload: `rows` and then `cols`, each
-    /// little-endian, followed by four zero bytes.
+    /// The frame's payload as adbd reads it:
+    /// `<rows>x<cols>,<xpixels>x<ypixels>` in ASCII decimal and
+    /// NUL-terminated, with the pixel size sent as `0x0` since only
+    /// rows and columns are known here.
+    ///
+    /// adbd parses it with `sscanf(data, "%dx%d,%dx%d", …)` in
+    /// `Subprocess::PassInput` (`adb/daemon/shell_service.cpp`), and
+    /// the `adb` client builds it with the matching `snprintf` in
+    /// `adb/client/commandline.cpp`. A payload that does not match is
+    /// dropped without a word, and the PTY keeps its old size.
     ///
     /// ```
     /// use libadb::shell::v2::WindowSize;
     ///
     /// let size = WindowSize { rows: 24, cols: 80 };
-    /// assert_eq!(size.encode(), [24, 0, 80, 0, 0, 0, 0, 0]);
+    /// assert_eq!(size.encode().as_bytes(), b"24x80,0x0\0");
     /// ```
-    pub fn encode(&self) -> [u8; 8] {
-        let mut buf = [0u8; 8];
-        buf[0..2].copy_from_slice(&self.rows.to_le_bytes());
-        buf[2..4].copy_from_slice(&self.cols.to_le_bytes());
-        buf
+    pub fn encode(&self) -> EncodedWindowSize {
+        // Private, so nothing but this format ever lands in the buffer.
+        struct Fill<'a>(&'a mut EncodedWindowSize);
+
+        impl fmt::Write for Fill<'_> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                let out = &mut *self.0;
+                let end = out.len + s.len();
+                out.bytes
+                    .get_mut(out.len..end)
+                    .ok_or(fmt::Error)?
+                    .copy_from_slice(s.as_bytes());
+                out.len = end;
+                Ok(())
+            }
+        }
+
+        let mut out = EncodedWindowSize {
+            bytes: [0; EncodedWindowSize::MAX_LEN],
+            len: 0,
+        };
+        fmt::write(
+            &mut Fill(&mut out),
+            format_args!("{}x{},0x0\0", self.rows, self.cols),
+        )
+        .expect("two u16s and the rest fit MAX_LEN");
+        out
+    }
+}
+
+/// A [`WindowSize`] as its frame carries it, held on the stack: see
+/// [`WindowSize::encode`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EncodedWindowSize {
+    bytes: [u8; Self::MAX_LEN],
+    len: usize,
+}
+
+impl EncodedWindowSize {
+    /// The longest payload there is: `65535x65535,0x0` and its NUL.
+    pub const MAX_LEN: usize = "65535x65535,0x0\0".len();
+
+    /// The payload, NUL included.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl AsRef<[u8]> for EncodedWindowSize {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl fmt::Debug for EncodedWindowSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = core::str::from_utf8(self.as_bytes()).unwrap_or("<not ASCII>");
+        f.debug_tuple("EncodedWindowSize").field(&text).finish()
     }
 }
 
@@ -316,7 +378,7 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// Send a `WINDOW_SIZE_CHANGE` frame telling the device's PTY its
     /// new `size`.
     pub async fn set_window_size(&mut self, size: WindowSize) -> Result<(), Error<S::IoError>> {
-        self.send_frame(FrameId::WindowSizeChange, &size.encode())
+        self.send_frame(FrameId::WindowSizeChange, size.encode().as_bytes())
             .await
     }
 

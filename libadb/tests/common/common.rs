@@ -8,6 +8,7 @@ pub const SH_STDOUT: u8 = 1;
 pub const SH_STDERR: u8 = 2;
 pub const SH_EXIT: u8 = 3;
 pub const SH_CLOSE_STDIN: u8 = 4;
+pub const SH_WINDOW_SIZE_CHANGE: u8 = 5;
 
 /// Encode a shell_v2 packet: `[id: u8, length: u32 LE, payload...]`.
 pub fn shell_v2_encode(id: u8, payload: &[u8]) -> Vec<u8> {
