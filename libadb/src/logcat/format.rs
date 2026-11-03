@@ -112,6 +112,17 @@ pub enum LogId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnknownLogId(u32);
 
+impl LogId {
+    /// Whether this buffer's entries are `[priority][tag\0][message]`
+    /// text. Every variant is listed, so a new one has to choose.
+    fn is_text(self) -> bool {
+        match self {
+            Self::Main | Self::Radio | Self::System | Self::Crash | Self::Kernel => true,
+            Self::Events | Self::Stats | Self::Security | Self::Unknown(_) => false,
+        }
+    }
+}
+
 impl From<u32> for LogId {
     fn from(number: u32) -> Self {
         match number {
@@ -311,10 +322,7 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
 
     let (priority, tag, message) = if payload.is_empty() {
         (Priority::Unknown, Vec::new(), Vec::new())
-    } else if matches!(
-        log_id,
-        LogId::Events | LogId::Stats | LogId::Security | LogId::Unknown(_)
-    ) {
+    } else if !log_id.is_text() {
         (Priority::Unknown, Vec::new(), payload.to_vec())
     } else {
         let priority = Priority::from_u8(payload[0]);

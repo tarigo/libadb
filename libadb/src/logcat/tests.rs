@@ -154,16 +154,24 @@ fn an_unknown_buffer_keeps_its_number() {
 }
 
 #[test]
-fn an_unknown_buffers_payload_is_left_raw() {
-    // The buffer may be binary like events, where reading it as text
-    // would take its first byte for a priority and drop a trailing 0.
-    let payload = b"\x04Tag\0msg\0";
-    let data = make_v4_entry(1, 1, 0, 0, 8, 0, payload);
-
-    let (entry, _) = parse_entry(&data).unwrap().unwrap();
-    assert_eq!(entry.priority, Priority::Unknown);
-    assert!(entry.tag.is_empty());
-    assert_eq!(entry.message, payload);
+fn each_buffer_decodes_in_its_own_format() {
+    // A buffer libadb does not know (8) may be binary like events, where
+    // reading it as text would take its first byte for a priority and
+    // drop a trailing 0, so it stays raw too.
+    let payload = text_payload(4, b"Tag", b"msg");
+    let text = [0, 1, 3, 4, 7];
+    for lid in 0..=8 {
+        let data = make_v4_entry(1, 1, 0, 0, lid, 0, &payload);
+        let (entry, _) = parse_entry(&data).unwrap().unwrap();
+        assert_eq!(u32::from(entry.log_id), lid);
+        let got = (entry.priority, &entry.tag[..], &entry.message[..]);
+        let want = if text.contains(&lid) {
+            (Priority::Info, &b"Tag"[..], &b"msg"[..])
+        } else {
+            (Priority::Unknown, &b""[..], &payload[..])
+        };
+        assert_eq!(got, want, "{}", entry.log_id);
+    }
 }
 
 #[test]
