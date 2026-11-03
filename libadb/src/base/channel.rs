@@ -132,20 +132,36 @@ impl<S: Session> Channel<'_, S> {
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.session.close_channel(self.id).await
     }
+}
+
+/// A channel to read until the device closes it, then close: what a
+/// one-shot service does with the channel it opens. [`Channel`] is one,
+/// and so is the reverse service's connection paired with the id of the
+/// channel it opened.
+pub(crate) trait ReadToEnd: Sized {
+    /// Transport error carried by the channel's [`Error`].
+    type IoError;
+
+    /// Read what the device sent into `buf`, as [`Channel::read`] does.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>>;
+
+    /// Send CLSE and free the slot, as [`Channel::close`] does.
+    async fn close(self) -> Result<(), Error<Self::IoError>>;
 
     /// Read until the device closes the channel, filling `buf` from its
     /// start, then close the channel. Returns the number of bytes read.
     ///
     /// The close is sent on every way out — the device closing, `buf`
     /// filling up, any other error — since the device's CLSE only marks
-    /// the slot closed and `Channel` has no `Drop` to free it later: a
-    /// slot left open stays taken until the connection runs out of them
-    /// with [`Error::NoFreeChannels`]. It is best-effort, its own result
-    /// dropped in favour of what the reads came to.
+    /// the slot closed and nothing else frees it later ([`Channel`] has
+    /// no `Drop`): a slot left open stays taken until the connection
+    /// runs out of them with [`Error::NoFreeChannels`]. It is
+    /// best-effort, its own result dropped in favour of what the reads
+    /// came to.
     ///
     /// A `buf` that fills up before the device closes the channel is
     /// [`Error::ReceiveBufferFull`], with what was read left in it.
-    pub(crate) async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
+    async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>> {
         let mut tail = 0;
         let read = loop {
             if tail >= buf.len() {
@@ -165,10 +181,19 @@ impl<S: Session> Channel<'_, S> {
     /// a `Vec`, then close the channel — on every way out, as
     /// [`read_to_end`](Self::read_to_end) does. `rx` is where each read
     /// lands before it is appended.
-    pub(crate) async fn read_to_vec(mut self, rx: &mut [u8]) -> Result<Vec<u8>, Error<S::IoError>> {
+    ///
+    /// Past `cap` bytes in all it fails with [`Error::ReceiveBufferFull`],
+    /// found before the read that crosses the cap is appended, so the
+    /// `Vec` never holds more.
+    async fn read_to_vec(
+        mut self,
+        rx: &mut [u8],
+        cap: usize,
+    ) -> Result<Vec<u8>, Error<Self::IoError>> {
         let mut out = Vec::new();
         let read = loop {
             match self.read(rx).await {
+                Ok(n) if n > cap - out.len() => break Err(Error::ReceiveBufferFull),
                 Ok(n) => out.extend_from_slice(&rx[..n]),
                 Err(Error::ChannelClosed) => break Ok(out),
                 Err(e) => break Err(e),
@@ -176,5 +201,17 @@ impl<S: Session> Channel<'_, S> {
         };
         let _ = self.close().await;
         read
+    }
+}
+
+impl<S: Session> ReadToEnd for Channel<'_, S> {
+    type IoError = S::IoError;
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<S::IoError>> {
+        Channel::read(self, buf).await
+    }
+
+    async fn close(self) -> Result<(), Error<S::IoError>> {
+        Channel::close(self).await
     }
 }

@@ -29,6 +29,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::base::channel::{ChannelId, ReadToEnd};
 use crate::base::session::ServiceChannel;
 use crate::error::{Error, ProtocolError};
 
@@ -147,28 +148,35 @@ async fn exchange<C: ServiceChannel>(
     dest: &[u8],
 ) -> Result<Vec<u8>, Error<C::IoError>> {
     let ch = conn.open_service_channel(dest).await?;
-    let mut reply = Vec::new();
     let mut buf = [0u8; 512];
-    let result = loop {
-        match conn.read_service_channel(ch, &mut buf).await {
-            Ok(n) => {
-                // Checked before extending: the buffer must never grow
-                // past the cap, not even transiently for the chunk
-                // that busts it.
-                if reply.len() + n > REPLY_CAP {
-                    break Err(Error::Reverse(ReverseError::UnexpectedReply));
-                }
-                reply.extend_from_slice(&buf[..n]);
-            }
-            Err(Error::ChannelClosed) => break Ok(reply),
-            Err(e) => break Err(e),
-        }
-    };
-    // The remote CLSE only marks the slot closed; freeing it takes a
-    // close of our own, on every exit — otherwise each call leaks a
-    // slot until NoFreeChannels. Best-effort: `result` wins.
-    let _ = conn.close_service_channel(ch).await;
-    result
+    let reply = OpenedChannel { conn, ch }
+        .read_to_vec(&mut buf, REPLY_CAP)
+        .await;
+    // Only the cap fills up here: a channel read never reports a full
+    // buffer.
+    reply.map_err(|e| match e {
+        Error::ReceiveBufferFull => Error::Reverse(ReverseError::UnexpectedReply),
+        e => e,
+    })
+}
+
+/// The channel [`exchange`] opened, paired with the [`ServiceChannel`]
+/// it was opened on.
+struct OpenedChannel<'c, C> {
+    conn: &'c mut C,
+    ch: ChannelId,
+}
+
+impl<C: ServiceChannel> ReadToEnd for OpenedChannel<'_, C> {
+    type IoError = C::IoError;
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<C::IoError>> {
+        self.conn.read_service_channel(self.ch, buf).await
+    }
+
+    async fn close(self) -> Result<(), Error<C::IoError>> {
+        self.conn.close_service_channel(self.ch).await
+    }
 }
 
 /// `OKAY`[+hex4+data] → data; `FAIL`+hex4+msg → `Failed`.

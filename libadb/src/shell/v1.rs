@@ -20,7 +20,7 @@
 
 use core::future::Future;
 
-use crate::base::channel::{Channel, SelectResult};
+use crate::base::channel::{Channel, ReadToEnd, SelectResult};
 use crate::base::destination::{self, DestinationError};
 use crate::base::session::Session;
 use crate::error::Error;
