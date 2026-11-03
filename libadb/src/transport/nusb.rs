@@ -150,7 +150,7 @@ impl embedded_io::Error for UsbError {
     }
 }
 
-use crate::uri::UsbSelector;
+use crate::transport::uri::UsbSelector;
 
 /// Reasons USB connect can fail.
 #[derive(Debug)]

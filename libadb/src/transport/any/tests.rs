@@ -1,6 +1,6 @@
 use super::{connect, AnyTransport, ConnectError};
 use crate::transport::common::{NoBackend, NoUsb, Transport};
-use crate::uri::UriError;
+use crate::transport::uri::UriError;
 use alloc::format;
 use core::future::Future;
 use std::io;

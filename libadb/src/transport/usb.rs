@@ -6,8 +6,8 @@ mod tests;
 
 use alloc::string::String;
 
+use crate::transport::uri::UsbSelector;
 use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
-use crate::uri::UsbSelector;
 
 /// What device selection needs to know about one enumerated device.
 ///

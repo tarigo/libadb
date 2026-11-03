@@ -14,8 +14,8 @@ use embedded_io::ErrorType;
 
 use crate::transport::common::{NoUsb, Transport, TransportError};
 use crate::transport::runtime::Runtime;
+use crate::transport::uri::{self, Uri, UsbSelector};
 use crate::transport::UsbBackend;
-use crate::uri::{self, Uri, UsbSelector};
 
 /// TCP-or-USB transport for runtime `R`. `U` is the USB transport; it
 /// defaults to [`NoUsb`] for TCP-only builds.

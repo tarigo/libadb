@@ -58,7 +58,7 @@ impl<R> crate::transport::UsbBackend<R> for NoUsb {
     type Transport = NoUsb;
     type Error = NoBackend;
 
-    fn connect_by_selector(_: crate::uri::UsbSelector<'_>) -> Result<NoUsb, NoBackend> {
+    fn connect_by_selector(_: crate::transport::uri::UsbSelector<'_>) -> Result<NoUsb, NoBackend> {
         Err(NoBackend)
     }
 }

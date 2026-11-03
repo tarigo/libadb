@@ -24,8 +24,8 @@ use core::time::Duration;
 use rusb::{Context, Direction, TransferType, UsbContext};
 
 use crate::transport::runtime::Runtime;
+use crate::transport::uri::UsbSelector;
 use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
-use crate::uri::UsbSelector;
 
 const NO_TIMEOUT: Duration = Duration::ZERO;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);

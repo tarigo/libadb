@@ -142,10 +142,12 @@ pub mod sync;
 pub mod tls;
 pub mod track_app;
 pub mod transport;
-pub mod uri;
 
 // Structural: expose private `base::*` submodules as top-level modules.
 pub use base::{auth, channel, connection, device_banner, protocol, session};
+
+// The URI parser lives with the transports; `libadb::uri` still names it.
+pub use transport::uri;
 
 // Core types used in every non-trivial caller.
 pub use base::connection::{Connection, ConnectionConfig, HostBanner, Incoming};

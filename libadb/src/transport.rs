@@ -19,11 +19,14 @@
 //! * [`any`] — [`any::AnyTransport`] and [`any::connect`] for URI-based
 //!   dispatch between `tcp://` and `usb://` (features `tokio` or `smol`).
 //! * [`split`] — the [`Splittable`] trait itself.
+//! * [`uri`] — the parser for `tcp://` and `usb://` addresses; a `usb://`
+//!   one names the [`uri::UsbSelector`] a [`UsbBackend`] opens.
 //! * `tls` — `MaybeTls`, a TCP transport that can start TLS when the
 //!   device sends `STLS`, and its split halves (feature `tls`).
 
 pub mod split;
 pub mod tcp;
+pub mod uri;
 
 #[cfg(feature = "split")]
 pub mod runtime;
@@ -66,7 +69,7 @@ pub trait ReadCancelSafety {
 }
 
 /// A USB backend: the way to obtain a USB transport from a
-/// [`UsbSelector`](crate::uri::UsbSelector).
+/// [`UsbSelector`](uri::UsbSelector).
 ///
 /// Implemented by the zero-sized markers `nusb::Nusb` and `rusb::Rusb`,
 /// and by [`common::NoUsb`] for builds without USB. Choosing a backend
@@ -87,9 +90,7 @@ pub trait UsbBackend<R> {
     ///
     /// Blocking: enumeration and claiming are synchronous in both
     /// backends. Callers on an async runtime should offload it.
-    fn connect_by_selector(
-        selector: crate::uri::UsbSelector<'_>,
-    ) -> Result<Self::Transport, Self::Error>;
+    fn connect_by_selector(selector: uri::UsbSelector<'_>) -> Result<Self::Transport, Self::Error>;
 }
 
 /// ADB USB interface class (vendor-specific).
