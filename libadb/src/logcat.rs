@@ -231,10 +231,10 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
                         return Err(ProtocolError::ShortExitPayload.into())
                     }
                     Ok(id @ (FrameId::Stdout | FrameId::Stderr | FrameId::Exit)) => id,
-                    Ok(other) => {
-                        return Err(ProtocolError::UnexpectedShellFrame(other.into()).into())
+                    other => {
+                        let id = FrameId::byte_of(other);
+                        return Err(ProtocolError::UnexpectedShellFrame(id).into());
                     }
-                    Err(other) => return Err(ProtocolError::UnexpectedShellFrame(other).into()),
                 };
                 self.head += shell_v2::HEADER_SIZE;
                 self.frame_id = id;

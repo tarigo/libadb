@@ -92,6 +92,25 @@ impl From<FrameId> for u8 {
     }
 }
 
+impl FrameId {
+    /// The byte a header carried, whether or not [`FrameId`] names it:
+    /// the id [`FrameDecoder::try_next_raw_ref`] hands back, flattened
+    /// for a caller that only passes it on.
+    ///
+    /// ```
+    /// use libadb::shell::v2::FrameId;
+    ///
+    /// assert_eq!(FrameId::byte_of(Ok(FrameId::Stderr)), 2);
+    /// assert_eq!(FrameId::byte_of(Err(9)), 9);
+    /// ```
+    pub fn byte_of(id: Result<FrameId, u8>) -> u8 {
+        match id {
+            Ok(id) => id.into(),
+            Err(byte) => byte,
+        }
+    }
+}
+
 /// Whether the device runs a shell_v2 command in a PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShellMode<'a> {

@@ -38,6 +38,13 @@ fn a_byte_no_frame_id_names_comes_back_as_it_is() {
 }
 
 #[test]
+fn byte_of_gives_back_the_byte_a_header_carried() {
+    for byte in 0..=u8::MAX {
+        assert_eq!(FrameId::byte_of(FrameId::try_from(byte)), byte);
+    }
+}
+
+#[test]
 fn a_destination_names_its_mode_and_command() {
     assert_eq!(
         destination(ShellMode::Raw, "ls").unwrap(),

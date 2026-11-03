@@ -40,7 +40,7 @@ impl ParseState {
             .decoder
             .try_next_raw(&self.rx)
             .map_err(Error::Protocol)?;
-        Ok(frame.map(|(id, payload)| (id.map_or_else(|byte| byte, u8::from), payload)))
+        Ok(frame.map(|(id, payload)| (FrameId::byte_of(id), payload)))
     }
 
     fn ensure_writable(&mut self) -> Result<(), Error<FfiTransportError>> {

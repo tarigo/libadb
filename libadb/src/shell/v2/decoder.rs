@@ -20,11 +20,10 @@ pub(super) fn make_frame(
                 .copied()
                 .ok_or(ProtocolError::ShortExitPayload)?,
         ),
-        Ok(other) => Frame::Other {
-            id: other.into(),
+        other => Frame::Other {
+            id: FrameId::byte_of(other),
             payload,
         },
-        Err(other) => Frame::Other { id: other, payload },
     })
 }
 
