@@ -532,7 +532,7 @@ impl<WH> Drop for QueueGuard<'_, WH> {
         let head_moved = {
             let mut chs = self.shared.lock_channels();
             match slot_for_mut(&mut chs, self.ch) {
-                Some(slot) => slot.send_leave(self.place),
+                Some(slot) => slot.send_queue().leave(self.place),
                 None => false,
             }
         };
@@ -1505,7 +1505,7 @@ where
             if slot.is_closed() {
                 return Err(slot.closed_error());
             }
-            slot.send_enqueue()
+            slot.send_queue().enqueue()
         };
         let mut queue = QueueGuard {
             shared: &self.shared,
@@ -1550,11 +1550,11 @@ where
         if slot.is_closed() {
             return Some(Err(slot.closed_error()));
         }
-        if slot.send_turn() != place {
+        if slot.send_queue().turn() != place {
             return None;
         }
         slot.try_reserve_send(want).map(|n| {
-            slot.send_advance();
+            slot.send_queue().advance();
             Ok((n, slot.budget().is_some()))
         })
     }

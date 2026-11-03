@@ -1,4 +1,3 @@
-use alloc::collections::BTreeSet;
 use bytes::{Buf, Bytes, BytesMut};
 use core::future::Future;
 
@@ -7,6 +6,7 @@ use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::{AckMode, RxPolicy};
 use super::protocol::command::Command;
 use super::protocol::Packet;
+use super::send_queue::SendQueue;
 use super::session::Session;
 
 /// AOSP's adbd always sends the 4-byte credit; when a peer omits it,
@@ -40,27 +40,29 @@ pub(crate) enum AckDecision {
     Hold,
 }
 
+/// What a packet did to the channel table, and what is left for
+/// whoever dispatched it to do. The slot indices and a fault's ids are
+/// read only by `split::Reader`, which wakes a slot's waiters and
+/// closes a faulted channel; a [`Connection`](crate::Connection) has
+/// no one else to wake.
+#[cfg_attr(not(feature = "split"), allow(dead_code))]
 pub(crate) enum DispatchOutcome {
     /// A WRTE was buffered and has to be acknowledged now.
     AckWrite {
-        #[allow(dead_code)] // read only by split::Reader, to wake readers
         idx: usize,
         ack: PendingAck,
     },
     /// An OKAY refilled the slot's send budget: one writer can proceed.
     CreditGranted {
-        #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
     /// A CLSE closed the slot: every waiter has to see the error.
     SlotClosed {
-        #[allow(dead_code)] // read only by split::Reader, to wake writers
         idx: usize,
     },
     /// A WRTE was buffered with its acknowledgement held back until it
     /// is read.
     DataBuffered {
-        #[allow(dead_code)] // read only by split::Reader, to wake readers
         idx: usize,
     },
     /// The device opened a channel toward the host (`adb reverse`).
@@ -90,12 +92,9 @@ pub(crate) enum DispatchOutcome {
     /// A packet broke this slot's channel alone. The slot is not
     /// closed: whoever dispatched decides what the fault costs.
     ChannelFault {
-        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
         idx: usize,
-        #[allow(dead_code)] // read only by split::Reader::run, to close the channel
         ids: ChannelIds,
         /// The slot was waiting for the device's answer to its OPEN.
-        #[allow(dead_code)] // read only by split::Reader, to fail the open
         opening: bool,
         fault: ChannelFault,
     },
@@ -304,18 +303,8 @@ pub(crate) struct ChannelSlot {
     /// Bytes received for this channel that the peer has not been
     /// acknowledged for yet — the backpressure the device feels.
     unacked: usize,
-    /// Send-queue place currently allowed to reserve credit. The queue
-    /// keeps concurrent `split::Writer`s in arrival order: places are
-    /// handed out by [`send_enqueue`](Self::send_enqueue) and only the
-    /// holder of `send_q_head` may take budget.
-    send_q_head: u64,
-    send_q_tail: u64,
-    /// Places whose writer left the queue unserved; skipped when the
-    /// head reaches them. Bounded: a hole is only recorded below a
-    /// place still occupied — a leaving tail reclaims itself and any
-    /// holes adjacent to it — so cancellation churn cannot grow this
-    /// past the caller's own peak of concurrent writers.
-    send_q_gone: BTreeSet<u64>,
+    /// The order concurrent writers take the budget in.
+    send_queue: SendQueue,
     /// What broke this channel, once [`fail`](Self::fail) closed it for
     /// that: its calls then fail with this rather than `ChannelClosed`.
     failed: Option<ChannelFault>,
@@ -333,9 +322,7 @@ impl ChannelSlot {
             wrte_acked: true,
             send_budget: 0,
             unacked: 0,
-            send_q_head: 0,
-            send_q_tail: 0,
-            send_q_gone: BTreeSet::new(),
+            send_queue: SendQueue::default(),
             failed: None,
         }
     }
@@ -544,58 +531,6 @@ impl ChannelSlot {
             AckMode::Classic => self.wrte_acked = false,
         }
     }
-
-    /// Take a place at the back of the send queue.
-    #[allow(dead_code)] // used only by split::Writer
-    pub fn send_enqueue(&mut self) -> u64 {
-        let place = self.send_q_tail;
-        self.send_q_tail += 1;
-        place
-    }
-
-    /// The place currently allowed to reserve credit.
-    #[allow(dead_code)] // used only by split::Writer
-    pub fn send_turn(&self) -> u64 {
-        self.send_q_head
-    }
-
-    /// Move the queue past the served head, skipping places whose
-    /// writer already left.
-    #[allow(dead_code)] // used only by split::Writer
-    pub fn send_advance(&mut self) {
-        self.send_q_head += 1;
-        while self.send_q_gone.remove(&self.send_q_head) {
-            self.send_q_head += 1;
-        }
-    }
-
-    /// Leave the queue from `place` without being served. Returns
-    /// whether the head moved — the caller then wakes the next writer.
-    ///
-    /// A leaving tail hands its place straight back — together with any
-    /// holes that end up at the tail with it — so a caller that keeps
-    /// queueing and dropping writes behind a blocked head reuses one
-    /// place instead of growing the hole set.
-    #[allow(dead_code)] // used only by split::Writer
-    pub fn send_leave(&mut self, place: u64) -> bool {
-        if place == self.send_q_head {
-            self.send_advance();
-            true
-        } else if place + 1 == self.send_q_tail {
-            self.send_q_tail = place;
-            while self.send_q_tail > self.send_q_head
-                && self.send_q_gone.remove(&(self.send_q_tail - 1))
-            {
-                self.send_q_tail -= 1;
-            }
-            false
-        } else if place > self.send_q_head {
-            self.send_q_gone.insert(place);
-            false
-        } else {
-            false
-        }
-    }
 }
 
 /// What only the split halves ask of a slot: credit spent ahead of the
@@ -647,6 +582,11 @@ impl ChannelSlot {
         self.failed = Some(fault);
         self.state = ChannelState::Closed;
         self.unacked = 0;
+    }
+
+    /// The queue the channel's writers wait their turn in.
+    pub fn send_queue(&mut self) -> &mut SendQueue {
+        &mut self.send_queue
     }
 }
 
@@ -769,36 +709,5 @@ impl<S: Session> Channel<'_, S> {
     /// Consumes the `Channel`.
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.session.close_channel(self.id).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ChannelSlot;
-    use crate::base::ids::LocalId;
-    use crate::base::negotiated::{AckMode, RxPolicy};
-
-    #[test]
-    fn cancellation_churn_behind_a_blocked_head_does_not_accumulate() {
-        let policy = RxPolicy {
-            ack: AckMode::Delayed,
-            rx_cap: usize::MAX,
-            watermark: 0,
-        };
-        let mut slot = ChannelSlot::opening(LocalId::from(1), policy);
-        let _head = slot.send_enqueue();
-
-        for _ in 0..1_000 {
-            let mid = slot.send_enqueue();
-            let tail = slot.send_enqueue();
-            // Dropped mid-queue: a hole, while `tail` still lives...
-            assert!(!slot.send_leave(mid));
-            // ...and the leaving tail reclaims itself and the hole.
-            assert!(!slot.send_leave(tail));
-        }
-
-        assert!(slot.send_q_gone.is_empty());
-        assert_eq!(slot.send_q_tail, 1);
-        assert_eq!(slot.send_q_head, 0);
     }
 }
