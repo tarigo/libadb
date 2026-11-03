@@ -14,6 +14,7 @@ use super::channel::{
 };
 use super::device_banner::DeviceBanner;
 use super::error::Error;
+use super::negotiated::Negotiated;
 use super::protocol::command::Command;
 use super::protocol::features::Feature;
 use super::protocol::Checksum;
@@ -30,12 +31,8 @@ where
     transport: T,
     /// [`ConnectionConfig::max_channels`] slots, allocated up front.
     channels: Box<[Option<ChannelSlot>]>,
-    max_payload: u32,
-    protocol_version: u32,
-    config: ConnectionConfig,
-    device_banner: Option<DeviceBanner>,
+    negotiated: Negotiated,
     local_id_counter: u32,
-    delayed_ack: bool,
     recv_buf: BytesMut,
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`accept_incoming`]. Bounded by
@@ -89,7 +86,7 @@ where
     pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
         let (remote_id, credit) = (pending.remote_id, pending.credit);
-        let checksum = self.conn.checksum();
+        let checksum = self.conn.negotiated.checksum();
 
         let Some(slot_idx) = self.conn.channels.iter().position(|s| s.is_none()) else {
             send_pkt(
@@ -107,7 +104,7 @@ where
         let mut slot = ChannelSlot::new(local_id);
         slot.remote_id = remote_id;
         slot.state = ChannelState::Open;
-        if self.conn.delayed_ack {
+        if self.conn.negotiated.delayed_ack {
             // OPEN's arg1 is the device's receive credit — our budget.
             slot.send_budget = i64::from(credit);
         }
@@ -115,17 +112,14 @@ where
         // Armed for rollback until READY is committed.
         self.reserved = Some(slot_idx);
 
-        let credit_bytes;
-        let payload: &[u8] = if self.conn.delayed_ack {
-            credit_bytes = self.conn.config.advertised_ack_bytes().to_le_bytes();
-            &credit_bytes
-        } else {
-            &[]
+        let payload = match self.conn.negotiated.advertised_credit() {
+            Some(credit) => credit.to_le_bytes().to_vec(),
+            None => alloc::vec::Vec::new(),
         };
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::new(Command::Ready, local_id, remote_id, payload.to_vec()),
+            &Packet::new(Command::Ready, local_id, remote_id, payload),
             checksum,
         )
         .await?;
@@ -148,7 +142,7 @@ where
     /// desynchronized, as with any cancelled write.
     pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
         let remote_id = self.pending.as_ref().expect("undecided").remote_id;
-        let checksum = self.conn.checksum();
+        let checksum = self.conn.negotiated.checksum();
         send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
@@ -256,7 +250,7 @@ where
     /// the device advertised in its CNXN and what this library can
     /// encode.
     pub fn max_payload(&self) -> u32 {
-        self.max_payload
+        self.negotiated.max_payload
     }
 
     /// Resource limits this connection was opened with.
@@ -265,7 +259,7 @@ where
     /// this host advertised to the device — while
     /// [`max_payload`](Self::max_payload) is the outbound one.
     pub fn config(&self) -> &ConnectionConfig {
-        &self.config
+        &self.negotiated.config
     }
 
     /// Protocol version in effect: `min(ADB_VERSION, device version)`.
@@ -274,21 +268,17 @@ where
     /// [`ADB_VERSION_SKIP_CHECKSUM`](crate::protocol::constant::ADB_VERSION_SKIP_CHECKSUM)
     /// outgoing packets leave `data_check` zero, as `adb` itself does.
     pub fn protocol_version(&self) -> u32 {
-        self.protocol_version
-    }
-
-    fn checksum(&self) -> Checksum {
-        Checksum::for_version(self.protocol_version)
+        self.negotiated.protocol_version
     }
 
     /// Raw device banner bytes received during CNXN handshake.
     pub fn device_banner(&self) -> Option<&[u8]> {
-        self.device_banner.as_ref().map(|v| v.raw())
+        self.negotiated.device_banner.as_ref().map(|v| v.raw())
     }
 
     /// Parsed device banner received during CNXN handshake.
     pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.device_banner.as_ref()
+        self.negotiated.device_banner.as_ref()
     }
 
     /// Fail with [`Error::MissingFeature`] if the device banner was
@@ -300,16 +290,17 @@ where
     /// that feature checks never block a connection that lacks a
     /// banner altogether.
     pub fn require_feature(&self, feature: Feature) -> Result<(), Error<<T as ErrorType>::Error>> {
-        match &self.device_banner {
-            Some(b) if b.has_feature(&feature) => Ok(()),
-            Some(_) => Err(Error::MissingFeature(feature)),
-            None => Ok(()),
-        }
+        self.negotiated.require_feature(feature)
     }
 
     /// Whether delayed ACK (credit-based flow control) is enabled.
     pub fn delayed_ack(&self) -> bool {
-        self.delayed_ack
+        self.negotiated.delayed_ack
+    }
+
+    /// Everything the handshake settled, for the crate's own helpers.
+    pub(crate) fn negotiated(&self) -> &Negotiated {
+        &self.negotiated
     }
 
     /// Reference to the underlying transport.
@@ -373,11 +364,7 @@ where
                 .map(|_| crate::split::FlowSignal::new())
                 .collect(),
             channels: std::sync::Mutex::new(self.channels),
-            max_payload: self.max_payload,
-            protocol_version: self.protocol_version,
-            config: self.config,
-            delayed_ack: self.delayed_ack,
-            device_banner: self.device_banner,
+            negotiated: self.negotiated,
             local_id_counter: AtomicU32::new(self.local_id_counter),
             desync: self.desync,
             incoming: std::sync::Mutex::new(self.incoming),
@@ -437,13 +424,9 @@ where
             .ok_or(Error::NoFreeChannels)?;
 
         let local_id = self.next_local_id();
-        let open_arg1 = if self.delayed_ack {
-            self.config.advertised_ack_bytes()
-        } else {
-            0
-        };
+        let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
         let pkt = Packet::new(Command::Open, local_id, open_arg1, destination.to_vec());
-        let checksum = self.checksum();
+        let checksum = self.negotiated.checksum();
         send_pkt(&mut self.transport, &self.desync, &pkt, checksum).await?;
 
         self.await_open_ack(local_id, slot_idx).await
@@ -458,16 +441,18 @@ where
             let pkt = recv_pkt(
                 &mut self.transport,
                 &mut self.recv_buf,
-                self.config.max_payload(),
+                self.negotiated.config.max_payload(),
             )
             .await?;
             match pkt.command {
                 Command::Ready if pkt.arg1 == local_id => {
                     let mut slot = ChannelSlot::new(local_id);
-                    if let Err(e) = slot.accept_open_ready(pkt.arg0, &pkt.data, self.delayed_ack) {
+                    if let Err(e) =
+                        slot.accept_open_ready(pkt.arg0, &pkt.data, self.negotiated.delayed_ack)
+                    {
                         // The device holds an end it takes for open:
                         // close it by its id.
-                        let checksum = self.checksum();
+                        let checksum = self.negotiated.checksum();
                         send_pkt(
                             &mut self.transport,
                             &self.desync,
@@ -549,9 +534,9 @@ where
             return Ok(());
         }
 
-        let max = (self.max_payload as usize).max(1);
-        let delayed_ack = self.delayed_ack;
-        let checksum = self.checksum();
+        let max = (self.negotiated.max_payload as usize).max(1);
+        let delayed_ack = self.negotiated.delayed_ack;
+        let checksum = self.negotiated.checksum();
 
         let mut offset = 0;
         while offset < data.len() {
@@ -625,7 +610,7 @@ where
             let pkt = recv_pkt(
                 &mut self.transport,
                 &mut self.recv_buf,
-                self.config.max_payload(),
+                self.negotiated.config.max_payload(),
             )
             .await?;
             self.dispatch(pkt).await?;
@@ -650,7 +635,7 @@ where
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
         let (local_id, remote_id) = self.channel_ids(ch)?;
-        let checksum = self.checksum();
+        let checksum = self.negotiated.checksum();
         send_pkt(
             &mut self.transport,
             &self.desync,
@@ -699,8 +684,8 @@ where
         race: bool,
     ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        let delayed_ack = self.delayed_ack;
-        let watermark = self.config.rx_watermark();
+        let delayed_ack = self.negotiated.delayed_ack;
+        let watermark = self.negotiated.config.rx_watermark();
         let buffered = self
             .slot_mut(ch)?
             .take_buffered(buf, delayed_ack, watermark)?;
@@ -712,14 +697,14 @@ where
         }
 
         let (local_id, remote_id) = self.channel_ids(ch)?;
-        let rx_cap = self.config.rx_cap();
+        let rx_cap = self.negotiated.config.rx_cap();
         let mut interrupt = pin!(interrupt);
 
         loop {
             let pkt = match recv_pkt_or(
                 &mut self.transport,
                 &mut self.recv_buf,
-                self.config.max_payload(),
+                self.negotiated.config.max_payload(),
                 interrupt.as_mut(),
                 race,
             )
@@ -788,8 +773,8 @@ where
         remote_id: u32,
         wrte_len: usize,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let checksum = self.checksum();
-        let delayed_ack = self.delayed_ack;
+        let checksum = self.negotiated.checksum();
+        let delayed_ack = self.negotiated.delayed_ack;
         send_okay_to(
             &mut self.transport,
             &self.desync,
@@ -803,10 +788,10 @@ where
     }
 
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let watermark = self.config.rx_watermark();
-        let delayed_ack = self.delayed_ack;
-        let rx_cap = self.config.rx_cap();
-        let checksum = self.checksum();
+        let watermark = self.negotiated.config.rx_watermark();
+        let delayed_ack = self.negotiated.delayed_ack;
+        let rx_cap = self.negotiated.config.rx_cap();
+        let checksum = self.negotiated.checksum();
         dispatch_to(
             &mut self.transport,
             &self.desync,
@@ -822,7 +807,7 @@ where
     }
 
     async fn wait_ack(&mut self, ch: ChannelId) -> Result<(), Error<<T as ErrorType>::Error>> {
-        let delayed_ack = self.delayed_ack;
+        let delayed_ack = self.negotiated.delayed_ack;
         loop {
             {
                 let slot = self.slot_mut(ch)?;
@@ -842,7 +827,7 @@ where
             let pkt = recv_pkt(
                 &mut self.transport,
                 &mut self.recv_buf,
-                self.config.max_payload(),
+                self.negotiated.config.max_payload(),
             )
             .await?;
 

@@ -74,8 +74,8 @@ use crate::base::channel::{
 };
 use crate::base::connection::ConnectionConfig;
 use crate::base::error::Error;
+use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
-use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_okay_to, send_pkt, send_raw, DesyncFlag};
 use crate::device_banner::DeviceBanner;
@@ -112,11 +112,7 @@ pub(crate) struct Shared<WH> {
     pub(crate) channels: Mutex<Box<[Option<ChannelSlot>]>>,
     /// One per slot of `channels`.
     pub(crate) signals: Box<[FlowSignal]>,
-    pub(crate) max_payload: u32,
-    pub(crate) protocol_version: u32,
-    pub(crate) config: ConnectionConfig,
-    pub(crate) delayed_ack: bool,
-    pub(crate) device_banner: Option<DeviceBanner>,
+    pub(crate) negotiated: Negotiated,
     pub(crate) local_id_counter: AtomicU32,
     pub(crate) desync: DesyncFlag,
     /// Device-initiated OPENs awaiting [`Reader::accept_incoming`].
@@ -187,11 +183,7 @@ impl<WH> Shared<WH> {
         };
         let guard = SlotGuard::new(Arc::clone(self), slot);
 
-        let open_arg1 = if self.delayed_ack {
-            self.config.advertised_ack_bytes()
-        } else {
-            0
-        };
+        let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
         {
             let mut wh = self.lock_write().await?;
             send_raw(
@@ -201,7 +193,7 @@ impl<WH> Shared<WH> {
                 local_id,
                 open_arg1,
                 destination,
-                self.checksum(),
+                self.negotiated.checksum(),
             )
             .await?;
         }
@@ -236,7 +228,7 @@ impl<WH> Shared<WH> {
             &mut *wh,
             &self.desync,
             &Packet::close(local_id, remote_id),
-            self.checksum(),
+            self.negotiated.checksum(),
         )
         .await
     }
@@ -255,14 +247,16 @@ impl<WH> Shared<WH> {
     where
         WH: Write,
     {
-        let watermark = self.config.rx_watermark();
+        let watermark = self.negotiated.config.rx_watermark();
         {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
             // Nothing to take, or nothing this take acknowledges: no
             // OKAY to send, so no lock to wait for.
-            if slot.rx_buf.is_empty() || !slot.take_acks(buf.len(), self.delayed_ack, watermark) {
-                let taken = slot.take_buffered(buf, self.delayed_ack, watermark)?;
+            if slot.rx_buf.is_empty()
+                || !slot.take_acks(buf.len(), self.negotiated.delayed_ack, watermark)
+            {
+                let taken = slot.take_buffered(buf, self.negotiated.delayed_ack, watermark)?;
                 return Ok(taken.map(|(n, _)| n));
             }
         }
@@ -270,7 +264,7 @@ impl<WH> Shared<WH> {
         let taken = {
             let mut chs = self.lock_channels();
             let slot = slot_for_mut(&mut chs, ch).ok_or(Error::ChannelClosed)?;
-            slot.take_buffered(buf, self.delayed_ack, watermark)?
+            slot.take_buffered(buf, self.negotiated.delayed_ack, watermark)?
         };
         let Some((n, ack)) = taken else {
             return Ok(None);
@@ -279,11 +273,11 @@ impl<WH> Shared<WH> {
             send_okay_to(
                 &mut *wh,
                 &self.desync,
-                self.delayed_ack,
+                self.negotiated.delayed_ack,
                 local_id,
                 remote_id,
                 len,
-                self.checksum(),
+                self.negotiated.checksum(),
             )
             .await?;
         }
@@ -303,11 +297,11 @@ impl<WH> Shared<WH> {
         send_okay_to(
             &mut *wh,
             &self.desync,
-            self.delayed_ack,
+            self.negotiated.delayed_ack,
             local_id,
             remote_id,
             wrte_len,
-            self.checksum(),
+            self.negotiated.checksum(),
         )
         .await
     }
@@ -370,10 +364,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    fn checksum(&self) -> Checksum {
-        Checksum::for_version(self.protocol_version)
-    }
-
     /// Mark the connection unread and wake every waiter to see it.
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
@@ -416,7 +406,7 @@ impl<WH> Shared<WH> {
                 &mut *lock,
                 &self.desync,
                 &Packet::close(local_id, remote_id),
-                self.checksum(),
+                self.negotiated.checksum(),
             )
             .await?;
         }
@@ -523,7 +513,7 @@ impl<WH> Drop for CreditGuard<'_, WH> {
         {
             let mut chs = self.shared.lock_channels();
             if let Some(slot) = slot_for_mut(&mut chs, self.ch) {
-                slot.refund(self.n, self.shared.delayed_ack);
+                slot.refund(self.n, self.shared.negotiated.delayed_ack);
             }
         }
         if let Some(signal) = self.shared.signals.get(self.ch.slot) {
@@ -603,32 +593,36 @@ where
 
     /// Maximum payload size for outbound packets.
     pub fn max_payload(&self) -> u32 {
-        self.shared.max_payload
+        self.shared.negotiated.max_payload
     }
 
     /// Resource limits this connection was opened with.
     pub fn config(&self) -> &ConnectionConfig {
-        &self.shared.config
+        &self.shared.negotiated.config
     }
 
     /// Protocol version in effect: `min(ADB_VERSION, device version)`.
     pub fn protocol_version(&self) -> u32 {
-        self.shared.protocol_version
+        self.shared.negotiated.protocol_version
     }
 
     /// Whether delayed-ACK flow control was negotiated.
     pub fn delayed_ack(&self) -> bool {
-        self.shared.delayed_ack
+        self.shared.negotiated.delayed_ack
     }
 
     /// Raw device banner bytes from the CNXN handshake.
     pub fn device_banner(&self) -> Option<&[u8]> {
-        self.shared.device_banner.as_ref().map(|b| b.raw())
+        self.shared
+            .negotiated
+            .device_banner
+            .as_ref()
+            .map(|b| b.raw())
     }
 
     /// Parsed device banner from the CNXN handshake.
     pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.shared.device_banner.as_ref()
+        self.shared.negotiated.device_banner.as_ref()
     }
 
     /// Fail with [`Error::MissingFeature`] if the device banner was
@@ -638,11 +632,7 @@ where
         &self,
         feature: crate::protocol::features::Feature,
     ) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        match &self.shared.device_banner {
-            Some(b) if b.has_feature(&feature) => Ok(()),
-            Some(_) => Err(Error::MissingFeature(feature)),
-            None => Ok(()),
-        }
+        self.shared.negotiated.require_feature(feature)
     }
 
     /// Open a channel to `destination`.
@@ -673,7 +663,7 @@ where
     /// (`accept_incoming` needs no barrier — it only reads with the
     /// queue empty.)
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        let cap = self.shared.config.max_channels();
+        let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
             excess.reject().await?;
         }
@@ -690,7 +680,7 @@ where
             let pkt = recv_pkt(
                 &mut self.read_half,
                 &mut self.recv_buf,
-                self.shared.config.max_payload(),
+                self.shared.negotiated.config.max_payload(),
             )
             .await?;
             match pkt.command {
@@ -698,9 +688,11 @@ where
                     let accepted = {
                         let mut chs = self.shared.lock_channels();
                         match chs[ch.slot].as_mut() {
-                            Some(slot) => {
-                                slot.accept_open_ready(pkt.arg0, &pkt.data, self.shared.delayed_ack)
-                            }
+                            Some(slot) => slot.accept_open_ready(
+                                pkt.arg0,
+                                &pkt.data,
+                                self.shared.negotiated.delayed_ack,
+                            ),
                             None => Ok(()),
                         }
                     };
@@ -773,7 +765,7 @@ where
             let pkt = recv_pkt(
                 &mut self.read_half,
                 &mut self.recv_buf,
-                self.shared.config.max_payload(),
+                self.shared.negotiated.config.max_payload(),
             )
             .await?;
             self.dispatch(pkt, OnFault::CloseChannel).await?;
@@ -795,8 +787,8 @@ where
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
-        let delayed_ack = self.shared.delayed_ack;
-        let watermark = self.shared.config.rx_watermark();
+        let delayed_ack = self.shared.negotiated.delayed_ack;
+        let watermark = self.shared.negotiated.config.rx_watermark();
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
         }
@@ -808,7 +800,7 @@ where
             let pkt = recv_pkt(
                 &mut self.read_half,
                 &mut self.recv_buf,
-                self.shared.config.max_payload(),
+                self.shared.negotiated.config.max_payload(),
             )
             .await?;
             match pkt.command {
@@ -821,7 +813,7 @@ where
                             Some(slot) => slot.deliver(
                                 &pkt.data,
                                 n,
-                                self.shared.config.rx_cap(),
+                                self.shared.negotiated.config.rx_cap(),
                                 delayed_ack,
                                 watermark,
                             )?,
@@ -883,7 +875,7 @@ where
             let pkt = recv_pkt(
                 &mut self.read_half,
                 &mut self.recv_buf,
-                self.shared.config.max_payload(),
+                self.shared.negotiated.config.max_payload(),
             )
             .await?;
             self.dispatch(pkt, OnFault::FailCall).await?;
@@ -906,9 +898,9 @@ where
             dispatch_packet(
                 &mut chs,
                 &pkt,
-                self.shared.delayed_ack,
-                self.shared.config.rx_cap(),
-                self.shared.config.rx_watermark(),
+                self.shared.negotiated.delayed_ack,
+                self.shared.negotiated.config.rx_cap(),
+                self.shared.negotiated.config.rx_watermark(),
             )
         };
 
@@ -946,7 +938,7 @@ where
                 let refused = {
                     let staged = self.shared.lock_staged();
                     let mut q = self.shared.lock_incoming();
-                    if staged.len() + q.len() >= self.shared.config.max_channels() {
+                    if staged.len() + q.len() >= self.shared.negotiated.config.max_channels() {
                         Some(pending)
                     } else {
                         q.push_back(pending);
@@ -1019,7 +1011,7 @@ where
                     &mut *wh,
                     &self.shared.desync,
                     &Packet::close(local_id, remote_id),
-                    self.shared.checksum(),
+                    self.shared.negotiated.checksum(),
                 )
                 .await?;
             }
@@ -1117,7 +1109,7 @@ where
         let pending = self.pending.as_ref().expect("undecided");
         let (remote_id, credit) = (pending.remote_id, pending.credit);
         let shared = Arc::clone(&self.shared);
-        let checksum = shared.checksum();
+        let checksum = shared.negotiated.checksum();
 
         let reserved = {
             let mut chs = shared.lock_channels();
@@ -1135,7 +1127,7 @@ where
                 let mut slot = ChannelSlot::new(local_id);
                 slot.remote_id = remote_id;
                 slot.state = ChannelState::Open;
-                if shared.delayed_ack {
+                if shared.negotiated.delayed_ack {
                     // OPEN's arg1 is the device's receive credit — our budget.
                     slot.send_budget = i64::from(credit);
                 }
@@ -1159,19 +1151,16 @@ where
         // Armed for rollback until READY is committed.
         self.reserved = Some(slot_idx);
 
-        let credit_bytes;
-        let payload: &[u8] = if shared.delayed_ack {
-            credit_bytes = shared.config.advertised_ack_bytes().to_le_bytes();
-            &credit_bytes
-        } else {
-            &[]
+        let payload = match shared.negotiated.advertised_credit() {
+            Some(credit) => credit.to_le_bytes().to_vec(),
+            None => Vec::new(),
         };
         {
             let mut wh = shared.lock_write().await?;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
-                &Packet::new(Command::Ready, local_id, remote_id, payload.to_vec()),
+                &Packet::new(Command::Ready, local_id, remote_id, payload),
                 checksum,
             )
             .await?;
@@ -1204,7 +1193,7 @@ where
         }
         let remote_id = self.pending.as_ref().expect("undecided").remote_id;
         let shared = Arc::clone(&self.shared);
-        let checksum = shared.checksum();
+        let checksum = shared.negotiated.checksum();
         {
             let mut wh = shared.lock_write().await?;
             send_pkt(
@@ -1281,22 +1270,22 @@ where
 
     /// Maximum payload size for outbound packets.
     pub fn max_payload(&self) -> u32 {
-        self.shared.max_payload
+        self.shared.negotiated.max_payload
     }
 
     /// Resource limits this connection was opened with.
     pub fn config(&self) -> &ConnectionConfig {
-        &self.shared.config
+        &self.shared.negotiated.config
     }
 
     /// Whether delayed-ACK flow control was negotiated.
     pub fn delayed_ack(&self) -> bool {
-        self.shared.delayed_ack
+        self.shared.negotiated.delayed_ack
     }
 
     /// Protocol version in effect: `min(ADB_VERSION, device version)`.
     pub fn protocol_version(&self) -> u32 {
-        self.shared.protocol_version
+        self.shared.negotiated.protocol_version
     }
 
     /// Raw device banner bytes from the CNXN handshake.
@@ -1304,7 +1293,11 @@ where
     /// Lock-free connection metadata — available even while the
     /// [`Reader`] is blocked in a read on another thread.
     pub fn device_banner(&self) -> Option<&[u8]> {
-        self.shared.device_banner.as_ref().map(|b| b.raw())
+        self.shared
+            .negotiated
+            .device_banner
+            .as_ref()
+            .map(|b| b.raw())
     }
 
     /// Parsed device banner from the CNXN handshake.
@@ -1312,7 +1305,12 @@ where
     /// Lock-free connection metadata — available even while the
     /// [`Reader`] is blocked in a read on another thread.
     pub fn device_banner_parsed(&self) -> Option<&DeviceBanner> {
-        self.shared.device_banner.as_ref()
+        self.shared.negotiated.device_banner.as_ref()
+    }
+
+    /// Everything the handshake settled, for the crate's own helpers.
+    pub(crate) fn negotiated(&self) -> &Negotiated {
+        &self.shared.negotiated
     }
 
     /// Take the channels the device opens toward the host (`adb
@@ -1497,8 +1495,8 @@ where
         if data.is_empty() {
             return Ok(());
         }
-        let max = (self.shared.max_payload as usize).max(1);
-        let checksum = self.shared.checksum();
+        let max = (self.shared.negotiated.max_payload as usize).max(1);
+        let checksum = self.shared.negotiated.checksum();
 
         let mut offset = 0;
         while offset < data.len() {
@@ -1615,7 +1613,7 @@ where
         if slot.send_turn() != place {
             return None;
         }
-        slot.try_reserve_send(want, self.shared.delayed_ack)
+        slot.try_reserve_send(want, self.shared.negotiated.delayed_ack)
             .map(|n| {
                 slot.send_advance();
                 Ok((n, slot.send_budget > 0))
@@ -1693,7 +1691,7 @@ where
             &mut *wh,
             &shared.desync,
             &Packet::close(local_id, remote_id),
-            shared.checksum(),
+            shared.negotiated.checksum(),
         )
         .await?;
     }

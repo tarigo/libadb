@@ -37,6 +37,7 @@ pub mod device_banner;
 pub mod error;
 #[cfg(test)]
 pub(crate) mod mock;
+pub(crate) mod negotiated;
 pub(crate) mod protobuf;
 pub mod protocol;
 pub(crate) mod recv_buf;

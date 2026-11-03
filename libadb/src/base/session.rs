@@ -101,7 +101,7 @@ where
     type IoError = <T as embedded_io::ErrorType>::Error;
 
     fn advertises(&self, feature: &Feature) -> Option<bool> {
-        self.device_banner_parsed().map(|b| b.has_feature(feature))
+        self.negotiated().advertises(feature)
     }
 
     async fn open_channel(
@@ -149,7 +149,7 @@ where
     type IoError = <WH as embedded_io::ErrorType>::Error;
 
     fn advertises(&self, feature: &Feature) -> Option<bool> {
-        self.device_banner_parsed().map(|b| b.has_feature(feature))
+        self.negotiated().advertises(feature)
     }
 
     async fn open_channel(

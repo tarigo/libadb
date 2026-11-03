@@ -4,10 +4,9 @@ use embedded_io_async::{Read, Write};
 
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
-use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
+use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::{self, AuthKind, Command};
-use crate::base::protocol::features;
 use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
 use crate::base::wire::{recv_pkt, send_pkt, DesyncFlag};
@@ -210,25 +209,15 @@ where
         self,
         cnxn: Packet,
     ) -> Result<Connection<T>, Error<<T as ErrorType>::Error>> {
-        let delayed_ack = features::has_feature(&self.banner, features::DELAYED_ACK)
-            && features::has_feature(&cnxn.data, features::DELAYED_ACK);
-
-        let device_banner = Some(DeviceBanner::from_bytes(
-            cnxn.data,
-            self.config.max_banner_properties(),
-        )?);
-
+        let negotiated = Negotiated::new(&self.banner, cnxn, self.config)?;
         Ok(Connection {
             transport: self.transport,
-            channels: (0..self.config.max_channels()).map(|_| None).collect(),
-            // Bounded by our own encoder, not just by the device's offer.
-            max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
-            protocol_version: cnxn.arg0.min(command::ADB_VERSION),
-            config: self.config,
-            device_banner,
+            channels: (0..negotiated.config.max_channels())
+                .map(|_| None)
+                .collect(),
+            negotiated,
             local_id_counter: 1,
             incoming: alloc::collections::VecDeque::new(),
-            delayed_ack,
             recv_buf: self.recv_buf,
             desync: self.desync,
         })
