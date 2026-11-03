@@ -7,7 +7,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::{c_char, CStr};
-use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -18,6 +17,7 @@ use libadb::shell::v2::{FrameDecoder, CLOSE_STDIN, STDIN, WINDOW_SIZE_CHANGE};
 use crate::block_on;
 use crate::connection::{lock_poisoned, FfiReader, FfiWriter};
 use crate::error::{self, AdbStatus};
+use crate::slice::copy_out;
 use crate::transport::FfiTransportError;
 
 fn build_shell_v2_destination(
@@ -275,7 +275,7 @@ pub unsafe extern "C" fn adb_shell_free(sh: *mut adb_shell_t) {
 /// # Safety
 /// `sh` must be a valid handle. `out_id` must point to a writable `u8`.
 /// `buf` must be NULL or point to at least `buf_cap` writable bytes.
-/// `out_len` may be NULL.
+/// `out_len` must be NULL or point to a writable `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_shell_read_frame(
     sh: *mut adb_shell_t,
@@ -296,15 +296,9 @@ pub unsafe extern "C" fn adb_shell_read_frame(
     let (id, payload) = ffi_try!(read_frame_async(&sh.reader, &sh.parse_state, sh.channel_id));
     // SAFETY: non-null, and writable per `# Safety`.
     unsafe { *out_id = id };
-    if !out_len.is_null() {
-        // SAFETY: non-null, so writable per `# Safety`.
-        unsafe { *out_len = payload.len() };
-    }
-    if !buf.is_null() && buf_cap > 0 {
-        let n = payload.len().min(buf_cap);
-        // SAFETY: non-null, so writable for `buf_cap >= n` bytes per `# Safety`.
-        unsafe { ptr::copy_nonoverlapping(payload.as_ptr(), buf, n) };
-    }
+    // SAFETY: `buf` and `out_len` are NULL or writable as sized, per
+    // `# Safety`, and `buf` cannot overlap the freshly built `payload`.
+    unsafe { copy_out(&payload, buf, buf_cap, out_len) };
     AdbStatus::Ok
 }
 

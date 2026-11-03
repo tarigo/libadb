@@ -4,7 +4,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::{c_char, CStr};
-use core::ptr;
 use std::sync::Mutex;
 
 use libadb::base::auth::Authenticator;
@@ -15,6 +14,7 @@ use libadb::Splittable;
 use crate::auth::{self, adb_authenticator_t};
 use crate::block_on;
 use crate::error::{self, AdbStatus};
+use crate::slice::copy_out;
 use crate::transport::{self, FfiTransport};
 
 // The halves a connection splits into: with TLS in the picture they are
@@ -420,14 +420,8 @@ pub unsafe extern "C" fn adb_connection_device_banner(
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let banner = unsafe { &*conn }.writer.device_banner().unwrap_or(&[]);
-    if !out_len.is_null() {
-        // SAFETY: non-null, so writable per `# Safety`.
-        unsafe { *out_len = banner.len() };
-    }
-    if !buf.is_null() && buf_len > 0 {
-        let n = banner.len().min(buf_len);
-        // SAFETY: non-null, so writable for `buf_len >= n` bytes per `# Safety`.
-        unsafe { ptr::copy_nonoverlapping(banner.as_ptr(), buf, n) };
-    }
+    // SAFETY: `buf` and `out_len` are NULL or writable as sized, per
+    // `# Safety`, and `buf` cannot overlap the handle's own banner.
+    unsafe { copy_out(banner, buf, buf_len, out_len) };
     AdbStatus::Ok
 }
