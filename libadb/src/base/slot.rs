@@ -1,6 +1,9 @@
 //! One channel's entry in the channel table: its state, what it has
 //! received and not handed out, and the flow control both ways.
 
+#[cfg(test)]
+mod tests;
+
 use bytes::{Buf, BytesMut};
 
 use super::ids::{ChannelIds, LocalId, RemoteId};
@@ -228,13 +231,14 @@ impl ChannelSlot {
         Ok(Some(ack))
     }
 
-    /// Record that the application took `n` bytes, and say what to
-    /// acknowledge as a result.
-    pub fn consume(&mut self, n: usize) -> Option<PendingAck> {
+    /// Record that the application took `n` bytes from the channel
+    /// `ids` names, and say what to acknowledge as a result. Taking the
+    /// ids is what lets the bytes leave the count only with the OKAY
+    /// that acknowledges them.
+    fn consume(&mut self, ids: ChannelIds, n: usize) -> Option<PendingAck> {
         let len = self.ack_len(n, self.rx_buf.len())?;
-        let ack = self.ack(len)?;
         self.unacked -= len;
-        Some(ack)
+        Some(PendingAck { ids, len })
     }
 
     /// The OKAY for `len` bytes on this channel. `None` until the
@@ -268,21 +272,27 @@ impl ChannelSlot {
     /// taking them. `None` while an open channel has nothing buffered;
     /// once a closed one is drained, [`Error::ChannelClosed`] or the
     /// fault that closed it.
+    ///
+    /// Nothing is taken before the device has named its end: what it
+    /// wrote ahead of the READY to our OPEN stays buffered, and counted
+    /// as unacknowledged, until that READY gives the OKAY for it
+    /// somewhere to go. A channel closed before it ever opened has
+    /// nothing to hand out.
     pub fn take_buffered<E>(
         &mut self,
         buf: &mut [u8],
     ) -> Result<Option<(usize, Option<PendingAck>)>, Error<E>> {
-        if self.rx_buf.is_empty() {
+        let Some(ids) = self.ids().filter(|_| !self.rx_buf.is_empty()) else {
             return if self.is_closed() {
                 Err(self.closed_error())
             } else {
                 Ok(None)
             };
-        }
+        };
         let n = buf.len().min(self.rx_buf.len());
         buf[..n].copy_from_slice(&self.rx_buf[..n]);
         self.rx_buf.advance(n);
-        Ok(Some((n, self.consume(n))))
+        Ok(Some((n, self.consume(ids, n))))
     }
 
     fn push_rx(&mut self, payload: &[u8]) -> Result<(), RxOverflow> {
@@ -326,7 +336,7 @@ impl ChannelSlot {
     /// device an OKAY — what [`take_buffered`](Self::take_buffered)
     /// would answer, without taking anything.
     pub fn take_acks(&self, want: usize) -> bool {
-        if self.rx_buf.is_empty() {
+        if self.rx_buf.is_empty() || self.remote.is_none() {
             return false;
         }
         let n = want.min(self.rx_buf.len());
@@ -364,7 +374,7 @@ impl ChannelSlot {
     }
 }
 
-#[cfg(all(test, feature = "split"))]
+#[cfg(test)]
 impl ChannelSlot {
     /// Bytes waiting to be read.
     pub fn buffered(&self) -> usize {
