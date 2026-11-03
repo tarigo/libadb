@@ -134,6 +134,11 @@ impl<S: Session> Channel<'_, S> {
     }
 }
 
+/// What [`ReadToEnd::read_to_vec`] stops with once the device has sent
+/// more than its cap. It is not an [`Error`], so a caller can tell its
+/// own cap from anything the channel fails with.
+pub(crate) struct Capped;
+
 /// A channel to read until the device closes it, then close: what a
 /// one-shot service does with the channel it opens. [`Channel`] is one,
 /// and so is the reverse service's connection paired with the id of the
@@ -192,20 +197,20 @@ pub(crate) trait ReadToEnd: Sized {
     /// [`read_to_end`](Self::read_to_end) does. `rx` is where each read
     /// lands before it is appended.
     ///
-    /// Past `cap` bytes in all it fails with [`Error::ReceiveBufferFull`],
-    /// found before the read that crosses the cap is appended, so the
-    /// `Vec` never holds more.
+    /// Past `cap` bytes in all it stops with `Ok(Err(Capped))`, found
+    /// before the read that crosses the cap is appended, so the `Vec`
+    /// never holds more. An `Err` is the channel's own error.
     async fn read_to_vec(
         mut self,
         rx: &mut [u8],
         cap: usize,
-    ) -> Result<Vec<u8>, Error<Self::IoError>> {
+    ) -> Result<Result<Vec<u8>, Capped>, Error<Self::IoError>> {
         let mut out = Vec::new();
         let read = loop {
             match self.read(rx).await {
-                Ok(n) if n > cap - out.len() => break Err(Error::ReceiveBufferFull),
+                Ok(n) if n > cap - out.len() => break Ok(Err(Capped)),
                 Ok(n) => out.extend_from_slice(&rx[..n]),
-                Err(Error::ChannelClosed) => break Ok(out),
+                Err(Error::ChannelClosed) => break Ok(Ok(out)),
                 Err(e) => break Err(e),
             }
         };

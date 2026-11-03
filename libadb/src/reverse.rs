@@ -29,7 +29,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::base::channel::{ChannelId, ReadToEnd};
+use crate::base::channel::{Capped, ChannelId, ReadToEnd};
 use crate::base::session::ServiceChannel;
 use crate::error::{Error, ProtocolError};
 
@@ -149,15 +149,10 @@ async fn exchange<C: ServiceChannel>(
 ) -> Result<Vec<u8>, Error<C::IoError>> {
     let ch = conn.open_service_channel(dest).await?;
     let mut buf = [0u8; 512];
-    let reply = OpenedChannel { conn, ch }
+    OpenedChannel { conn, ch }
         .read_to_vec(&mut buf, REPLY_CAP)
-        .await;
-    // Only the cap fills up here: a channel read never reports a full
-    // buffer.
-    reply.map_err(|e| match e {
-        Error::ReceiveBufferFull => Error::Reverse(ReverseError::UnexpectedReply),
-        e => e,
-    })
+        .await?
+        .map_err(|Capped| Error::Reverse(ReverseError::UnexpectedReply))
 }
 
 /// The channel [`exchange`] opened, paired with the [`ServiceChannel`]
@@ -220,7 +215,40 @@ fn hex4_block(b: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use core::convert::Infallible;
+
     use super::*;
+    use crate::base::mock::now;
+
+    /// A [`ServiceChannel`] whose every read fails with
+    /// [`Error::ReceiveBufferFull`].
+    struct FullReads;
+
+    impl ServiceChannel for FullReads {
+        type IoError = Infallible;
+
+        async fn open_service_channel(&mut self, _: &[u8]) -> Result<ChannelId, Error<Infallible>> {
+            Ok(ChannelId::from_raw(0, 1))
+        }
+
+        async fn read_service_channel(
+            &mut self,
+            _: ChannelId,
+            _: &mut [u8],
+        ) -> Result<usize, Error<Infallible>> {
+            Err(Error::ReceiveBufferFull)
+        }
+
+        async fn close_service_channel(&mut self, _: ChannelId) -> Result<(), Error<Infallible>> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_full_receive_buffer_is_not_taken_for_the_reply_cap() {
+        let err = now(list(&mut FullReads)).unwrap_err();
+        assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
+    }
 
     #[test]
     fn statuses_parse_as_probed_on_a_real_device() {

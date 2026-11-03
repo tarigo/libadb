@@ -36,7 +36,7 @@
 
 use alloc::vec::Vec;
 
-use crate::base::channel::{Channel, ReadToEnd};
+use crate::base::channel::{Capped, Channel, ReadToEnd};
 use crate::base::destination::build_nul_destination;
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
@@ -74,7 +74,8 @@ pub async fn exec<S: Session>(
     open_exec(session, args)
         .await?
         .read_to_vec(rx, usize::MAX)
-        .await
+        .await?
+        .map_err(|Capped| Error::ReceiveBufferFull)
 }
 
 /// Open an interactive `abb:` channel for streaming or bidirectional
