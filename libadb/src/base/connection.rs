@@ -238,7 +238,8 @@ where
         self.desync.check()?;
         // The slot stays free until the device answers: an opener given
         // up on leaves nothing behind, and its READY, should it come,
-        // finds no channel and is answered with CLSE.
+        // finds no channel and is answered with CLSE. Nothing takes the
+        // slot meanwhile, since dispatch only touches slots in use.
         let ch = self.table.allocate()?;
         let open_arg1 = self.negotiated.advertised_credit().unwrap_or(0);
         let pkt = Packet::new(

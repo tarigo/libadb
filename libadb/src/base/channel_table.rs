@@ -113,19 +113,35 @@ impl ChannelTable {
     }
 
     /// Fill `ch`'s slot with a channel of ours whose OPEN waits for the
-    /// device's READY.
+    /// device's READY. `ch` comes from [`allocate`](Self::allocate),
+    /// its slot still free.
     pub(crate) fn insert_opening(&mut self, ch: ChannelId) -> &mut ChannelSlot {
-        self.slots[ch.slot].insert(ChannelSlot::opening(ch.local, self.policy))
+        let slot = ChannelSlot::opening(ch.local, self.policy);
+        self.fill(ch, slot)
     }
 
     /// Fill `ch`'s slot with a channel the device opened from `remote`,
-    /// its OPEN granting `credit`.
+    /// its OPEN granting `credit`. `ch` comes from
+    /// [`allocate`](Self::allocate), its slot still free.
     pub(crate) fn insert_accepted(&mut self, ch: ChannelId, remote: RemoteId, credit: u32) {
         let ids = ChannelIds {
             local: ch.local,
             remote,
         };
-        self.slots[ch.slot] = Some(ChannelSlot::accepted(ids, credit, self.policy));
+        self.fill(ch, ChannelSlot::accepted(ids, credit, self.policy));
+    }
+
+    /// Put `slot` where `ch` was allocated. Only the two inserts fill a
+    /// slot, and [`dispatch`](Self::dispatch) touches none that is
+    /// empty, so an occupant here would be a live channel overwritten.
+    fn fill(&mut self, ch: ChannelId, slot: ChannelSlot) -> &mut ChannelSlot {
+        let entry = &mut self.slots[ch.slot];
+        debug_assert!(
+            entry.is_none(),
+            "slot {} filled while a channel still holds it",
+            ch.slot
+        );
+        entry.insert(slot)
     }
 
     /// The slot `ch` names, unless it has been freed or reused since.
