@@ -80,7 +80,13 @@ pub struct TrackApp<'a, 'b, S> {
 }
 
 impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
-    fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
+    /// Wrap an already-opened `track-app` channel.
+    ///
+    /// `buf` is the caller-owned receive buffer, and a snapshot longer
+    /// than it fails [`read_snapshot`](Self::read_snapshot) with
+    /// [`Error::ReceiveBufferFull`]. 8 KiB is a reasonable starting
+    /// size — see [`open`].
+    pub fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
         Self {
             channel,
             rx: RecvBuf::new(buf),

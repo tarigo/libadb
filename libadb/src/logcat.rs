@@ -103,7 +103,22 @@ enum End {
 const STDERR_KEPT: usize = 1024;
 
 impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
-    fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
+    /// Wrap an already-opened channel running `logcat -B`.
+    ///
+    /// The channel must carry shell_v2 framing, as the
+    /// `shell,v2,raw:logcat -B …` destination [`open`] builds does, and
+    /// logcat's output must be binary: text fails
+    /// [`read_entry`](Self::read_entry) with
+    /// [`LogcatError::InvalidHeader`]. `buf` is the caller-owned buffer
+    /// for channel reads and for the entries being assembled; it must
+    /// be at least 4 bytes longer than the longest entry, which
+    /// 5 KiB + 4 bytes always is — see [`open`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf.len()` is less than the 5-byte shell_v2
+    /// [`HEADER_SIZE`](shell_v2::HEADER_SIZE).
+    pub fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
         assert!(
             buf.len() >= shell_v2::HEADER_SIZE,
             "Logcat buffer must be at least {} bytes",
