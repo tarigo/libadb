@@ -16,22 +16,37 @@
 #[cfg(test)]
 mod tests;
 
+/// A parsed transport address, borrowing from the string it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Uri<'a> {
-    Tcp { host: &'a str, port: u16 },
+    /// `tcp://HOST:PORT`.
+    Tcp {
+        /// IPv4 address, hostname, or IPv6 address without its brackets.
+        host: &'a str,
+        /// TCP port.
+        port: u16,
+    },
+    /// `usb://…`: the device to open.
     Usb(UsbSelector<'a>),
 }
 
+/// Which USB device a `usb://` address picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsbSelector<'a> {
     /// First available ADB device.
     Any,
     /// Match by USB vendor/product IDs.
-    VidPid { vid: u16, pid: u16 },
+    VidPid {
+        /// USB vendor ID.
+        vid: u16,
+        /// USB product ID.
+        pid: u16,
+    },
     /// Match by serial number string.
     Serial(&'a str),
 }
 
+/// Why [`parse`] rejected an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UriError {
