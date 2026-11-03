@@ -279,28 +279,30 @@ fn tag_and_message_lossy() {
 #[test]
 fn destination_no_args() {
     let mut buf = [0u8; 128];
-    let len = write_destination(&mut buf, b"logcat -B", &[]).unwrap();
+    let len = shell_v2::write_argv_destination(&mut buf, b"logcat -B", &[]).unwrap();
     assert_eq!(&buf[..len], b"shell,v2,raw:logcat -B\0");
 }
 
 #[test]
 fn destination_with_args() {
     let mut buf = [0u8; 128];
-    let len = write_destination(&mut buf, b"logcat -B", &["-b", "main,system"]).unwrap();
+    let len =
+        shell_v2::write_argv_destination(&mut buf, b"logcat -B", &["-b", "main,system"]).unwrap();
     assert_eq!(&buf[..len], b"shell,v2,raw:logcat -B -b main,system\0");
 }
 
 #[test]
 fn destination_dump() {
     let mut buf = [0u8; 128];
-    let len = write_destination(&mut buf, b"logcat -B -d", &["-t", "50"]).unwrap();
+    let len = shell_v2::write_argv_destination(&mut buf, b"logcat -B -d", &["-t", "50"]).unwrap();
     assert_eq!(&buf[..len], b"shell,v2,raw:logcat -B -d -t 50\0");
 }
 
 #[test]
 fn destination_text() {
     let mut buf = [0u8; 128];
-    let len = write_destination(&mut buf, b"logcat", &["-d", "-v", "threadtime"]).unwrap();
+    let len =
+        shell_v2::write_argv_destination(&mut buf, b"logcat", &["-d", "-v", "threadtime"]).unwrap();
     assert_eq!(&buf[..len], b"shell,v2,raw:logcat -d -v threadtime\0");
 }
 
@@ -308,7 +310,7 @@ fn destination_text() {
 fn destination_buffer_too_small() {
     let mut buf = [0u8; 10];
     assert_eq!(
-        write_destination(&mut buf, b"logcat -B", &[]),
+        shell_v2::write_argv_destination(&mut buf, b"logcat -B", &[]),
         Err(crate::base::destination::DestinationError::TooLong)
     );
 }

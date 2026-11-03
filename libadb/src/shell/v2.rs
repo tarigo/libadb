@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
-use crate::base::destination::build_shell_v2_destination;
+use crate::base::destination::{self, build_shell_v2_destination, DestinationError};
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
 use crate::error::{Error, ProtocolError};
@@ -394,4 +394,33 @@ pub async fn exec<S: Session>(
     let mut shell = open(session, command, rx).await?;
     shell.close_stdin().await?;
     shell.collect().await
+}
+
+/// Write `shell,v2,raw:<prefix> <args…>\0` into `buf`: `prefix` as it
+/// stands, each of `args` quoted so it reaches the device as one
+/// argument.
+pub(crate) fn write_argv_destination(
+    buf: &mut [u8],
+    prefix: &[u8],
+    args: &[&str],
+) -> Result<usize, DestinationError> {
+    destination::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
+}
+
+/// Open the channel [`write_argv_destination`] names, once the device
+/// is known to speak shell_v2: what the argv-shaped services run over
+/// when they go through the shell.
+///
+/// The destination is built in `buf`, so a `buf` too short for it is
+/// [`Error::ReceiveBufferFull`]. It is free again once this returns —
+/// opening copies the destination.
+pub(crate) async fn open_argv<'a, S: Session>(
+    session: &'a mut S,
+    prefix: &[u8],
+    args: &[&str],
+    buf: &mut [u8],
+) -> Result<Channel<'a, S>, Error<S::IoError>> {
+    session.require_feature(Feature::ShellV2)?;
+    let dest_len = write_argv_destination(buf, prefix, args)?;
+    session.open(&buf[..dest_len]).await
 }

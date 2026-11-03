@@ -252,25 +252,6 @@ fn shift(buf: &mut [u8], from: core::ops::Range<usize>, to: usize) {
     buf.copy_within(from, to);
 }
 
-fn write_destination(
-    buf: &mut [u8],
-    prefix: &[u8],
-    args: &[&str],
-) -> Result<usize, crate::base::destination::DestinationError> {
-    crate::base::destination::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
-}
-
-async fn open_shell_channel<'a, S: Session>(
-    session: &'a mut S,
-    prefix: &[u8],
-    args: &[&str],
-    buf: &mut [u8],
-) -> Result<Channel<'a, S>, Error<S::IoError>> {
-    session.require_feature(crate::base::protocol::features::Feature::ShellV2)?;
-    let dest_len = write_destination(buf, prefix, args)?;
-    session.open(&buf[..dest_len]).await
-}
-
 /// Open a streaming `logcat -B` session, returning a [`Logcat`] that
 /// yields parsed [`LogEntry`] values.
 ///
@@ -298,7 +279,7 @@ pub async fn open<'a, 'b, S: Session>(
     args: &[&str],
     buf: &'b mut [u8],
 ) -> Result<Logcat<'a, 'b, S>, Error<S::IoError>> {
-    let channel = open_shell_channel(session, b"logcat -B", args, buf).await?;
+    let channel = shell_v2::open_argv(session, b"logcat -B", args, buf).await?;
     Ok(Logcat::new(channel, buf))
 }
 
@@ -320,7 +301,7 @@ pub async fn dump<S: Session>(
     args: &[&str],
     buf: &mut [u8],
 ) -> Result<Vec<LogEntry>, Error<S::IoError>> {
-    let channel = open_shell_channel(session, b"logcat -B -d", args, buf).await?;
+    let channel = shell_v2::open_argv(session, b"logcat -B -d", args, buf).await?;
     let mut logcat = Logcat::new(channel, buf);
 
     let mut entries = Vec::new();
@@ -349,7 +330,7 @@ pub async fn open_text<'a, 'b, S: Session>(
     args: &[&str],
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
-    let channel = open_shell_channel(session, b"logcat", args, rx).await?;
+    let channel = shell_v2::open_argv(session, b"logcat", args, rx).await?;
     Ok(Shell::new(channel, rx))
 }
 
@@ -364,7 +345,7 @@ pub async fn exec_text<S: Session>(
     args: &[&str],
     rx: &mut [u8],
 ) -> Result<CommandOutput, Error<S::IoError>> {
-    let channel = open_shell_channel(session, b"logcat", args, rx).await?;
+    let channel = shell_v2::open_argv(session, b"logcat", args, rx).await?;
     let mut shell = Shell::new(channel, rx);
     shell.close_stdin().await?;
     shell.collect().await
