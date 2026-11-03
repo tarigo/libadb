@@ -1,7 +1,6 @@
 use super::super::error::ProtocolError;
 use super::{
-    constant::{AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, MAX_PAYLOAD},
-    Checksumable, Command, Message, MESSAGE_SIZE,
+    command::AuthKind, constant::MAX_PAYLOAD, Checksumable, Command, Message, MESSAGE_SIZE,
 };
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -68,11 +67,11 @@ impl Packet {
     }
 
     pub fn auth_signature(signature: impl Into<Bytes>) -> Self {
-        Self::new(Command::Auth, AUTH_SIGNATURE, 0, signature)
+        Self::new(Command::Auth, AuthKind::Signature.into(), 0, signature)
     }
 
     pub fn auth_public_key(key: impl Into<Bytes>) -> Self {
-        Self::new(Command::Auth, AUTH_RSAPUBLICKEY, 0, key)
+        Self::new(Command::Auth, AuthKind::PublicKey.into(), 0, key)
     }
 }
 

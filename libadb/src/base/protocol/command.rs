@@ -108,6 +108,37 @@ pub const AUTH_RSAPUBLICKEY: u32 = 3;
 /// Length of the token adbd asks the host to sign: a SHA-1 prehash.
 pub const AUTH_TOKEN_LEN: usize = 20;
 
+/// What an AUTH packet carries, as its `arg0` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub(crate) enum AuthKind {
+    /// The device's token for the host to sign.
+    Token = AUTH_TOKEN,
+    /// The host's signature of that token.
+    Signature = AUTH_SIGNATURE,
+    /// The host's public key, for the device to ask its user about.
+    PublicKey = AUTH_RSAPUBLICKEY,
+}
+
+/// An `arg0` that names none of the three comes back as it was.
+impl TryFrom<u32> for AuthKind {
+    type Error = u32;
+    fn try_from(v: u32) -> Result<Self, u32> {
+        match v {
+            AUTH_TOKEN => Ok(Self::Token),
+            AUTH_SIGNATURE => Ok(Self::Signature),
+            AUTH_RSAPUBLICKEY => Ok(Self::PublicKey),
+            _ => Err(v),
+        }
+    }
+}
+
+impl From<AuthKind> for u32 {
+    fn from(kind: AuthKind) -> u32 {
+        kind as u32
+    }
+}
+
 /// ADB protocol version with feature negotiation.
 pub const ADB_VERSION: u32 = 0x0100_0001;
 
@@ -126,8 +157,8 @@ mod tests {
 
     use super::super::super::error::ProtocolError;
     use super::{
-        magic, Command, CMD_AUTH, CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_STLS, CMD_SYNC,
-        CMD_WRTE,
+        magic, AuthKind, Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN, CMD_AUTH,
+        CMD_CLSE, CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_STLS, CMD_SYNC, CMD_WRTE,
     };
 
     const ALL_VARIANTS: [(Command, u32); 8] = [
@@ -190,5 +221,23 @@ mod tests {
         assert_eq!(CMD_WRTE, u32::from_le_bytes(*b"WRTE"));
         assert_eq!(CMD_AUTH, u32::from_le_bytes(*b"AUTH"));
         assert_eq!(CMD_STLS, u32::from_le_bytes(*b"STLS"));
+    }
+
+    #[test]
+    fn auth_kinds_roundtrip_through_their_wire_values() {
+        for (kind, raw) in [
+            (AuthKind::Token, AUTH_TOKEN),
+            (AuthKind::Signature, AUTH_SIGNATURE),
+            (AuthKind::PublicKey, AUTH_RSAPUBLICKEY),
+        ] {
+            assert_eq!(u32::from(kind), raw);
+            assert_eq!(AuthKind::try_from(raw), Ok(kind));
+        }
+    }
+
+    #[test]
+    fn an_unknown_auth_kind_comes_back_as_its_value() {
+        assert_eq!(AuthKind::try_from(0), Err(0));
+        assert_eq!(AuthKind::try_from(4), Err(4));
     }
 }

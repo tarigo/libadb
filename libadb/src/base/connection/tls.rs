@@ -14,7 +14,7 @@ use super::handshake::{Handshake, Verdict};
 use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::error::{AuthError, Error, ProtocolError};
-use crate::base::protocol::command::{self, Command};
+use crate::base::protocol::command::{AuthKind, Command};
 use crate::base::protocol::constant::STLS_VERSION;
 use crate::base::protocol::Packet;
 use crate::tls::TlsClientConfig;
@@ -119,12 +119,12 @@ where
         // inside the session, and that is the first thing to arrive.
         let pkt = self.recv().await.map_err(|e| self.verdict_on(e))?;
 
-        match pkt.command {
-            Command::Connect => Ok(pkt),
+        match (pkt.command, AuthKind::try_from(pkt.arg0)) {
+            (Command::Connect, _) => Ok(pkt),
             // adbd sends no AUTH inside TLS, and adb would ignore one, but
             // answering costs nothing. It only puts the CNXN off, so what
             // fails in it is judged as a failed CNXN read would be.
-            Command::Auth if pkt.arg0 == command::AUTH_TOKEN => {
+            (Command::Auth, Ok(AuthKind::Token)) => {
                 let verdict = self
                     .do_auth(pkt.data)
                     .await
@@ -137,7 +137,7 @@ where
                     }
                 }
             }
-            other => Err(ProtocolError::UnexpectedCommand(other).into()),
+            (other, _) => Err(ProtocolError::UnexpectedCommand(other).into()),
         }
     }
 

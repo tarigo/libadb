@@ -6,7 +6,7 @@ use super::{Connection, ConnectionConfig, HostBanner};
 use crate::base::auth::Authenticator;
 use crate::base::device_banner::DeviceBanner;
 use crate::base::error::{AuthError, Error, ProtocolError};
-use crate::base::protocol::command::{self, Command};
+use crate::base::protocol::command::{self, AuthKind, Command};
 use crate::base::protocol::features;
 use crate::base::protocol::Checksum;
 use crate::base::protocol::Packet;
@@ -145,9 +145,9 @@ where
             Ok(verdict) => return Ok(verdict),
             Err(pkt) => pkt,
         };
-        match pkt.command {
-            Command::Auth if pkt.arg0 == command::AUTH_TOKEN => self.do_auth(pkt.data).await,
-            other => Err(ProtocolError::UnexpectedCommand(other).into()),
+        match (pkt.command, AuthKind::try_from(pkt.arg0)) {
+            (Command::Auth, Ok(AuthKind::Token)) => self.do_auth(pkt.data).await,
+            (other, _) => Err(ProtocolError::UnexpectedCommand(other).into()),
         }
     }
 
@@ -180,9 +180,9 @@ where
             Ok(verdict) => return Ok(verdict),
             Err(resp) => resp,
         };
-        match resp.command {
+        match (resp.command, AuthKind::try_from(resp.arg0)) {
             // A second token: the signature was not enough, offer the key.
-            Command::Auth if resp.arg0 == command::AUTH_TOKEN => {}
+            (Command::Auth, Ok(AuthKind::Token)) => {}
             _ => return Err(AuthError::Rejected.into()),
         }
 
