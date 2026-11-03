@@ -4,7 +4,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::decoder::make_frame;
-use super::{parse_header, Frame, FrameDecoder, FrameId, WindowSize, HEADER_SIZE};
+use super::{
+    destination, parse_header, Frame, FrameDecoder, FrameId, ShellMode, WindowSize, HEADER_SIZE,
+};
+use crate::error::ProtocolError;
 
 fn write_header(rx: &mut [u8], offset: usize, id: FrameId, length: u32) {
     rx[offset] = id.into();
@@ -31,6 +34,53 @@ fn every_frame_id_is_its_wire_byte() {
 fn a_byte_no_frame_id_names_comes_back_as_it_is() {
     assert_eq!(FrameId::try_from(6), Err(6));
     assert_eq!(FrameId::try_from(0xFF), Err(0xFF));
+}
+
+#[test]
+fn a_destination_names_its_mode_and_command() {
+    assert_eq!(
+        destination(ShellMode::Raw, "ls").unwrap(),
+        "shell,v2,raw:ls\0"
+    );
+    assert_eq!(
+        destination(ShellMode::Pty { term: None }, "ls").unwrap(),
+        "shell,v2,pty:ls\0"
+    );
+    assert_eq!(
+        destination(
+            ShellMode::Pty {
+                term: Some("xterm")
+            },
+            "ls"
+        )
+        .unwrap(),
+        "shell,v2,pty,TERM=xterm:ls\0"
+    );
+}
+
+#[test]
+fn an_empty_command_opens_a_login_shell() {
+    assert_eq!(
+        destination(ShellMode::Pty { term: None }, "").unwrap(),
+        "shell,v2,pty:\0"
+    );
+}
+
+#[test]
+fn a_nul_in_the_command_or_the_term_is_rejected() {
+    assert_eq!(
+        destination(ShellMode::Raw, "l\0s"),
+        Err(ProtocolError::InvalidDestination)
+    );
+    assert_eq!(
+        destination(
+            ShellMode::Pty {
+                term: Some("xte\0rm")
+            },
+            "ls"
+        ),
+        Err(ProtocolError::InvalidDestination)
+    );
 }
 
 #[test]
@@ -98,7 +148,6 @@ fn make_frame_extracts_exit_code_from_first_byte() {
 
 #[test]
 fn make_frame_rejects_empty_exit_payload() {
-    use crate::error::ProtocolError;
     assert!(matches!(
         make_frame(Ok(FrameId::Exit), Vec::new()),
         Err(ProtocolError::ShortExitPayload)

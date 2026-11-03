@@ -1,26 +1,9 @@
 #[cfg(test)]
 mod tests;
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::ProtocolError;
-
-pub(crate) fn build_shell_v2_destination(
-    pty: bool,
-    term: &str,
-    command: &str,
-) -> Result<String, ProtocolError> {
-    if command.contains('\0') || term.contains('\0') {
-        return Err(ProtocolError::InvalidDestination);
-    }
-    Ok(match (pty, term.is_empty()) {
-        (false, _) => format!("shell,v2,raw:{command}\0"),
-        (true, true) => format!("shell,v2,pty:{command}\0"),
-        (true, false) => format!("shell,v2,pty,TERM={term}:{command}\0"),
-    })
-}
 
 /// Why a destination could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

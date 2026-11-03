@@ -632,7 +632,7 @@ async fn shell_v2_open_interactive_gated_on_shell_v2() {
     let mut rx = [0u8; 1024];
 
     expect_missing_feature(
-        shell_v2::open_interactive(&mut conn, "", "", None, &mut rx).await,
+        shell_v2::open_interactive(&mut conn, "", None, None, &mut rx).await,
         Feature::ShellV2,
     );
 

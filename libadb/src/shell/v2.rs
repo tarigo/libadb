@@ -21,11 +21,13 @@ mod tests;
 
 pub use decoder::FrameDecoder;
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::future::Future;
 
 use crate::base::channel::{Channel, SelectResult};
-use crate::base::destination::{self, build_shell_v2_destination, DestinationError};
+use crate::base::destination::{self as dest, DestinationError};
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
 use crate::error::{Error, ProtocolError};
@@ -87,6 +89,49 @@ impl From<FrameId> for u8 {
             FrameId::WindowSizeChange => 5,
         }
     }
+}
+
+/// Whether the device runs a shell_v2 command in a PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShellMode<'a> {
+    /// `shell,v2,raw:` — no PTY: output arrives as the command wrote
+    /// it, with stdout and stderr kept apart.
+    Raw,
+    /// `shell,v2,pty:` — the device allocates a PTY, as an interactive
+    /// session needs, and stdout and stderr share it.
+    Pty {
+        /// What `TERM` is set to on the device, e.g.
+        /// `"xterm-256color"`; `None` leaves the device's default.
+        term: Option<&'a str>,
+    },
+}
+
+/// The NUL-terminated destination that opens `command` in `mode`:
+/// `shell,v2,raw:<command>\0`, `shell,v2,pty:<command>\0` or
+/// `shell,v2,pty,TERM=<term>:<command>\0`.
+///
+/// `command` is shell source and reaches the device verbatim; an empty
+/// one starts a login shell. A NUL in `command` or the terminal name
+/// would cut the destination short on the device, so it fails with
+/// [`ProtocolError::InvalidDestination`].
+///
+/// ```
+/// use libadb::shell::v2::{destination, ShellMode};
+///
+/// let pty = ShellMode::Pty { term: Some("xterm") };
+/// assert_eq!(destination(pty, "ls").unwrap(), "shell,v2,pty,TERM=xterm:ls\0");
+/// assert_eq!(destination(ShellMode::Raw, "ls").unwrap(), "shell,v2,raw:ls\0");
+/// ```
+pub fn destination(mode: ShellMode<'_>, command: &str) -> Result<String, ProtocolError> {
+    let dest = match mode {
+        ShellMode::Raw => format!("shell,v2,raw:{command}\0"),
+        ShellMode::Pty { term: None } => format!("shell,v2,pty:{command}\0"),
+        ShellMode::Pty { term: Some(term) } => format!("shell,v2,pty,TERM={term}:{command}\0"),
+    };
+    if dest[..dest.len() - 1].contains('\0') {
+        return Err(ProtocolError::InvalidDestination);
+    }
+    Ok(dest)
 }
 
 /// Size of the framing header in bytes.
@@ -425,7 +470,7 @@ pub async fn open<'a, 'b, S: Session>(
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
     session.require_feature(Feature::ShellV2)?;
-    let dest = build_shell_v2_destination(false, "", command)?;
+    let dest = destination(ShellMode::Raw, command)?;
     let channel = session.open(dest.as_bytes()).await?;
     Ok(Shell::new(channel, rx))
 }
@@ -436,7 +481,7 @@ pub async fn open<'a, 'b, S: Session>(
 /// * `command` — command to run inside the PTY. Pass an empty string
 ///   to start a login shell.
 /// * `term` — value for the `TERM` environment variable on the device
-///   (e.g. `"xterm-256color"`). Pass an empty string to omit it.
+///   (e.g. `"xterm-256color"`); `None` leaves the device's default.
 /// * `window_size` — if `Some`, a
 ///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
 ///   right after the channel opens so the device PTY has
@@ -451,12 +496,12 @@ pub async fn open<'a, 'b, S: Session>(
 pub async fn open_interactive<'a, 'b, S: Session>(
     session: &'a mut S,
     command: &str,
-    term: &str,
+    term: Option<&str>,
     window_size: Option<WindowSize>,
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
     session.require_feature(Feature::ShellV2)?;
-    let dest = build_shell_v2_destination(true, term, command)?;
+    let dest = destination(ShellMode::Pty { term }, command)?;
     let channel = session.open(dest.as_bytes()).await?;
     let mut shell = Shell::new(channel, rx);
     if let Some(size) = window_size {
@@ -496,7 +541,7 @@ pub(crate) fn write_argv_destination(
     prefix: &[u8],
     args: &[&str],
 ) -> Result<usize, DestinationError> {
-    destination::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
+    dest::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
 }
 
 /// Open the channel [`write_argv_destination`] names, once the device

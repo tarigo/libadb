@@ -220,9 +220,10 @@ async fn run_interactive(target: &str) -> Result<(), Box<dyn std::error::Error>>
     let window_size = get_terminal_size();
 
     let mut rx = [0u8; 64 * 1024];
-    let mut shell = shell_v2::open_interactive(&mut conn, "", &term, Some(window_size), &mut rx)
-        .await
-        .map_err(|e| format!("open: {e}"))?;
+    let mut shell =
+        shell_v2::open_interactive(&mut conn, "", Some(&term), Some(window_size), &mut rx)
+            .await
+            .map_err(|e| format!("open: {e}"))?;
 
     #[cfg(feature = "tokio")]
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(16);
