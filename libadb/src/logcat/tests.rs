@@ -145,7 +145,12 @@ fn an_unknown_buffer_keeps_its_number() {
     let data = make_v4_entry(1, 1, 0, 0, 8, 0, &payload);
 
     let (entry, _) = parse_entry(&data).unwrap().unwrap();
-    assert_eq!(entry.log_id, LogId::Unknown(8));
+    assert!(
+        matches!(entry.log_id, LogId::Unknown(_)),
+        "{:?}",
+        entry.log_id
+    );
+    assert_eq!(u32::from(entry.log_id), 8);
 }
 
 #[test]
@@ -221,7 +226,7 @@ fn priority_display_and_char() {
 fn log_id_display() {
     assert_eq!(format!("{}", LogId::Main), "main");
     assert_eq!(format!("{}", LogId::Crash), "crash");
-    assert_eq!(format!("{}", LogId::Unknown(9)), "unknown(9)");
+    assert_eq!(format!("{}", LogId::from(9)), "unknown(9)");
 }
 
 #[test]
