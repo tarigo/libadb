@@ -371,7 +371,8 @@ async fn exec_run_returns_buffer_full_when_output_exceeds_capacity() {
         ch.expect_ack().await;
         ch.send_write(&[b'y'; 16]).await;
         ch.expect_ack().await;
-        ch.send_close().await;
+        // `yes` never ends: the channel is ours to close.
+        ch.expect_close().await;
     })
     .await;
 
@@ -379,7 +380,7 @@ async fn exec_run_returns_buffer_full_when_output_exceeds_capacity() {
     let err = exec::run(&mut conn, "yes", &mut buf).await.unwrap_err();
     assert!(matches!(err, Error::ReceiveBufferFull));
 
-    rt::join(device).await;
+    rt::within("the device waiting for our CLSE", rt::join(device)).await;
 }
 }
 
