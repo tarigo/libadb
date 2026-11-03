@@ -12,7 +12,7 @@ use fake_device::{session, FakeDevice};
 #[path = "common/common.rs"]
 mod common;
 #[cfg(unix)]
-use common::{shell_v2_encode, SH_EXIT};
+use common::{shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT};
 
 /// Arguments a shell would take apart if they reached it unquoted.
 const ARGS: &[&str] = &[
@@ -64,6 +64,7 @@ async fn the_shell_path_hands_the_device_the_arguments_it_was_given() {
     let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
     let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
         let (mut ch, dest) = s.accept_open_any().await;
+        assert_eq!(ch.expect_write_ack().await[0], SH_CLOSE_STDIN);
         ch.send_write(&shell_v2_encode(SH_EXIT, &[0])).await;
         ch.expect_ack().await;
         ch.expect_close().await;
@@ -72,7 +73,10 @@ async fn the_shell_path_hands_the_device_the_arguments_it_was_given() {
     .await;
 
     let mut rx = [0u8; 4096];
-    cmd::exec(&mut conn, ARGS, &mut rx).await.unwrap();
+    let exec = cmd::exec(&mut conn, ARGS, &mut rx);
+    rt::within("the device waiting for stdin to close", exec)
+        .await
+        .unwrap();
     let dest = rt::join(device).await;
 
     let dest = core::str::from_utf8(&dest).unwrap();

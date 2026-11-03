@@ -20,7 +20,10 @@ use fake_device::{
 
 #[path = "common/common.rs"]
 mod common;
-use common::{expect_missing_feature, handshake, poll_once, shell_v2_encode, SH_EXIT, SH_STDOUT};
+use common::{
+    expect_missing_feature, handshake, poll_once, shell_v2_encode, SH_CLOSE_STDIN, SH_EXIT,
+    SH_STDOUT,
+};
 
 // ---------------------------------------------------------------------------
 // Tests: connection handshake
@@ -470,6 +473,9 @@ async fn cmd_exec_falls_back_to_shell_v2_when_abb_exec_missing() {
         let mut ch = s
             .accept_open(b"shell,v2,raw:cmd package list packages\0")
             .await;
+        // As shell::v2::exec does: a command that reads stdin must not
+        // wait on it forever.
+        assert_eq!(ch.expect_write_ack().await[0], SH_CLOSE_STDIN);
 
         let mut frames = Vec::new();
         frames.extend_from_slice(&shell_v2_encode(SH_STDOUT, b"package:a\n"));
@@ -481,7 +487,8 @@ async fn cmd_exec_falls_back_to_shell_v2_when_abb_exec_missing() {
     .await;
 
     let mut rx = [0u8; 1024];
-    let output = cmd::exec(&mut conn, &["package", "list", "packages"], &mut rx)
+    let exec = cmd::exec(&mut conn, &["package", "list", "packages"], &mut rx);
+    let output = rt::within("the device waiting for stdin to close", exec)
         .await
         .unwrap();
     assert_eq!(output, b"package:a\n");
@@ -652,6 +659,32 @@ async fn abb_open_exec_gated_on_abb_exec() {
         abb::open_exec(&mut conn, &["package", "list", "packages"]).await,
         Feature::AbbExec,
     );
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
+async fn cmd_exec_without_abb_exec_gated_on_shell_v2() {
+    let (mut conn, device) = handshake(&["cmd"], &[]).await;
+    let mut rx = [0u8; 1024];
+
+    // The device never answers an OPEN: one sent anyway hangs.
+    let exec = cmd::exec(&mut conn, &["package", "list", "packages"], &mut rx);
+    expect_missing_feature(rt::within("cmd::exec", exec).await, Feature::ShellV2);
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
+async fn cmd_open_without_abb_gated_on_shell_v2() {
+    let (mut conn, device) = handshake(&["cmd"], &[]).await;
+    let mut rx = [0u8; 1024];
+
+    // The device never answers an OPEN: one sent anyway hangs.
+    let open = cmd::open(&mut conn, &["activity", "monitor"], &mut rx);
+    expect_missing_feature(rt::within("cmd::open", open).await, Feature::ShellV2);
 
     rt::join(device).await;
 }

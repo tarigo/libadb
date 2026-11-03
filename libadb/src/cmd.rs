@@ -34,21 +34,21 @@
 use alloc::vec::Vec;
 
 use crate::abb;
-use crate::base::destination::{self, DestinationError};
 use crate::base::protocol::features::Feature;
 use crate::base::session::Session;
 use crate::error::Error;
-use crate::shell::v2::Shell;
+use crate::shell::v2::{self as shell_v2, Shell};
 
-fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {
-    destination::write_destination(buf, &[b"shell,v2,raw:cmd"], args)
-}
+/// What the shell fallback runs `args` with.
+const PROGRAM: &[u8] = b"cmd";
 
 /// Run a one-shot `cmd` command and collect all output.
 ///
 /// Uses `abb_exec` when the device advertises it (fastest path, raw
-/// bytes); otherwise falls back to `shell,v2,raw:cmd …` and collects
-/// stdout via shell_v2.
+/// bytes); otherwise falls back to `shell,v2,raw:cmd …`, closes its
+/// stdin, as [`shell::v2::exec`](crate::shell::v2::exec) does, and
+/// collects stdout via shell_v2. A device that lists neither
+/// `abb_exec` nor `shell_v2` fails with [`Error::MissingFeature`].
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// For example, `cmd package list packages` is
@@ -67,18 +67,18 @@ pub async fn exec<S: Session>(
         return abb::exec(session, args, rx).await;
     }
 
-    let dest_len = write_shell_destination(rx, args)?;
-    let channel = session.open(&rx[..dest_len]).await?;
-    let shell = Shell::new(channel, rx);
-    let output = shell.collect().await?;
-    Ok(output.stdout)
+    let channel = shell_v2::open_argv(session, PROGRAM, args, rx).await?;
+    let mut shell = Shell::new(channel, rx);
+    shell.close_stdin().await?;
+    Ok(shell.collect().await?.stdout)
 }
 
 /// Open a streaming `cmd` session.
 ///
 /// Uses `abb` when the device advertises it; otherwise falls back to
 /// `shell,v2,raw:cmd …`.  Both paths return a [`Shell`] handle for
-/// reading frames.
+/// reading frames. A device that lists neither `abb` nor `shell_v2`
+/// fails with [`Error::MissingFeature`].
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell,
 /// one element per argument — see [`exec`] on how they are passed.
@@ -93,14 +93,19 @@ pub async fn open<'a, 'b, S: Session>(
         return abb::open(session, args, rx).await;
     }
 
-    let dest_len = write_shell_destination(rx, args)?;
-    let channel = session.open(&rx[..dest_len]).await?;
+    let channel = shell_v2::open_argv(session, PROGRAM, args, rx).await?;
     Ok(Shell::new(channel, rx))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::destination::DestinationError;
+
+    /// The destination the shell fallback opens for `args`.
+    fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {
+        shell_v2::write_argv_destination(buf, PROGRAM, args)
+    }
 
     #[test]
     fn shell_destination_multiple_args() {
