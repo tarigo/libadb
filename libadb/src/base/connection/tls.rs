@@ -117,7 +117,10 @@ where
 
         // The host does not repeat its CNXN. The device sends one from
         // inside the session, and that is the first thing to arrive.
-        let pkt = self.recv().await.map_err(|e| self.verdict_on(e))?;
+        let pkt = self
+            .recv()
+            .await
+            .map_err(|e| self.classify_before_cnxn(e))?;
 
         match (pkt.command, AuthKind::try_from(pkt.arg0)) {
             (Command::Connect, _) => Ok(pkt),
@@ -128,7 +131,7 @@ where
                 let verdict = self
                     .do_auth(pkt.data)
                     .await
-                    .map_err(|e| self.verdict_on(e))?;
+                    .map_err(|e| self.classify_before_cnxn(e))?;
                 match verdict {
                     Verdict::Connected(cnxn) => Ok(cnxn),
                     // Inside the session already, where STLS is out of turn.
@@ -142,7 +145,7 @@ where
     }
 
     /// Turn a transport failure into the reason a caller can act on.
-    fn verdict(error: <T as ErrorType>::Error) -> Error<<T as ErrorType>::Error> {
+    fn classify_tls_error(error: <T as ErrorType>::Error) -> Error<<T as ErrorType>::Error> {
         if T::is_key_rejected(&error) {
             log::debug!("device closed the TLS session over our key: {error:?}");
             AuthError::TlsKeyNotTrusted.into()
@@ -154,7 +157,10 @@ where
     /// The same judgement, for a failure met inside the session before
     /// the device's CNXN, with the receive buffer holding whatever of a
     /// packet had arrived.
-    fn verdict_on(&self, error: Error<<T as ErrorType>::Error>) -> Error<<T as ErrorType>::Error> {
+    fn classify_before_cnxn(
+        &self,
+        error: Error<<T as ErrorType>::Error>,
+    ) -> Error<<T as ErrorType>::Error> {
         match error {
             // Not a byte of a CNXN. A device that closes over our key looks
             // like this, and so does one that took the key and went away.
@@ -164,7 +170,7 @@ where
                 log::debug!("device closed the TLS session before its CNXN");
                 AuthError::TlsClosedBeforeConnect.into()
             }
-            Error::Io(e) => Self::verdict(e),
+            Error::Io(e) => Self::classify_tls_error(e),
             other => other,
         }
     }
