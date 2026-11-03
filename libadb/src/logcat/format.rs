@@ -72,7 +72,8 @@ impl fmt::Display for Priority {
 /// Matches the `log_id` values in AOSP
 /// (`system/logging/liblog/include/android/log.h`).
 ///
-/// `u32::from` gives back the number.
+/// `LogId::from` turns a buffer number into its id, and `u32::from`
+/// gives the number back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LogId {
@@ -89,9 +90,9 @@ pub enum LogId {
     Unknown(u32),
 }
 
-impl LogId {
-    fn from_u32(v: u32) -> Self {
-        match v {
+impl From<u32> for LogId {
+    fn from(number: u32) -> Self {
+        match number {
             0 => Self::Main,
             1 => Self::Radio,
             2 => Self::Events,
@@ -284,7 +285,7 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
 
     let payload = &buf[hdr_size..total];
 
-    let log_id = LogId::from_u32(lid);
+    let log_id = LogId::from(lid);
 
     let (priority, tag, message) = if payload.is_empty() {
         (Priority::Unknown, Vec::new(), Vec::new())

@@ -225,11 +225,26 @@ fn log_id_display() {
 }
 
 #[test]
-fn log_id_converts_back_to_its_number() {
-    assert_eq!(u32::from(LogId::Main), 0);
-    assert_eq!(u32::from(LogId::Crash), 4);
-    assert_eq!(u32::from(LogId::Kernel), 7);
-    assert_eq!(u32::from(LogId::Unknown(9)), 9);
+fn log_id_numbers_round_trip() {
+    let known = [
+        (LogId::Main, 0),
+        (LogId::Radio, 1),
+        (LogId::Events, 2),
+        (LogId::System, 3),
+        (LogId::Crash, 4),
+        (LogId::Stats, 5),
+        (LogId::Security, 6),
+        (LogId::Kernel, 7),
+    ];
+    for (id, number) in known {
+        assert_eq!(LogId::from(number), id, "{number}");
+        assert_eq!(u32::from(id), number, "{id}");
+    }
+    for number in [8, u32::MAX] {
+        let id = LogId::from(number);
+        assert!(matches!(id, LogId::Unknown(_)), "{number}: {id:?}");
+        assert_eq!(u32::from(id), number);
+    }
 }
 
 #[test]
