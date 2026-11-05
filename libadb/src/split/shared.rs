@@ -538,14 +538,17 @@ impl<'a, WH> CreditGuard<'a, WH> {
 
 impl<WH> Drop for CreditGuard<'_, WH> {
     fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
         {
             let mut chs = self.shared.lock_channels();
             if let Some(slot) = chs.get_mut(self.ch) {
-                slot.refund(self.n);
+                slot.send_queue().finish();
+                if !self.committed {
+                    slot.refund(self.n);
+                }
             }
+        }
+        if self.committed {
+            return;
         }
         if let Some(signal) = self.shared.signals.get(self.ch.slot) {
             signal.wake();
