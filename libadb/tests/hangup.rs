@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use libadb::channel::ChannelId;
+use libadb::protocol::command::{CMD_OPEN, CMD_WRTE};
 use libadb::{Connection, Error};
 
 #[path = "rt/rt.rs"]
@@ -172,7 +173,12 @@ async fn read_through_the_reader(ack: Ack, goes: Goes) {
     );
     match goes {
         Goes::ClosingTheChannel => assert!(matches!(err, Error::ChannelClosed), "got {err:?}"),
-        Goes::Abruptly => assert!(matches!(err, Error::UnexpectedEof), "got {err:?}"),
+        Goes::Abruptly => {
+            assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+            let (rest, err) = read_until_it_fails!(reader, ch, WHOLE);
+            assert!(rest.is_empty());
+            assert!(matches!(err, Error::Disconnected), "got {err:?}");
+        }
     }
 }
 
@@ -223,6 +229,89 @@ macro_rules! read_through_the_connection {
             Goes::Abruptly => assert!(matches!(err, Error::UnexpectedEof), "got {err:?}"),
         }
     }};
+}
+
+/// How the device leaves the socket.
+#[derive(Clone, Copy)]
+enum HangsUp {
+    WithFin,
+    #[cfg(unix)]
+    WithReset,
+}
+
+/// What the device gives the calls to reach their waits. Nothing fails
+/// if they are later than that; the test just proves less on that run.
+const SETTLE_MS: u64 = 50;
+
+/// On a reader-driven connection the read is what sees the socket go.
+/// Everything parked on the `Writer` depends on it to hear of that: a
+/// write the device took one packet of and closed the socket on, as much
+/// as an open, an accept and a read of another channel.
+async fn every_waiter_ends(hangs_up: HangsUp) {
+    let (conn, device) = session(
+        FakeDevice::new(),
+        b"host::features=",
+        move |mut s| async move {
+            s.accept_open(b"a:\0").await;
+            s.accept_open(b"b:\0").await;
+            s.expect(CMD_WRTE).await;
+            s.expect(CMD_OPEN).await;
+            rt::sleep_ms(SETTLE_MS).await;
+            match hangs_up {
+                HangsUp::WithFin => drop(s),
+                #[cfg(unix)]
+                HangsUp::WithReset => s.reset(),
+            }
+        },
+    )
+    .await;
+    let (mut reader, writer) = conn.split().unwrap();
+    let a = reader.open_channel(b"a:\0").await.unwrap();
+    let b = reader.open_channel(b"b:\0").await.unwrap();
+    writer.write_channel(a, b"one").await.unwrap();
+
+    let write = writer.clone();
+    let write = rt::spawn(async move { write.write_channel(a, b"two").await });
+    let open = writer.clone();
+    let open = rt::spawn(async move { open.open_channel(b"svc:\0").await.map(drop) });
+    let read = writer.clone();
+    let read = rt::spawn(async move { read.read_channel(b, &mut [0u8; 8]).await.map(drop) });
+    let listener = writer.listen_incoming();
+    let accept = rt::spawn(async move { listener.accept().await.map(drop) });
+
+    let mut buf = [0u8; 8];
+    let err = rt::within("the read", reader.read_channel(a, &mut buf))
+        .await
+        .unwrap_err();
+    match hangs_up {
+        HangsUp::WithFin => assert!(matches!(err, Error::UnexpectedEof), "got {err:?}"),
+        #[cfg(unix)]
+        HangsUp::WithReset => assert!(matches!(err, Error::Io(_)), "got {err:?}"),
+    }
+
+    for (what, waiter) in [
+        ("write", write),
+        ("open", open),
+        ("read", read),
+        ("accept", accept),
+    ] {
+        let err = rt::within(what, rt::join(waiter)).await.unwrap_err();
+        assert!(matches!(err, Error::Disconnected), "{what}: got {err:?}");
+    }
+    rt::join(device).await;
+}
+
+rt_test! {
+async fn a_hangup_ends_every_waiter() {
+    every_waiter_ends(HangsUp::WithFin).await;
+}
+}
+
+#[cfg(unix)]
+rt_test! {
+async fn a_reset_ends_every_waiter() {
+    every_waiter_ends(HangsUp::WithReset).await;
+}
 }
 
 // A write that times out on a socket the device has stopped reading

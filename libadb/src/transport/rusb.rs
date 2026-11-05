@@ -250,7 +250,10 @@ impl core::error::Error for UsbError {
 
 impl embedded_io::Error for UsbError {
     fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
+        match self {
+            Self::Transfer(rusb::Error::NoDevice) => embedded_io::ErrorKind::NotConnected,
+            Self::Transfer(_) | Self::BlockingTaskFailed => embedded_io::ErrorKind::Other,
+        }
     }
 }
 
@@ -541,6 +544,21 @@ mod tests {
             alloc::format!("{}", rusb::Error::Pipe)
         );
         assert!(UsbError::BlockingTaskFailed.source().is_none());
+    }
+
+    /// What the connection goes by to tell a device gone from any other
+    /// failed transfer.
+    #[test]
+    fn a_device_gone_is_not_connected() {
+        use crate::transport::rusb::UsbError;
+        use embedded_io::{Error as _, ErrorKind};
+
+        let kind = |e| UsbError::Transfer(e).kind();
+        assert_eq!(kind(rusb::Error::NoDevice), ErrorKind::NotConnected);
+        for other in [rusb::Error::Io, rusb::Error::Pipe, rusb::Error::Timeout] {
+            assert_eq!(kind(other), ErrorKind::Other, "{other:?}");
+        }
+        assert_eq!(UsbError::BlockingTaskFailed.kind(), ErrorKind::Other);
     }
 
     /// An ADB setting without both bulk endpoints is passed over, and a

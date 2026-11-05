@@ -254,7 +254,9 @@ pub unsafe extern "C" fn adb_shell_free(sh: *mut adb_shell_t) {
 /// delivered in multiple consecutive calls with the same id — concatenate
 /// the chunks to reconstruct the payload.
 ///
-/// Channel closure is reported as [`AdbStatus::ChannelClosed`].
+/// Channel closure is reported as [`AdbStatus::ChannelClosed`]. As with
+/// [`adb_read_channel`](crate::adb_read_channel), everything that arrived
+/// comes back before any error does, however the connection failed.
 ///
 /// # Safety
 /// `sh` must be a valid handle. `out_id` must point to a writable `u8`.

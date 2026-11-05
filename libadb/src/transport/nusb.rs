@@ -165,7 +165,12 @@ impl core::error::Error for UsbError {
 
 impl embedded_io::Error for UsbError {
     fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
+        match self {
+            Self::Transfer(nusb::transfer::TransferError::Disconnected) => {
+                embedded_io::ErrorKind::NotConnected
+            }
+            Self::Transfer(_) => embedded_io::ErrorKind::Other,
+        }
     }
 }
 
@@ -289,6 +294,25 @@ mod tests {
             alloc::format!("{source}"),
             alloc::format!("{}", nusb::transfer::TransferError::Cancelled)
         );
+    }
+
+    /// What the connection goes by to tell a device gone from any other
+    /// failed transfer.
+    #[test]
+    fn a_device_gone_is_not_connected() {
+        use embedded_io::{Error as _, ErrorKind};
+        use nusb::transfer::TransferError;
+
+        let kind = |e| UsbError::Transfer(e).kind();
+        assert_eq!(kind(TransferError::Disconnected), ErrorKind::NotConnected);
+        for other in [
+            TransferError::Cancelled,
+            TransferError::Stall,
+            TransferError::Fault,
+            TransferError::Unknown,
+        ] {
+            assert_eq!(kind(other), ErrorKind::Other, "{other:?}");
+        }
     }
 
     #[test]

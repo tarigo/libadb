@@ -29,12 +29,15 @@
 //!   Channels the device opens (`adb reverse`) are taken through an
 //!   [`IncomingListener`] from [`Writer::listen_incoming`].
 //!
-//! Once the `Reader` is gone — `run` returned or the `Reader` was
-//! dropped — every `Writer` call that waits on the device fails with
+//! Once the connection has ended — `run` returned, the `Reader` was
+//! dropped, or a receive failed for good on a reader-driven connection
+//! — every `Writer` call that waits on the device fails with
 //! [`Error::Disconnected`] instead of waiting for packets nobody reads:
 //! opening a channel, reading one, waiting for send credit, accepting
 //! one the device opened. Calls that need no answer — a write the
-//! credit already covers, a close — still reach the transport.
+//! credit already covers, a close — still reach the transport. A read
+//! timeout is no such failure: it is the caller's to handle, and leaves
+//! the connection and everyone waiting on it as they were.
 //!
 //! What arrived stays readable however the connection fails: a read
 //! hands over what its channel has buffered first, and only then fails

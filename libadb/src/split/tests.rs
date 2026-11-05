@@ -43,6 +43,7 @@ fn staged_with_followup(
     .unwrap();
     let (mut reader, _writer) = conn.split().unwrap();
     let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+    seen.parks_when_drained();
 
     seen.feed(&Packet::new(Command::Open, 80, 0, b"tcp:80\0".to_vec()));
     let pump = |reader: &mut Reader<SharedMock, SharedMock>| {
@@ -50,11 +51,11 @@ fn staged_with_followup(
         let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
         let mut cx = Context::from_waker(Waker::noop());
         // Everything fed so far is dispatched on the way; the
-        // drained mock then reports EOF, which is how the pump
-        // knows the read went all the way through.
+        // drained mock then parks the read, which is how the pump
+        // knows it went all the way through.
         match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(Err(Error::UnexpectedEof)) => {}
-            other => panic!("expected the drained-transport EOF, got {other:?}"),
+            Poll::Pending => {}
+            other => panic!("expected the read to wait for more, got {other:?}"),
         }
     };
     pump(&mut reader);
@@ -151,14 +152,15 @@ fn held_holders_spend_the_open_storm_budget() {
     .unwrap();
     let (mut reader, _writer) = conn.split().unwrap();
     let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+    seen.parks_when_drained();
 
     let pump = |reader: &mut Reader<SharedMock, SharedMock>| {
         let mut buf = [0u8; 16];
         let mut fut = core::pin::pin!(reader.read_channel(ch, &mut buf));
         let mut cx = Context::from_waker(Waker::noop());
         match fut.as_mut().poll(&mut cx) {
-            Poll::Ready(Err(Error::UnexpectedEof)) => {}
-            other => panic!("expected the drained-transport EOF, got {other:?}"),
+            Poll::Pending => {}
+            other => panic!("expected the read to wait for more, got {other:?}"),
         }
     };
 
@@ -1525,6 +1527,7 @@ mod send_queue_tests {
         // again behind the second; the grant that follows covers both.
         let (mut reader, writer, ch, seen) =
             split_one_channel_delayed_ack(5, &[okay_with_budget(1, 100)]);
+        seen.parks_when_drained();
 
         let mut first = Box::pin(writer.write_channel(ch, b"aaaaaaaaaa"));
         let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
@@ -1657,6 +1660,291 @@ mod incoming_tests {
         let (cmd, local, remote, _) = seen.sent().last().unwrap().clone();
         assert_eq!(cmd, Command::Close);
         assert_eq!((local, remote), (0, 88));
+    }
+}
+
+/// A reader-driven connection ends in a receive some call happens to be
+/// making. That call gets the failure, and everyone else parked on the
+/// connection has to hear of it too, or they wait for ever.
+mod end_tests {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+    use embedded_io::ErrorKind;
+
+    use crate::base::channel::ChannelId;
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth, SharedMock};
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+    use crate::error::{Error, ProtocolError};
+
+    use super::{IncomingListener, Reader, Writer};
+
+    type Waiter<'a> = Pin<Box<dyn Future<Output = (&'static str, Option<Error<MockError>>)> + 'a>>;
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// Two channels without delayed ACK and a read of `a` to go, which
+    /// waits for a packet: the first has one WRTE out, so the next waits
+    /// for its OKAY.
+    #[allow(clippy::type_complexity)]
+    fn two_channels() -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        ChannelId,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1)).feed(&okay(2));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let a = now(reader.open_channel(b"shell:a\0")).unwrap();
+        let b = now(reader.open_channel(b"shell:b\0")).unwrap();
+        now(writer.write_channel(a, b"one")).unwrap();
+        seen.parks_when_drained();
+        (reader, writer, a, b, seen)
+    }
+
+    /// One of everything a `Writer` waits for the device with, each
+    /// polled until it does.
+    fn parked<'a>(
+        writer: &'a Writer<SharedMock>,
+        a: ChannelId,
+        b: ChannelId,
+        listener: &'a IncomingListener<SharedMock>,
+        buf: &'a mut [u8],
+    ) -> Vec<Waiter<'a>> {
+        let mut waiters: Vec<Waiter<'a>> = alloc::vec![
+            Box::pin(async move { ("write", writer.write_channel(a, b"two").await.err()) }),
+            Box::pin(async move { ("open", writer.open_channel(b"svc:\0").await.err()) }),
+            Box::pin(async move { ("accept", listener.accept().await.err()) }),
+            Box::pin(async move { ("read", writer.read_channel(b, buf).await.err()) }),
+        ];
+        for waiter in &mut waiters {
+            assert!(poll_once(waiter.as_mut()).is_pending());
+        }
+        waiters
+    }
+
+    fn assert_all_disconnected(waiters: &mut [Waiter<'_>]) {
+        for waiter in waiters {
+            let Poll::Ready((what, err)) = poll_once(waiter.as_mut()) else {
+                panic!("a waiter is still parked on a connection that ended");
+            };
+            assert!(matches!(err, Some(Error::Disconnected)), "{what}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn the_end_of_the_stream_ends_every_waiter() {
+        let (mut reader, writer, a, b, seen) = two_channels();
+        let listener = writer.listen_incoming();
+        let mut parked_buf = [0u8; 8];
+        let mut waiters = parked(&writer, a, b, &listener, &mut parked_buf);
+
+        seen.hang_up();
+        let mut buf = [0u8; 8];
+        let err = now(reader.read_channel(a, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+        assert_all_disconnected(&mut waiters);
+    }
+
+    /// The kinds a dropped connection comes back as, which `ErrorKind`
+    /// can tell from a timeout.
+    #[test]
+    fn a_connection_gone_ends_every_waiter() {
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::NotConnected,
+        ] {
+            let (mut reader, writer, a, b, seen) = two_channels();
+            let listener = writer.listen_incoming();
+            let mut parked_buf = [0u8; 8];
+            let mut waiters = parked(&writer, a, b, &listener, &mut parked_buf);
+
+            seen.fail_next_read(kind);
+            let mut buf = [0u8; 8];
+            let err = now(reader.dispatch_one()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            let _ = &mut buf;
+            assert_all_disconnected(&mut waiters);
+        }
+    }
+
+    /// Past a header that does not parse, the stream has lost its place
+    /// for good: every later read would find the same bytes.
+    #[test]
+    fn a_broken_header_ends_every_waiter() {
+        let (mut reader, writer, a, b, seen) = two_channels();
+        let listener = writer.listen_incoming();
+        let mut parked_buf = [0u8; 8];
+        let mut waiters = parked(&writer, a, b, &listener, &mut parked_buf);
+
+        seen.feed_bytes(&[0xFF; 24]);
+        let err = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(err, Error::Protocol(_)), "got {err:?}");
+        assert_all_disconnected(&mut waiters);
+    }
+
+    /// What every waiter needs, one packet each.
+    fn feed_every_answer(seen: &SharedMock) {
+        seen.feed(&okay(1));
+        seen.feed(&Packet::new(Command::Ready, 43, 3, Vec::new()));
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        seen.feed(&wrte(2, b"hi"));
+    }
+
+    fn assert_all_answered(
+        reader: &mut Reader<SharedMock, SharedMock>,
+        waiters: &mut [Waiter<'_>],
+    ) {
+        for _ in 0..waiters.len() {
+            now(reader.dispatch_one()).unwrap();
+        }
+        for waiter in waiters {
+            let Poll::Ready((what, err)) = poll_once(waiter.as_mut()) else {
+                panic!("a waiter did not get its answer");
+            };
+            assert!(err.is_none(), "{what}: {err:?}");
+        }
+    }
+
+    /// A read timeout looks like any other failure to everything but the
+    /// caller, who set it: on unix `SO_RCVTIMEO` comes back as
+    /// `WouldBlock`, which is `ErrorKind::Other` here. It says nothing
+    /// about the connection, so nothing ends and nobody is told.
+    #[test]
+    fn a_timeout_ends_nothing() {
+        for kind in [
+            ErrorKind::Other,
+            ErrorKind::TimedOut,
+            ErrorKind::Interrupted,
+        ] {
+            let (mut reader, writer, a, b, seen) = two_channels();
+            let listener = writer.listen_incoming();
+            let mut parked_buf = [0u8; 8];
+            let mut waiters = parked(&writer, a, b, &listener, &mut parked_buf);
+
+            seen.fail_next_read(kind);
+            let mut buf = [0u8; 8];
+            let err = now(reader.read_channel(a, &mut buf)).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            for waiter in &mut waiters {
+                assert!(poll_once(waiter.as_mut()).is_pending(), "{kind:?}");
+            }
+
+            feed_every_answer(&seen);
+            assert_all_answered(&mut reader, &mut waiters);
+        }
+    }
+
+    /// A packet with a wrong sum went whole, so the stream still has its
+    /// place. The packet is lost, as it always was, and the next is
+    /// read.
+    #[test]
+    fn a_wrong_checksum_ends_nothing() {
+        let (mut reader, writer, a, b, seen) = two_channels();
+        let listener = writer.listen_incoming();
+        let mut parked_buf = [0u8; 8];
+        let mut waiters = parked(&writer, a, b, &listener, &mut parked_buf);
+
+        let mut packet = Vec::new();
+        for word in [
+            u32::from(Command::Write),
+            42,
+            1,
+            1,
+            0xBAD,
+            !u32::from(Command::Write),
+        ] {
+            packet.extend_from_slice(&word.to_le_bytes());
+        }
+        packet.push(b'x');
+        seen.feed_bytes(&packet);
+
+        let err = now(reader.dispatch_one()).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::InvalidChecksum)),
+            "got {err:?}"
+        );
+        feed_every_answer(&seen);
+        assert_all_answered(&mut reader, &mut waiters);
+    }
+
+    /// What arrived goes first, on either half, and only then the end.
+    #[test]
+    fn what_arrived_is_read_before_the_end_comes_up() {
+        let (mut reader, writer, a, b, seen) = two_channels();
+        seen.feed(&wrte(2, b"for-b"));
+        seen.feed(&wrte(1, b"for-a"));
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        seen.hang_up();
+        assert!(matches!(
+            now(reader.dispatch_one()),
+            Err(Error::UnexpectedEof)
+        ));
+
+        let mut buf = [0u8; 8];
+        let n = now(reader.read_channel(a, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"for-a");
+        let n = now(writer.read_channel(b, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"for-b");
+
+        for ch in [a, b] {
+            let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+            assert!(matches!(err, Error::Disconnected), "reader: {err:?}");
+            let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
+            assert!(matches!(err, Error::Disconnected), "writer: {err:?}");
+        }
+    }
+
+    /// Once the end has come up nothing goes back to the transport for
+    /// more, and no call writes a packet that could only wait for an
+    /// answer.
+    #[test]
+    fn calls_after_the_end_fail_at_once() {
+        let (mut reader, writer, _a, _b, seen) = two_channels();
+        seen.hang_up();
+        assert!(matches!(
+            now(reader.dispatch_one()),
+            Err(Error::UnexpectedEof)
+        ));
+        let written = seen.sent().len();
+
+        seen.feed(&okay(1));
+        assert!(matches!(
+            now(reader.dispatch_one()),
+            Err(Error::Disconnected)
+        ));
+        assert!(matches!(
+            now(reader.open_channel(b"svc:\0")),
+            Err(Error::Disconnected)
+        ));
+        assert!(matches!(
+            now(reader.accept_incoming()).err(),
+            Some(Error::Disconnected)
+        ));
+        assert!(matches!(
+            now(writer.open_channel(b"svc:\0")),
+            Err(Error::Disconnected)
+        ));
+        assert_eq!(seen.sent().len(), written);
     }
 }
 

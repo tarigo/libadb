@@ -43,6 +43,13 @@ pub(crate) struct Mock {
     write_failure: Option<ErrorKind>,
     /// The device's end a CLSE's header stalls on, if any does.
     stall_close_to: Option<u32>,
+    /// What the next read fails with, ahead of anything queued.
+    read_failure: Option<ErrorKind>,
+    /// Have a read with nothing to hand back wait for more, rather than
+    /// report the end of the stream.
+    parks_when_drained: bool,
+    /// The read waiting for more, to wake once there is some.
+    parked_read: Option<Waker>,
     /// Reads that report `Pending` before any data comes back.
     slow_reads: usize,
     /// Writes that report `Pending` before they go through.
@@ -61,6 +68,9 @@ impl Mock {
             stall_write: None,
             write_failure: None,
             stall_close_to: None,
+            read_failure: None,
+            parks_when_drained: false,
+            parked_read: None,
             slow_reads: 0,
             #[cfg(feature = "split")]
             slow_writes: 0,
@@ -110,7 +120,47 @@ impl Mock {
         let mut buf = BytesMut::new();
         pkt.encode(&mut buf, Checksum::Compute).unwrap();
         self.inbound.extend(buf.iter().copied());
+        self.wake_parked_read();
         self
+    }
+
+    /// Queue `bytes` as they are, for what [`feed`](Self::feed) would not
+    /// encode.
+    #[cfg(feature = "split")]
+    pub(crate) fn feed_bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.inbound.extend(bytes);
+        self.wake_parked_read();
+        self
+    }
+
+    /// Fail the next read with `kind`, ahead of anything queued.
+    #[cfg(feature = "split")]
+    pub(crate) fn fail_next_read(&mut self, kind: ErrorKind) -> &mut Self {
+        self.read_failure = Some(kind);
+        self.wake_parked_read();
+        self
+    }
+
+    /// Have a read with nothing to hand back wait for more, rather than
+    /// report the end of the stream.
+    #[cfg(feature = "split")]
+    pub(crate) fn parks_when_drained(&mut self) -> &mut Self {
+        self.parks_when_drained = true;
+        self
+    }
+
+    /// End the stream, for a read waiting for more.
+    #[cfg(feature = "split")]
+    pub(crate) fn hang_up(&mut self) -> &mut Self {
+        self.parks_when_drained = false;
+        self.wake_parked_read();
+        self
+    }
+
+    fn wake_parked_read(&mut self) {
+        if let Some(read) = self.parked_read.take() {
+            read.wake();
+        }
     }
 
     /// Park the next `n` reads once each before answering, so an
@@ -152,6 +202,17 @@ impl Mock {
         n
     }
 
+    fn poll_pull(&mut self, cx: &Context<'_>, buf: &mut [u8]) -> Poll<Result<usize, MockError>> {
+        if let Some(kind) = self.read_failure.take() {
+            return Poll::Ready(Err(MockError(kind)));
+        }
+        if self.inbound.is_empty() && self.parks_when_drained {
+            self.parked_read = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        Poll::Ready(Ok(self.pull(buf)))
+    }
+
     fn stalls_on(&self, buf: &[u8]) -> bool {
         let closes_to = |remote: u32| {
             let word =
@@ -178,7 +239,7 @@ impl embedded_io_async::Read for Mock {
             self.slow_reads -= 1;
             park_once().await;
         }
-        Ok(self.pull(buf))
+        core::future::poll_fn(|cx| self.poll_pull(cx, buf)).await
     }
 }
 
@@ -244,6 +305,28 @@ impl SharedMock {
         self.lock().fail_writes(kind);
     }
 
+    /// Queue `bytes` as they are, for what [`feed`](Self::feed) would not
+    /// encode.
+    pub(crate) fn feed_bytes(&self, bytes: &[u8]) {
+        self.lock().feed_bytes(bytes);
+    }
+
+    /// Fail the next read with `kind`, ahead of anything queued.
+    pub(crate) fn fail_next_read(&self, kind: ErrorKind) {
+        self.lock().fail_next_read(kind);
+    }
+
+    /// Have a read with nothing to hand back wait for more, rather than
+    /// report the end of the stream.
+    pub(crate) fn parks_when_drained(&self) {
+        self.lock().parks_when_drained();
+    }
+
+    /// End the stream, for a read waiting for more.
+    pub(crate) fn hang_up(&self) {
+        self.lock().hang_up();
+    }
+
     /// Stall every write from now on.
     pub(crate) fn stall_writes(&self) {
         self.lock().stall_writes();
@@ -278,7 +361,7 @@ impl embedded_io::ErrorType for SharedMock {
 #[cfg(feature = "split")]
 impl embedded_io_async::Read for SharedMock {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, MockError> {
-        Ok(self.lock().pull(buf))
+        core::future::poll_fn(|cx| self.lock().poll_pull(cx, buf)).await
     }
 }
 

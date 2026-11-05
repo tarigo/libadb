@@ -70,7 +70,8 @@ pub(crate) struct Shared<WH> {
     /// by remote id — the only place a device cancellation can still
     /// reach them once they have left `incoming`.
     staged: Mutex<Vec<(RemoteId, Arc<AtomicBool>)>>,
-    /// Set once the [`Reader`] is gone: nothing will dispatch packets
+    /// Set once the connection ended, in a receive that cannot be taken
+    /// back or with the [`Reader`] gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
     stopped: AtomicBool,
     /// Live [`IncomingListener`]s. While there is one, [`Reader::run`]
@@ -415,7 +416,7 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Mark the connection unread and wake every waiter to see it.
+    /// Mark the connection ended and wake every waiter to see it.
     pub(super) fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.wake_all();
@@ -429,8 +430,8 @@ impl<WH> Shared<WH> {
     }
 
     /// Fail once waiting can no longer end well: a write abandoned
-    /// mid-packet desynchronized the connection, or the [`Reader`] is
-    /// gone and nothing will be dispatched any more.
+    /// mid-packet desynchronized the connection, or it ended and nothing
+    /// will be dispatched any more.
     pub(super) fn check_live<E>(&self) -> Result<(), Error<E>> {
         self.desync.check()?;
         if self.stopped.load(Ordering::Acquire) {

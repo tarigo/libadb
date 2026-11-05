@@ -68,8 +68,13 @@ typedef enum {
      * match, or the device ended the exchange itself (dialog dismissed,
      * attempts used up); adb_last_error() says which. */
     ADB_ERR_PAIRING         = 12,
-    /* The connection's read side is gone, so nothing more will arrive
-     * from the device; open a new connection. */
+    /* The connection has ended, so nothing more will arrive from the
+     * device: it or the transport went away, or what came in does not
+     * parse. The call that saw that happen returned what it saw, which
+     * is ADB_ERR_IO or ADB_ERR_PROTOCOL. This is what the calls that
+     * wait on the device get from then on, reads once they have handed
+     * over what had already arrived. A read timeout ends nothing, and
+     * never leads here. Open a new connection. */
     ADB_ERR_DISCONNECTED    = 13,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
@@ -396,6 +401,13 @@ adb_status_t adb_open_channel(
  * a correct loop. buf_len == 0 is rejected with ADB_ERR_INVALID_ARG
  * rather than answering with a zero such a loop would spin on, and a
  * zero-length WRTE from the device is read past for the same reason.
+ *
+ * Everything that arrived comes back before any error does, however
+ * the connection failed: a device that hangs up leaves what it sent
+ * readable. The call that meets the end of the connection returns what
+ * it met, as ADB_ERR_IO or ADB_ERR_PROTOCOL, and the next call
+ * ADB_ERR_DISCONNECTED; a read timeout is ADB_ERR_IO too, and the next
+ * call simply reads on.
  */
 adb_status_t adb_read_channel(
     adb_connection_t *conn,
@@ -571,7 +583,9 @@ void adb_shell_free(adb_shell_t *sh);
  * delivered across multiple calls with the same id; concatenate the
  * chunks to reconstruct the payload.
  *
- * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED.
+ * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED. As with
+ * adb_read_channel(), everything that arrived comes back before any
+ * error does, however the connection failed.
  */
 adb_status_t adb_shell_read_frame(
     adb_shell_t *sh,

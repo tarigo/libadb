@@ -76,6 +76,13 @@ pub unsafe extern "C" fn adb_open_channel(
 /// zero-length WRTE from the device — legal, and delivering nothing —
 /// is read past instead of surfacing as that same zero.
 ///
+/// Everything that arrived comes back before any error does, however
+/// the connection failed: a device that hangs up leaves what it sent
+/// readable. The call that meets the end of the connection returns what
+/// it met, as [`AdbStatus::Io`] or [`AdbStatus::Protocol`], and the next
+/// call [`AdbStatus::Disconnected`]; a read timeout is
+/// [`AdbStatus::Io`] too, and the next call simply reads on.
+///
 /// # Safety
 /// `conn` must be a valid handle. `buf` must be NULL or point to at
 /// least `buf_len` writable bytes. `out_read` must point to a

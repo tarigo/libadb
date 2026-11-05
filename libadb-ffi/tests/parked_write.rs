@@ -497,8 +497,9 @@ fn a_hangup_ends_a_parked_write() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// The read gets the error and takes it back to C. The write it left
-/// behind is not told; it finds out by reading for itself.
+/// The read gets the error and takes it back to C, and the write it
+/// left behind is told the connection ended, with the status that says
+/// so: this one saw nothing fail itself.
 #[test]
 fn a_hangup_that_ends_the_read_also_ends_the_write_behind_it() {
     let (running_tx, running) = mpsc::channel();
@@ -520,7 +521,7 @@ fn a_hangup_that_ends_the_read_also_ends_the_write_behind_it() {
     let statuses = within("two writes", move || {
         (write(conn, a, b"one"), write(conn, a, b"two"))
     });
-    assert_eq!(statuses, (adb::AdbStatus::Ok, adb::AdbStatus::Io));
+    assert_eq!(statuses, (adb::AdbStatus::Ok, adb::AdbStatus::Disconnected));
 
     let (status, _) = join("the read", reading);
     assert_eq!(status, adb::AdbStatus::Io);

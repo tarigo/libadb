@@ -20,7 +20,7 @@ use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::session::ServiceChannel;
 use crate::base::slot::ChannelFault;
-use crate::base::wire::{connection_gone, recv_pkt};
+use crate::base::wire::{connection_gone, ends_connection, recv_pkt};
 use crate::device_banner::DeviceBanner;
 use crate::error::Error;
 
@@ -120,7 +120,7 @@ where
         &mut self,
         destination: &[u8],
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
+        self.shared.check_live()?;
         let (ch, mut guard) = self.shared.send_open(destination).await?;
         self.await_open_ack(ch, &mut guard).await
     }
@@ -148,14 +148,23 @@ where
     /// owing is out. The device may be waiting for exactly that, so it
     /// cannot wait for a packet; and nothing coming in until it is out
     /// is what bounds the list.
+    ///
+    /// The call that sees the connection end gets the failure as it is.
+    /// Nobody else is in a position to see it, so everyone waiting is
+    /// told here.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
+        self.shared.check_live()?;
         self.shared.pay().await?;
-        recv_pkt(
+        let received = recv_pkt(
             &mut self.read_half,
             &mut self.recv_buf,
             self.shared.negotiated.config.max_payload(),
         )
-        .await
+        .await;
+        if received.as_ref().err().is_some_and(ends_connection) {
+            self.shared.stop();
+        }
+        received
     }
 
     async fn await_open_ack(
@@ -229,7 +238,7 @@ where
     /// any dropped read on such a transport, and is otherwise the way
     /// to shut the connection down.
     pub async fn run(mut self) -> Result<Infallible, Error<<RH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
+        self.shared.check_live()?;
         loop {
             // Before every receive, the first included, so nothing left
             // over — from before `run` or by the last packet — waits for
@@ -271,7 +280,7 @@ where
     /// [`accept_incoming`](Self::accept_incoming), with or without an
     /// [`IncomingListener`] alive.
     pub async fn dispatch_one(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
+        self.shared.check_live()?;
         self.drain_overflow().await?;
         let pkt = self.recv().await?;
         self.dispatch(pkt, OnFault::CloseChannel).await
@@ -353,7 +362,7 @@ where
     pub async fn accept_incoming(
         &mut self,
     ) -> Result<SplitIncoming<WH>, Error<<RH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
+        self.shared.check_live()?;
         self.shared.pay().await?;
         loop {
             if let Some(incoming) = self.shared.take_incoming() {

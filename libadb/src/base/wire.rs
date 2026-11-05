@@ -121,6 +121,23 @@ pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
     ))
 }
 
+/// Whether a failed receive means nothing more will come in, which is
+/// to say what is certain: the stream ended, the transport says the
+/// other end is gone, or what came in does not parse, which leaves the
+/// bytes in place for every later read to fail on.
+///
+/// Everything else stays recoverable, a read timeout above all. So does
+/// a wrong checksum, the one failure of a packet that has been taken off
+/// the stream, which still has its place.
+#[cfg(feature = "split")]
+pub(crate) fn ends_connection<E: embedded_io::Error>(e: &Error<E>) -> bool {
+    match e {
+        Error::UnexpectedEof => true,
+        Error::Protocol(e) => *e != ProtocolError::InvalidChecksum,
+        e => connection_gone(e),
+    }
+}
+
 /// Tracks whether a packet was left half-written.
 ///
 /// A packet goes out as a header write followed by a payload write. Drop

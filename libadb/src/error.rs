@@ -92,10 +92,18 @@ pub enum Error<E> {
     /// step with. The write fails with [`Error::Io`], and reads go on
     /// to what the device sent before it went.
     Desynchronized,
-    /// The read half of a split connection is gone: its `Reader::run`
-    /// ended or the `Reader` was dropped, so nothing more will arrive
-    /// from the device. Waiting on such a connection would never end;
-    /// open a new one.
+    /// A split connection has ended, so nothing more will arrive from
+    /// the device: its `Reader::run` ended, the `Reader` was dropped, or
+    /// a receive failed in a way that cannot be taken back. That is the
+    /// end of the stream, a transport reporting the connection reset or
+    /// aborted, a broken pipe or a device no longer connected, or a
+    /// header that does not parse.
+    ///
+    /// The call that saw the receive fail gets that failure as it is;
+    /// this is what every other call waiting on the device gets, once a
+    /// read has handed over what its channel has buffered. A read that
+    /// timed out says nothing about the connection and ends nothing.
+    /// Waiting on such a connection would never end; open a new one.
     Disconnected,
 }
 
@@ -293,7 +301,7 @@ impl<E: fmt::Display> fmt::Display for Error<E> {
                 )
             }
             Self::Desynchronized => f.write_str("connection desynchronized by an unfinished write"),
-            Self::Disconnected => f.write_str("connection no longer read"),
+            Self::Disconnected => f.write_str("connection ended"),
         }
     }
 }

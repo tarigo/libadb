@@ -389,6 +389,28 @@ impl FakeSession {
         }
     }
 
+    /// Hang up with a reset rather than a FIN, as a device that vanishes
+    /// does.
+    #[cfg(unix)]
+    pub fn reset(self) {
+        use std::os::fd::AsRawFd;
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        // SAFETY: the socket is open, and `linger` is of the size given.
+        let status = unsafe {
+            libc::setsockopt(
+                self.stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of::<libc::linger>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(status, 0, "SO_LINGER");
+    }
+
     /// Escape hatch: put bytes on the wire verbatim, bypassing header
     /// construction — for hand-rolled or deliberately malformed packets.
     pub async fn send_raw_bytes(&mut self, bytes: &[u8]) {

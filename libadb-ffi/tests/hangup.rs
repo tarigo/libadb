@@ -88,7 +88,14 @@ fn read_until_it_fails(conn: Conn, id: u64) -> (Vec<u8>, adb::AdbStatus) {
     }
 }
 
-fn all_of_it_comes_back(features: &'static str, goes: Goes, ended_with: adb::AdbStatus) {
+/// `ended_with` is what the call that met the end reports, and `then`
+/// what the next one does.
+fn all_of_it_comes_back(
+    features: &'static str,
+    goes: Goes,
+    ended_with: adb::AdbStatus,
+    then: adb::AdbStatus,
+) {
     let (conn, id) = channel_on_a_device_gone(features, goes);
     let (got, status) = read_until_it_fails(conn, id);
     assert!(
@@ -97,6 +104,9 @@ fn all_of_it_comes_back(features: &'static str, goes: Goes, ended_with: adb::Adb
         got.len()
     );
     assert_eq!(status, ended_with);
+    let (got, status) = read_until_it_fails(conn, id);
+    assert!(got.is_empty());
+    assert_eq!(status, then);
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
@@ -105,6 +115,7 @@ fn a_channel_read_gets_all_a_device_left_under_delayed_ack() {
     all_of_it_comes_back(
         DELAYED_ACK,
         Goes::ClosingTheChannel,
+        adb::AdbStatus::ChannelClosed,
         adb::AdbStatus::ChannelClosed,
     );
 }
@@ -115,17 +126,50 @@ fn a_channel_read_gets_all_a_device_left_without_delayed_ack() {
         CLASSIC,
         Goes::ClosingTheChannel,
         adb::AdbStatus::ChannelClosed,
+        adb::AdbStatus::ChannelClosed,
+    );
+}
+
+/// The call that met the end has only what the transport said to go on,
+/// and ADB_ERR_IO is what a timeout looks like too. From the next call on
+/// there is no mistaking it.
+#[test]
+fn a_channel_read_gets_all_a_device_left_with_no_close_under_delayed_ack() {
+    all_of_it_comes_back(
+        DELAYED_ACK,
+        Goes::Abruptly,
+        adb::AdbStatus::Io,
+        adb::AdbStatus::Disconnected,
     );
 }
 
 #[test]
-fn a_channel_read_gets_all_a_device_left_with_no_close_under_delayed_ack() {
-    all_of_it_comes_back(DELAYED_ACK, Goes::Abruptly, adb::AdbStatus::Io);
+fn a_channel_read_gets_all_a_device_left_with_no_close_without_delayed_ack() {
+    all_of_it_comes_back(
+        CLASSIC,
+        Goes::Abruptly,
+        adb::AdbStatus::Io,
+        adb::AdbStatus::Disconnected,
+    );
 }
 
+/// Whatever comes after the end says so, opening a channel included,
+/// which would otherwise send an OPEN and wait for an answer.
 #[test]
-fn a_channel_read_gets_all_a_device_left_with_no_close_without_delayed_ack() {
-    all_of_it_comes_back(CLASSIC, Goes::Abruptly, adb::AdbStatus::Io);
+fn every_call_after_the_end_is_told() {
+    let (conn, id) = channel_on_a_device_gone(DELAYED_ACK, Goes::Abruptly);
+    let (_, status) = read_until_it_fails(conn, id);
+    assert_eq!(status, adb::AdbStatus::Io);
+
+    let dest = b"shell,v2,raw:\0";
+    let mut other = 0u64;
+    let status =
+        unsafe { adb::adb_open_channel(conn.get(), dest.as_ptr(), dest.len(), &mut other) };
+    assert_eq!(status, adb::AdbStatus::Disconnected);
+    let mut len = 0usize;
+    let status = unsafe { adb::adb_accept_channel(conn.get(), ptr::null_mut(), 0, &mut len) };
+    assert_eq!(status, adb::AdbStatus::Disconnected);
+    unsafe { adb::adb_connection_free(conn.get()) };
 }
 
 /// One shell_v2 frame: `[id, u32 LE length, payload...]`.
@@ -137,8 +181,12 @@ fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// The frames of a command that finished, and how `adb_shell_read_frame`
-/// took them: the frames, and the status that ended the loop.
-fn read_frames(features: &'static str, goes: Goes) -> (Vec<(u8, Vec<u8>)>, adb::AdbStatus) {
+/// took them: the frames, the status that ended the loop, and the one
+/// the next call came back with.
+fn read_frames(
+    features: &'static str,
+    goes: Goes,
+) -> (Vec<(u8, Vec<u8>)>, adb::AdbStatus, adb::AdbStatus) {
     let mut sh = ptr::null_mut();
     let open = |conn: Conn| {
         let status = unsafe {
@@ -166,22 +214,27 @@ fn read_frames(features: &'static str, goes: Goes) -> (Vec<(u8, Vec<u8>)>, adb::
     });
 
     let mut frames = Vec::new();
-    let mut buf = [0u8; PACKET];
     let status = loop {
-        let (mut id, mut len) = (0u8, 0usize);
-        let status = unsafe {
-            adb::adb_shell_read_frame(sh, &mut id, buf.as_mut_ptr(), buf.len(), &mut len)
-        };
+        let (status, frame) = next_frame(sh);
         if status != adb::AdbStatus::Ok {
             break status;
         }
-        frames.push((id, buf[..len].to_vec()));
+        frames.push(frame);
     };
+    let (then, _) = next_frame(sh);
     unsafe {
         adb::adb_shell_free(sh);
         adb::adb_connection_free(conn.get());
     }
-    (frames, status)
+    (frames, status, then)
+}
+
+fn next_frame(sh: *mut adb::adb_shell_t) -> (adb::AdbStatus, (u8, Vec<u8>)) {
+    let mut buf = [0u8; PACKET];
+    let (mut id, mut len) = (0u8, 0usize);
+    let status =
+        unsafe { adb::adb_shell_read_frame(sh, &mut id, buf.as_mut_ptr(), buf.len(), &mut len) };
+    (status, (id, buf[..len].to_vec()))
 }
 
 fn all_the_frames() -> Vec<(u8, Vec<u8>)> {
@@ -196,17 +249,19 @@ fn all_the_frames() -> Vec<(u8, Vec<u8>)> {
 #[test]
 fn a_shell_read_gets_every_frame_a_device_left() {
     for features in [DELAYED_ACK, CLASSIC] {
-        let (frames, status) = read_frames(features, Goes::ClosingTheChannel);
+        let (frames, status, then) = read_frames(features, Goes::ClosingTheChannel);
         assert!(frames == all_the_frames(), "{} frames", frames.len());
         assert_eq!(status, adb::AdbStatus::ChannelClosed);
+        assert_eq!(then, adb::AdbStatus::ChannelClosed);
     }
 }
 
 #[test]
 fn a_shell_read_gets_every_frame_a_device_left_with_no_close() {
     for features in [DELAYED_ACK, CLASSIC] {
-        let (frames, status) = read_frames(features, Goes::Abruptly);
+        let (frames, status, then) = read_frames(features, Goes::Abruptly);
         assert!(frames == all_the_frames(), "{} frames", frames.len());
         assert_eq!(status, adb::AdbStatus::Io);
+        assert_eq!(then, adb::AdbStatus::Disconnected);
     }
 }
