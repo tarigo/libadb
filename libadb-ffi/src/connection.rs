@@ -28,11 +28,11 @@ pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 /// Opaque connection handle.
 ///
 /// Holds a split Reader + Writer pair. The Reader sits behind a mutex
-/// so that multiple C threads can share a handle safely (serialised on
-/// the read path). The Writer is cheaply cloneable and the write path
-/// only briefly locks an internal write-half mutex, so a read does not
-/// hold a write up. A write waiting for the device takes the Reader's
-/// mutex itself when it finds it free: see the [crate docs](crate).
+/// so that multiple C threads can share a handle safely. The Writer is
+/// cheaply cloneable and the write path only briefly locks an internal
+/// write-half mutex, so a read does not hold a write up. A write waiting
+/// for the device takes the Reader's mutex itself when it finds it free:
+/// see the [crate docs](crate).
 #[allow(non_camel_case_types)]
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,

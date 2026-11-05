@@ -7,15 +7,15 @@ use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
-use libadb::base::channel::ChannelId;
+use libadb::base::channel::{ChannelId, SelectResult};
 use libadb::base::error::Error;
 
 use crate::connection::{FfiReader, FfiWriter};
 use crate::transport::FfiTransportError;
 
-/// How long a parked write goes without looking at the read lock again.
-/// Its holder wakes the write only by dispatching what it waits for, and
-/// may just as well go back to C without.
+/// How long a call waiting on what the read lock's holder dispatches
+/// goes without looking at the lock again. The holder wakes it only by
+/// dispatching that, and may just as well go back to C without.
 const TICK: Duration = Duration::from_millis(10);
 
 struct ThreadWaker {
@@ -69,6 +69,30 @@ fn run<F: Future>(fut: F, wait: impl Fn(&ThreadWaker)) -> F::Output {
 
 pub(crate) fn block_on<F: Future>(fut: F) -> F::Output {
     run(fut, ThreadWaker::wait)
+}
+
+/// Read `ch` into `buf` under the read lock or, while another call holds
+/// that, from what the holder dispatches, until the lock comes free.
+///
+/// A read cannot simply wait for the lock. The holder can be a write in
+/// a read of its own, for an OKAY the device sends only once this read
+/// has taken what it wrote before: a command stuck on its stdout stops
+/// taking stdin. What is buffered needs no lock to be taken, and taking
+/// it is what gives the device credit back.
+pub(crate) fn block_on_read(
+    reader: &Mutex<FfiReader>,
+    writer: &FfiWriter,
+    ch: ChannelId,
+    buf: &mut [u8],
+) -> Result<usize, Error<FfiTransportError>> {
+    let lock_free = poll_fn(|_| try_lock(reader).map_or(Poll::Pending, Poll::Ready));
+    let waited = run(writer.select_channel(ch, buf, lock_free), |tw| {
+        tw.wait_at_most(TICK)
+    });
+    match waited? {
+        SelectResult::Data(n) => Ok(n),
+        SelectResult::Interrupted(mut reader) => block_on(reader.read_channel(ch, buf)),
+    }
 }
 
 /// [`block_on`] for a future writing on channel `ch`. Nothing reads the

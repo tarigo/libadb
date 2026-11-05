@@ -22,6 +22,7 @@ const DELAYED_ACK: &str = "shell_v2,delayed_ack";
 /// Ids the scripts answer OPENs with.
 const CH_A: u32 = 1;
 const CH_B: u32 = 2;
+const CH_C: u32 = 3;
 /// `ADB_SHELL_V2_STDIN` and `ADB_SHELL_V2_WINDOW_SIZE_CHANGE` in libadb.h.
 const STDIN: u8 = 0;
 const WINDOW_SIZE_CHANGE: u8 = 5;
@@ -77,8 +78,8 @@ fn join<T: Send + 'static>(what: &str, handle: thread::JoinHandle<T>) -> T {
 /// Have the script wait for the test's read to be running. A read on
 /// another channel takes this WRTE, answers it and stays in the read,
 /// so its OKAY says that read holds the read lock from here on.
-fn wait_for_a_read(device: &mut common::Device, host: u32, running: mpsc::Sender<()>) {
-    device.send(CMD_WRTE, CH_A, host, b"ping");
+fn wait_for_a_read(device: &mut common::Device, ch: u32, host: u32, running: mpsc::Sender<()>) {
+    device.send(CMD_WRTE, ch, host, b"ping");
     device.recv_cmd(CMD_OKAY);
     running.send(()).unwrap();
 }
@@ -447,7 +448,7 @@ fn a_write_outlives_the_read_that_kept_it_from_reading() {
     let (addr, device) = scripted_adbd(CLASSIC, move |d| {
         let a = d.accept_open(CH_A, 0);
         let b = d.accept_open(CH_B, 0);
-        wait_for_a_read(d, a, running_tx);
+        wait_for_a_read(d, CH_A, a, running_tx);
 
         d.recv_cmd(CMD_WRTE);
         thread::sleep(SETTLE);
@@ -504,7 +505,7 @@ fn a_hangup_that_ends_the_read_also_ends_the_write_behind_it() {
     let (addr, device) = scripted_adbd(CLASSIC, move |d| {
         let a = d.accept_open(CH_A, 0);
         d.accept_open(CH_B, 0);
-        wait_for_a_read(d, a, running_tx);
+        wait_for_a_read(d, CH_A, a, running_tx);
 
         d.recv_cmd(CMD_WRTE);
         thread::sleep(SETTLE);
@@ -564,5 +565,140 @@ fn a_read_timeout_ends_a_parked_write_and_the_connection_goes_on() {
     assert_eq!(status, adb::AdbStatus::Ok);
 
     assert_eq!(join("the device", device), b"two");
+    unsafe { adb::adb_connection_free(conn.get()) };
+}
+
+/// A command stuck on its stdout stops taking stdin, so the device has
+/// no credit for the write until the host has read that output. The
+/// write sits in a read holding the lock by the time the read comes,
+/// and neither would ever move if the read waited for the lock.
+#[test]
+fn a_read_gets_past_a_write_that_holds_the_read_lock() {
+    let (addr, device) = scripted_adbd(DELAYED_ACK, |d| {
+        let host = d.accept_open(CH_A, 1);
+        d.recv_cmd(CMD_WRTE);
+        d.send(CMD_WRTE, CH_A, host, b"output");
+        let credit = d.recv_cmd(CMD_OKAY);
+        assert_eq!(credit.payload, 6u32.to_le_bytes());
+        d.okay(CH_A, host, 1);
+        d.take(CH_A, host, 1)
+    });
+    let conn = Handle(connect(&addr, DELAYED_ACK));
+    let id = open_channel(conn);
+
+    let writing = thread::spawn(move || write(conn, id, b"xy"));
+    thread::sleep(SETTLE);
+
+    let (status, got) = within("the read", move || read(conn, id));
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!(got, b"output");
+
+    assert_eq!(join("the write", writing), adb::AdbStatus::Ok);
+    assert_eq!(join("the device", device), b"y");
+    unsafe { adb::adb_connection_free(conn.get()) };
+}
+
+/// The same with the read there first, for data the write has yet to
+/// take in.
+#[test]
+fn a_read_gets_what_a_write_takes_in_while_it_waits() {
+    let (reading_tx, reading) = mpsc::channel::<()>();
+    let (addr, device) = scripted_adbd(DELAYED_ACK, move |d| {
+        let host = d.accept_open(CH_A, 1);
+        d.recv_cmd(CMD_WRTE);
+        reading.recv().unwrap();
+        thread::sleep(SETTLE);
+        d.send(CMD_WRTE, CH_A, host, b"output");
+        let credit = d.recv_cmd(CMD_OKAY);
+        assert_eq!(credit.payload, 6u32.to_le_bytes());
+        d.okay(CH_A, host, 1);
+        d.take(CH_A, host, 1)
+    });
+    let conn = Handle(connect(&addr, DELAYED_ACK));
+    let id = open_channel(conn);
+
+    let writing = thread::spawn(move || write(conn, id, b"xy"));
+    thread::sleep(SETTLE);
+    reading_tx.send(()).unwrap();
+
+    let (status, got) = within("the read", move || read(conn, id));
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!(got, b"output");
+
+    assert_eq!(join("the write", writing), adb::AdbStatus::Ok);
+    assert_eq!(join("the device", device), b"y");
+    unsafe { adb::adb_connection_free(conn.get()) };
+}
+
+/// A read kept off the lock by a write has to take over the moment the
+/// write is done: no call is left to read for it.
+#[test]
+fn a_read_takes_over_from_a_write_that_finished() {
+    let (addr, device) = scripted_adbd(CLASSIC, |d| {
+        let a = d.accept_open(CH_A, 0);
+        let b = d.accept_open(CH_B, 0);
+        d.recv_cmd(CMD_WRTE);
+        thread::sleep(2 * SETTLE);
+        d.okay(CH_A, a, 0);
+        let got = d.take(CH_A, a, b"two".len());
+        thread::sleep(SETTLE);
+        d.send(CMD_WRTE, CH_B, b, b"for-b");
+        while d.recv_cmd(CMD_OKAY).arg1 != CH_B {}
+        got
+    });
+    let conn = Handle(connect(&addr, CLASSIC));
+    let a = open_channel(conn);
+    let b = open_channel(conn);
+
+    let writing = thread::spawn(move || (write(conn, a, b"one"), write(conn, a, b"two")));
+    thread::sleep(SETTLE);
+
+    let (status, got) = within("the read", move || read(conn, b));
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!(got, b"for-b");
+
+    let statuses = join("the writes", writing);
+    assert_eq!(statuses, (adb::AdbStatus::Ok, adb::AdbStatus::Ok));
+    assert_eq!(join("the device", device), b"two");
+    unsafe { adb::adb_connection_free(conn.get()) };
+}
+
+/// Two reads are no different: the one holding the lock takes in what
+/// the other waits for, and that one returns with the first still
+/// blocked, rather than waiting on the first read's data.
+#[test]
+fn a_read_gets_what_the_read_holding_the_lock_takes_in() {
+    let (running_tx, running) = mpsc::channel();
+    let (returned, returned_rx) = mpsc::channel::<()>();
+    let (addr, device) = scripted_adbd(CLASSIC, move |d| {
+        let a = d.accept_open(CH_A, 0);
+        let b = d.accept_open(CH_B, 0);
+        let c = d.accept_open(CH_C, 0);
+        wait_for_a_read(d, CH_C, c, running_tx);
+
+        thread::sleep(SETTLE);
+        d.send(CMD_WRTE, CH_B, b, b"for-b");
+        returned_rx.recv().unwrap();
+        d.send(CMD_WRTE, CH_A, a, b"for-a");
+        while d.recv_cmd(CMD_OKAY).arg1 != CH_A {}
+    });
+    let conn = Handle(connect(&addr, CLASSIC));
+    let a = open_channel(conn);
+    let b = open_channel(conn);
+    let _c = open_channel(conn);
+
+    let first = thread::spawn(move || read(conn, a));
+    running.recv_timeout(BOUND).expect("the read never started");
+
+    let (status, got) = within("the second read", move || read(conn, b));
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!(got, b"for-b");
+    assert!(!first.is_finished(), "the first read has nothing yet");
+    returned.send(()).unwrap();
+
+    let (status, got) = join("the first read", first);
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!(got, b"for-a");
+    join("the device", device);
     unsafe { adb::adb_connection_free(conn.get()) };
 }
