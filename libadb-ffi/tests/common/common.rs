@@ -177,14 +177,13 @@ pub fn fake_adbd_pushing(
                         // at every WRTE of every frame.
                         thread::sleep(std::time::Duration::from_millis(2));
                     }
-                    stream
-                        .write_all(&header(CMD_OKAY, 1, remote_id, &[]))
-                        .unwrap();
+                    // The host may be gone by now: a read kept off the
+                    // read lock returns at a close, not at its answer,
+                    // and the test then hangs up.
+                    let _ = stream.write_all(&header(CMD_OKAY, 1, remote_id, &[]));
                 }
                 CMD_CLSE => {
-                    stream
-                        .write_all(&header(CMD_CLSE, 1, remote_id, &[]))
-                        .unwrap();
+                    let _ = stream.write_all(&header(CMD_CLSE, 1, remote_id, &[]));
                     break;
                 }
                 _ => {}

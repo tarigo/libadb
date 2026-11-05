@@ -103,13 +103,13 @@ pub unsafe extern "C" fn adb_read_channel(
         Ok(ch) => ch,
         Err(status) => return status,
     };
-    let mut g = conn.lock_reader();
     // The reader hands back Ok(0) for a zero-length WRTE; the C
     // contract above forbids returning it.
     let n = loop {
-        let n = ffi_try!(g.read_channel(ch, slice));
-        if n > 0 {
-            break n;
+        match block_on::block_on_read(&conn.reader, &conn.writer, ch, slice) {
+            Ok(0) => {}
+            Ok(n) => break n,
+            Err(e) => return error::fail_error(e),
         }
     };
     // SAFETY: non-null, and writable per `# Safety`.

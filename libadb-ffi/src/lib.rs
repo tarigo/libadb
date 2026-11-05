@@ -17,8 +17,11 @@
 //! time, so a second write in a row waits for the OKAY to the first;
 //! with delayed ACK a write waits once the credit runs out. While it
 //! waits for the device and no read call is running, the write reads the
-//! connection itself, holding the read lock, so a read on another thread
-//! waits its turn and data for other channels is kept for their reads.
+//! connection itself, holding the read lock, so a call that needs the
+//! lock waits its turn and data for other channels is kept for their
+//! reads. A read does not wait for the lock: finding it taken, the read
+//! takes what the holder dispatches for its channel, and the lock once
+//! it comes free.
 //!
 //! # Feature flags
 //!

@@ -77,23 +77,16 @@ const _: fn() = || {
     assert_send_sync::<adb_shell_t>();
 };
 
-async fn read_frame_async(
-    reader_arc: &Mutex<FfiReader>,
-    parse_state: &Mutex<ParseState>,
-    channel_id: ChannelId,
-) -> Result<(u8, Vec<u8>), Error<FfiTransportError>> {
-    let mut p = lock_poisoned(parse_state);
+fn read_frame(sh: &adb_shell_t) -> Result<(u8, Vec<u8>), Error<FfiTransportError>> {
+    let mut p = lock_poisoned(&sh.parse_state);
     loop {
         if let Some(frame) = p.try_next_frame()? {
             return Ok(frame);
         }
         p.ensure_writable()?;
         let tail = p.decoder.tail();
-        let n = {
-            let dst = &mut p.rx[tail..];
-            let mut r = lock_poisoned(reader_arc);
-            r.read_channel(channel_id, dst).await?
-        };
+        let dst = &mut p.rx[tail..];
+        let n = block_on::block_on_read(&sh.reader, &sh.writer, sh.channel_id, dst)?;
         p.decoder.commit(n);
     }
 }
@@ -284,7 +277,10 @@ pub unsafe extern "C" fn adb_shell_read_frame(
     if sh.closed.load(Ordering::Acquire) {
         return AdbStatus::ChannelClosed;
     }
-    let (id, payload) = ffi_try!(read_frame_async(&sh.reader, &sh.parse_state, sh.channel_id));
+    let (id, payload) = match read_frame(sh) {
+        Ok(frame) => frame,
+        Err(e) => return error::fail_error(e),
+    };
     // SAFETY: non-null, and writable per `# Safety`.
     unsafe { *out_id = id };
     // SAFETY: `buf` and `out_len` are NULL or writable as sized, per

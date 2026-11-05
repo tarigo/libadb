@@ -8,9 +8,11 @@
  * The calls that wait on the device for an answer — adb_open_channel(),
  * adb_read_channel(), adb_accept_channel(), the reverse calls,
  * adb_shell_open() and adb_shell_read_frame() — hold the connection's
- * read lock, so two of them serialise. Writes and closes never wait for
- * it: a thread blocked in a read does not keep another from writing. The
- * metadata queries take no lock at all.
+ * read lock, so two of them serialise. The exception is a read that
+ * finds the lock taken: it takes what the holder dispatches for its
+ * channel, and the lock once it comes free. Writes and closes never wait
+ * for it: a thread blocked in a read does not keep another from writing.
+ * The metadata queries take no lock at all.
  *
  * A write, adb_write_channel() or a shell frame, needs no read call
  * running. Nothing reads the connection in the background: only a call
@@ -19,8 +21,8 @@
  * one WRTE at a time, so a second write in a row waits for the OKAY to
  * the first; with delayed ACK a write waits once the credit runs out.
  * While it waits for the device and no read call is running, the write
- * reads the connection itself, holding the read lock, so a read on
- * another thread waits its turn and data for other channels is kept for
+ * reads the connection itself, holding the read lock, so a call that
+ * needs the lock waits its turn and data for other channels is kept for
  * their reads.
  *
  * On error, functions return a non-zero adb_status_t and set a
