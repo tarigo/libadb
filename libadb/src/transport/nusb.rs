@@ -15,11 +15,12 @@
 //! one.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use nusb::transfer::{Direction, EndpointType, RequestBuffer};
 use nusb::Interface;
 
-use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
+use crate::transport::usb::{ends_on_packet_boundary, scan, speaks_adb, Enumerated, ScanError};
 
 /// USB transport wrapping `nusb::Interface` with bulk endpoints.
 ///
@@ -27,17 +28,24 @@ use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
 /// shares the same device handle and endpoints, which makes it safe
 /// to use one clone for reading and another for writing concurrently
 /// (see [`Splittable`](crate::Splittable)).
+///
+/// [`write`](Self::write) follows a transfer that fills its last USB
+/// packet with a zero-length one. adbd reads in 16 KiB requests, and
+/// only a short packet completes one early, so the bytes would
+/// otherwise sit on the device until the next write.
 #[derive(Clone)]
 pub struct UsbTransport {
     iface: Interface,
     ep_in: u8,
     ep_out: u8,
+    out_packet_size: usize,
 }
 
 impl UsbTransport {
     /// Create a transport from an already-claimed `nusb::Interface`.
     ///
-    /// Scans the interface's endpoints to find bulk IN and OUT.
+    /// Scans the interface's endpoints to find bulk IN and OUT, and how
+    /// large a packet the OUT one takes.
     /// Returns `None` if the required endpoints are not found.
     pub fn new(iface: Interface) -> Option<Self> {
         let descriptors = iface.descriptors().next()?;
@@ -48,15 +56,17 @@ impl UsbTransport {
             if ep.transfer_type() == EndpointType::Bulk {
                 match ep.direction() {
                     Direction::In => ep_in = Some(ep.address()),
-                    Direction::Out => ep_out = Some(ep.address()),
+                    Direction::Out => ep_out = Some((ep.address(), ep.max_packet_size())),
                 }
             }
         }
 
+        let (ep_out, out_packet_size) = ep_out?;
         Some(Self {
             iface,
             ep_in: ep_in?,
-            ep_out: ep_out?,
+            ep_out,
+            out_packet_size,
         })
     }
 
@@ -70,11 +80,20 @@ impl UsbTransport {
         Ok(n)
     }
 
-    /// Write to the bulk OUT endpoint.
+    /// Write to the bulk OUT endpoint, as one transfer and, if that
+    /// fills its last packet, a zero-length one to end it. An empty
+    /// `buf` sends nothing.
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, nusb::transfer::TransferError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let data = buf.to_vec();
         let completion = self.iface.bulk_out(self.ep_out, data).await;
         completion.into_result()?;
+        if ends_on_packet_boundary(buf.len(), self.out_packet_size) {
+            let completion = self.iface.bulk_out(self.ep_out, Vec::new()).await;
+            completion.into_result()?;
+        }
         Ok(buf.len())
     }
 }

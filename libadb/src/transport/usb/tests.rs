@@ -342,3 +342,50 @@ fn a_named_device_surfaces_its_failure_at_once() {
     assert_eq!(picked, Err(Fail::Open));
     assert_eq!(seen, 1);
 }
+
+/// Length alone decides: a multiple of the packet size has nothing to
+/// end it, multiples of adbd's 16 KiB request included, and any other
+/// length ends on its own short packet.
+#[test]
+fn a_transfer_ends_on_a_packet_boundary_at_a_multiple_of_the_packet_size() {
+    for (len, max_packet, on_boundary) in [
+        (24, 64, false),
+        (511, 64, false),
+        (512, 64, true),
+        (1024, 64, true),
+        (511, 512, false),
+        (512, 512, true),
+        (513, 512, false),
+        (1024, 512, true),
+        (4096, 512, true),
+        (4097, 512, false),
+        (16384, 512, true),
+        (16896, 512, true),
+        (511, 1024, false),
+        (512, 1024, false),
+        (1024, 1024, true),
+    ] {
+        assert_eq!(
+            ends_on_packet_boundary(len, max_packet),
+            on_boundary,
+            "{len} bytes in {max_packet}-byte packets"
+        );
+    }
+}
+
+/// An empty write sends nothing, so it leaves no transfer to end.
+#[test]
+fn nothing_written_ends_on_no_boundary() {
+    for max_packet in [0, 64, 512, 1024] {
+        assert!(!ends_on_packet_boundary(0, max_packet));
+    }
+}
+
+/// A descriptor reporting a packet size of 0 means no zero-length
+/// packet, and no division by zero either.
+#[test]
+fn a_packet_size_of_zero_gives_no_boundary() {
+    for len in [0, 511, 512, 1024] {
+        assert!(!ends_on_packet_boundary(len, 0));
+    }
+}
