@@ -1,6 +1,7 @@
 //! Two C threads writing stdin on one shell session must not interleave
-//! their frames, and a session whose request would reach the device
-//! rewritten is never opened.
+//! their frames, a session whose request would reach the device
+//! rewritten is never opened, and closing stdin tells a device that
+//! left first from a session closed here.
 
 use std::ffi::{c_void, CString};
 use std::io::Write as _;
@@ -11,8 +12,8 @@ use std::thread;
 #[path = "common/common.rs"]
 mod common;
 use common::{
-    fake_adbd, frames, header, read_packet, CMD_CLSE, CMD_CNXN, CMD_OPEN, FRAME_LEN, MAX_PAYLOAD,
-    VERSION,
+    connect, fake_adbd, frames, header, read_packet, scripted_adbd, within, Handle, CMD_CLSE,
+    CMD_CNXN, CMD_OKAY, CMD_OPEN, CMD_WRTE, FRAME_LEN, MAX_PAYLOAD, VERSION,
 };
 
 /// The fake device never asks for AUTH, so this is only here to satisfy
@@ -207,4 +208,178 @@ fn a_term_that_would_rewrite_the_request_opens_nothing() {
     unsafe { adb::adb_connection_free(conn) };
     let after = device.join().unwrap();
     assert!(after.is_empty(), "nothing follows the handshake: {after:?}");
+}
+
+/// `ADB_SHELL_V2_STDOUT` and `ADB_SHELL_V2_CLOSE_STDIN` in libadb.h.
+const STDOUT: u8 = 1;
+const CLOSE_STDIN: u8 = 4;
+
+type Shell = Handle<adb::adb_shell_t>;
+
+fn open_shell(conn: *mut adb::adb_connection_t) -> Shell {
+    let mut sh = ptr::null_mut();
+    let status =
+        unsafe { adb::adb_shell_open(conn, ptr::null(), 0, false, ptr::null(), 0, 0, &mut sh) };
+    assert_eq!(status, adb::AdbStatus::Ok, "shell open failed");
+    Handle(sh)
+}
+
+fn read_frame(sh: Shell) -> (adb::AdbStatus, u8, Vec<u8>) {
+    let mut id = 0u8;
+    let mut buf = [0u8; 64];
+    let mut len = 0usize;
+    let status = unsafe {
+        adb::adb_shell_read_frame(sh.get(), &mut id, buf.as_mut_ptr(), buf.len(), &mut len)
+    };
+    (status, id, buf[..len].to_vec())
+}
+
+fn write_stdin(sh: Shell, data: &[u8]) -> adb::AdbStatus {
+    unsafe { adb::adb_shell_write_stdin(sh.get(), data.as_ptr(), data.len()) }
+}
+
+/// A shell_v2 frame as a device writes it.
+fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = vec![id];
+    out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// A command can finish before its caller gets to close stdin. Nothing
+/// is wrong then: the CLOSE_STDIN has nowhere to go and is not sent.
+#[test]
+fn closing_stdin_after_the_device_left_is_no_failure() {
+    let (addr, device) = scripted_adbd("shell_v2", |d| {
+        let host = d.accept_open(1, 0);
+        d.send(CMD_CLSE, 1, host, &[]);
+        let mut sent = Vec::new();
+        while let Some(pkt) = d.recv() {
+            sent.push(pkt.cmd);
+        }
+        sent
+    });
+    let conn = connect(&addr, "shell_v2");
+    let sh = open_shell(conn);
+
+    let (status, ..) = within("the read", move || read_frame(sh));
+    assert_eq!(status, adb::AdbStatus::ChannelClosed, "CLSE dispatched");
+
+    let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
+    let sent = within("the device", move || device.join().unwrap());
+    assert!(!sent.contains(&CMD_WRTE), "a frame on a closed channel");
+}
+
+/// The same with the CLSE taken in by a stdin write waiting for the
+/// device: what came ahead of it is still there to read afterwards.
+#[test]
+fn closing_stdin_leaves_what_the_device_wrote_readable() {
+    let (addr, device) = scripted_adbd("shell_v2", |d| {
+        let host = d.accept_open(1, 0);
+        d.recv_cmd(CMD_WRTE);
+        d.send(CMD_WRTE, 1, host, &frame(STDOUT, b"bye"));
+        d.send(CMD_CLSE, 1, host, &[]);
+        while d.recv().is_some() {}
+    });
+    let conn = connect(&addr, "shell_v2");
+    let sh = open_shell(conn);
+
+    let status = within("the write", move || write_stdin(sh, b"x"));
+    assert_eq!(status, adb::AdbStatus::ChannelClosed, "CLSE dispatched");
+
+    let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+
+    let (status, id, payload) = within("the read", move || read_frame(sh));
+    assert_eq!(status, adb::AdbStatus::Ok);
+    assert_eq!((id, payload.as_slice()), (STDOUT, &b"bye"[..]));
+    let (status, ..) = within("the read after it", move || read_frame(sh));
+    assert_eq!(status, adb::AdbStatus::ChannelClosed);
+
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
+    within("the device", move || device.join().unwrap());
+}
+
+/// Closed here, the session is closed whoever closed the channel first:
+/// a caller that closes stdin on a closed handle has a bug to hear of.
+#[test]
+fn closing_stdin_after_a_local_close_fails() {
+    let (addr, device) = scripted_adbd("shell_v2", |d| {
+        let host = d.accept_open(1, 0);
+        d.send(CMD_CLSE, 1, host, &[]);
+        while d.recv().is_some() {}
+    });
+    let conn = connect(&addr, "shell_v2");
+    let sh = open_shell(conn);
+
+    let (status, ..) = within("the read", move || read_frame(sh));
+    assert_eq!(status, adb::AdbStatus::ChannelClosed, "CLSE dispatched");
+
+    let status = unsafe { adb::adb_shell_close(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+    let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::ChannelClosed);
+
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
+    within("the device", move || device.join().unwrap());
+}
+
+#[test]
+fn closing_stdin_on_a_live_channel_sends_the_frame() {
+    let (addr, device) = scripted_adbd("shell_v2", |d| {
+        let host = d.accept_open(1, 0);
+        d.take(1, host, 5)
+    });
+    let conn = connect(&addr, "shell_v2");
+    let sh = open_shell(conn);
+
+    let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+
+    let stream = within("the device", move || device.join().unwrap());
+    assert_eq!(frames(&stream), [(CLOSE_STDIN, Vec::new())]);
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
+}
+
+/// A channel a fault closed is not one the device left. An OKAY without
+/// its credit closes the channel when a parked write takes it in, where
+/// a read would only fail.
+#[test]
+fn closing_stdin_after_a_fault_reports_the_fault() {
+    const FEATURES: &str = "shell_v2,delayed_ack";
+    let (addr, device) = scripted_adbd(FEATURES, |d| {
+        let host = d.accept_open(1, 1);
+        d.recv_cmd(CMD_WRTE);
+        d.send(CMD_OKAY, 1, host, &[]);
+        d.recv_cmd(CMD_CLSE);
+    });
+    let conn = connect(&addr, FEATURES);
+    let sh = open_shell(conn);
+
+    let status = within("the write", move || write_stdin(sh, b"x"));
+    assert_eq!(status, adb::AdbStatus::Protocol);
+
+    let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Protocol);
+
+    within("the device", move || device.join().unwrap());
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
 }
