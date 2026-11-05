@@ -79,7 +79,8 @@ pub(crate) struct Shared<WH> {
     pub(super) listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(super) incoming_signal: Event,
-    /// Woken with everyone else, for a receive in flight.
+    /// Woken with everyone else and when something falls due, for a
+    /// receive in flight.
     receive_signal: Event,
     /// What the device is owed, oldest first: see [`Owed`].
     ///
@@ -94,7 +95,8 @@ pub(crate) struct Shared<WH> {
 /// is on the wire. Waiting for the write half is a cancellation point,
 /// and `Drop` cannot send anything, so
 /// [`lock_write`](Shared::lock_write) sends it for the next call that
-/// writes, and a call that receives does so first.
+/// writes, and a call that receives does so first, or as soon as it can
+/// give up on a read in flight.
 #[derive(Clone, Copy)]
 pub(super) enum Owed {
     /// The OKAY for data that arrived.
@@ -153,6 +155,7 @@ impl<WH> Shared<WH> {
     /// yet, so from here no dropped future can lose it.
     pub(super) fn owe(&self, debt: Owed) {
         self.lock_owed().push_back(debt);
+        self.receive_signal.notify(usize::MAX);
     }
 
     /// Send what is owed, if anything is.
@@ -433,17 +436,18 @@ impl<WH> Shared<WH> {
         self.receive_signal.notify(usize::MAX);
     }
 
-    /// Resolve once a write abandoned mid-packet has left the connection
-    /// with no way on, for a receive to give up on the wait: the device
-    /// is waiting for the rest of that packet, so nothing may ever come.
+    /// Resolve once a receive in flight has something to give way to. A
+    /// write abandoned mid-packet left the device waiting for the rest
+    /// of it, so nothing may ever come; or the device is owed something
+    /// that, with reads leaving it alone, nothing else may ever send.
     ///
     /// `raced` says a read is raced against this. Otherwise it is only
     /// asked before each read, with nothing to wake, which spares the
     /// transports that cannot be raced a listener for every read.
-    pub(super) async fn desynchronized(&self, raced: bool) {
+    pub(super) async fn receive_interrupted(&self, raced: bool) {
         let mut listener: Option<EventListener> = None;
         loop {
-            if self.desync.check::<Infallible>().is_err() {
+            if self.desync.check::<Infallible>().is_err() || !self.lock_owed().is_empty() {
                 return;
             }
             if !raced {

@@ -155,30 +155,32 @@ where
     /// Nobody else is in a position to see it, so everyone waiting is
     /// told here.
     ///
-    /// A write abandoned while this waits ends the wait: the device is
-    /// left expecting the rest of a packet, so no packet may ever come.
-    /// A read that can be dropped goes at once, and any other finishes
-    /// first, with the next packet.
+    /// A write abandoned while this waits ends the wait, and something
+    /// falling due sees to that before it goes on: the device may send
+    /// nothing until then. A read that can be dropped goes at once, and
+    /// any other finishes first, with the next packet.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
-        self.shared.check_live()?;
-        self.shared.pay().await?;
-        let race = self.read_half.read_cancel_safe();
-        let received = recv_pkt_or(
-            &mut self.read_half,
-            &mut self.recv_buf,
-            self.shared.negotiated.config.max_payload(),
-            pin!(self.shared.desynchronized(race)),
-            race,
-        )
-        .await;
-        match received {
-            Ok(Received::Packet(pkt)) => Ok(pkt),
-            Ok(Received::Interrupted(())) => Err(Error::Desynchronized),
-            Err(e) => {
-                if ends_connection(&e) {
-                    self.shared.stop();
+        loop {
+            self.shared.check_live()?;
+            self.shared.pay().await?;
+            let race = self.read_half.read_cancel_safe();
+            let received = recv_pkt_or(
+                &mut self.read_half,
+                &mut self.recv_buf,
+                self.shared.negotiated.config.max_payload(),
+                pin!(self.shared.receive_interrupted(race)),
+                race,
+            )
+            .await;
+            match received {
+                Ok(Received::Packet(pkt)) => return Ok(pkt),
+                Ok(Received::Interrupted(())) => {}
+                Err(e) => {
+                    if ends_connection(&e) {
+                        self.shared.stop();
+                    }
+                    return Err(e);
                 }
-                Err(e)
             }
         }
     }

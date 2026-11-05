@@ -2083,6 +2083,119 @@ mod give_up_tests {
     }
 }
 
+/// What falls due while a call waits for a packet has nobody else to
+/// send it: reads leave it alone, and the device may have nothing to
+/// say until it arrives.
+mod parked_receive_tests {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    use crate::base::channel::ChannelId;
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{cnxn, now, okay, wrte, Mock, NoAuth, SharedMock};
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+
+    use super::{Reader, Writer};
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// CLSEs the halves sent, as (our end, the device's end).
+    fn closes(seen: &SharedMock) -> Vec<(u32, u32)> {
+        seen.sent()
+            .into_iter()
+            .filter(|(cmd, ..)| *cmd == Command::Close)
+            .map(|(_, arg0, arg1, _)| (arg0, arg1))
+            .collect()
+    }
+
+    /// An opener with its READY taken in and nobody having looked yet,
+    /// to give up on: that leaves a CLSE to go out, with `run` or a read
+    /// the only thing left to send it.
+    #[allow(clippy::type_complexity)]
+    fn opener_answered(
+        configure: impl FnOnce(&mut Mock),
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        Pin<Box<impl Future + 'static>>,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        configure(&mut mock);
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        seen.parks_when_drained();
+
+        let opener = writer.clone();
+        let mut open = Box::pin(async move { opener.open_channel(b"svc:\0").await });
+        assert!(poll_once(open.as_mut()).is_pending());
+        seen.feed(&Packet::new(Command::Ready, 43, 2, Vec::new()));
+        now(reader.dispatch_one()).unwrap();
+        (reader, writer, ch, open, seen)
+    }
+
+    #[test]
+    fn a_parked_run_sends_what_falls_due() {
+        let (reader, _writer, _ch, open, seen) = opener_answered(|_| {});
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        drop(open);
+        assert!(poll_once(run.as_mut()).is_pending(), "and goes on waiting");
+        assert_eq!(closes(&seen), [(2, 43)]);
+    }
+
+    #[test]
+    fn a_parked_read_sends_what_falls_due() {
+        let (mut reader, _writer, ch, open, seen) = opener_answered(|_| {});
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(reader.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        drop(open);
+        assert!(poll_once(read.as_mut()).is_pending(), "and goes on waiting");
+        assert_eq!(closes(&seen), [(2, 43)]);
+
+        seen.feed(&wrte(1, b"after it"));
+        assert!(poll_once(read.as_mut()).is_ready());
+    }
+
+    /// A read that cannot be dropped has to finish first, which is as
+    /// long as the device takes: the same as for a write given up on.
+    #[test]
+    fn a_read_that_cannot_be_dropped_sends_it_at_the_next_packet() {
+        let (reader, _writer, _ch, open, seen) = opener_answered(|mock| {
+            mock.loses_cancelled_reads();
+        });
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        drop(open);
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert!(closes(&seen).is_empty(), "the read in flight was dropped");
+
+        seen.feed(&wrte(1, b"next"));
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert_eq!(closes(&seen), [(2, 43)]);
+    }
+}
+
 /// A caller with no task for `Reader::run` asks `waits_for_credit` when
 /// to read, and takes packets with `dispatch_one`.
 mod driving_tests {

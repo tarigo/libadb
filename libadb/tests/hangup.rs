@@ -1,11 +1,15 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
-//! A device that says what it has to say and goes. However the host
-//! reads, all of it comes back in the order it was sent, and only then
-//! the end of the channel or of the connection: an OKAY nobody is left
-//! to receive costs a read nothing. Real sockets, because what a write
-//! to a peer that hung up does is the kernel's to say.
+//! How a connection ends, on real sockets, because what a write to a
+//! peer that hung up does is the kernel's to say.
+//!
+//! A device says what it has to say and goes. However the host reads,
+//! all of it comes back in the order it was sent, and only then the end
+//! of the channel or of the connection: an OKAY nobody is left to
+//! receive costs a read nothing. Everything else waiting on the
+//! connection hears of the end, and a write given up on ends it as well.
 
+use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -345,6 +349,30 @@ async fn a_write_given_up_on_ends_run() {
 
     done.store(true, Ordering::Relaxed);
     rt::within("the device", rt::join(device)).await;
+}
+}
+
+// Nothing else is going on here to carry the CLSE an opener given up on
+// leaves behind, and the device has nothing to say until it gets one.
+rt_test! {
+async fn an_opener_given_up_on_is_closed_with_nothing_else_going_on() {
+    let (conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"svc:\0").await;
+        ch.expect_close().await;
+    })
+    .await;
+    let (reader, writer) = conn.split().unwrap();
+    let _run = rt::spawn(reader.run());
+
+    // Polled once, the OPEN is out. `run` takes the READY in the
+    // meantime, and the opener never looks.
+    {
+        let mut open = pin!(writer.open_channel(b"svc:\0"));
+        assert!(common::poll_once(open.as_mut()).await.is_pending());
+        rt::sleep_ms(SETTLE_MS).await;
+    }
+
+    rt::within("the CLSE", rt::join(device)).await;
 }
 }
 
