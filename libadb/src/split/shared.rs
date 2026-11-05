@@ -158,12 +158,16 @@ impl<WH> Shared<WH> {
         self.receive_signal.notify(usize::MAX);
     }
 
-    /// Send what is owed, if anything is.
+    /// Send what is owed, if anything is and the connection is live.
+    /// Once it has ended nobody is left to hear it, and a call that only
+    /// has to report that, or to hand over what arrived, must not wait
+    /// for the write half on the way: what is owed then stays for a call
+    /// that writes anyway.
     pub(super) async fn pay(&self) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
     {
-        if !self.lock_owed().is_empty() {
+        if self.check_live::<Infallible>().is_ok() && !self.lock_owed().is_empty() {
             drop(self.lock_write().await?);
         }
         Ok(())

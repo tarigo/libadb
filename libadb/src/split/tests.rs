@@ -2338,6 +2338,7 @@ mod parked_receive_tests {
     use crate::base::mock::{cnxn, now, okay, wrte, Mock, NoAuth, SharedMock};
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
+    use crate::error::Error;
 
     use super::{Reader, Writer};
 
@@ -2433,6 +2434,31 @@ mod parked_receive_tests {
         seen.feed(&wrte(1, b"next"));
         assert!(poll_once(run.as_mut()).is_pending());
         assert_eq!(closes(&seen), [(2, 43)]);
+    }
+
+    /// An opener given up on after the receive that ended the connection
+    /// leaves a CLSE on the list. Nobody is left to hear it, so the way to
+    /// what arrived does not lead through the write half, which here
+    /// nobody lets go of.
+    #[test]
+    fn a_read_after_the_end_pays_nothing() {
+        let (mut reader, writer, ch, open, seen) = opener_answered(|_| {});
+        seen.feed(&wrte(1, b"hello"));
+        seen.hang_up();
+        now(reader.dispatch_one()).unwrap();
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+        drop(open);
+        let sent = seen.sent().len();
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::Disconnected), "got {err:?}");
+        drop(busy);
+        assert_eq!(seen.sent().len(), sent, "nobody is left to hear it");
     }
 }
 

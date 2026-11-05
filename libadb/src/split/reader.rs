@@ -325,7 +325,8 @@ where
     /// and bytes that owe an acknowledgement are taken only once that
     /// has been sent: a call dropped while it waits for the write half
     /// has taken nothing, and the next read gets them. What such a call
-    /// left owing the device goes out first. Dropping the call while it
+    /// left owing the device goes out first, unless the connection has
+    /// ended: nobody is left to hear it then. Dropping the call while it
     /// waits for a packet is another matter: the wait is a transport
     /// read, as under [`accept_incoming`](Self::accept_incoming).
     ///
