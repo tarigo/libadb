@@ -11,26 +11,9 @@ use std::thread;
 #[path = "common/common.rs"]
 mod common;
 use common::{
-    fake_adbd, header, read_packet, CMD_CLSE, CMD_CNXN, CMD_OPEN, FRAME_LEN, MAX_PAYLOAD, VERSION,
+    fake_adbd, frames, header, read_packet, CMD_CLSE, CMD_CNXN, CMD_OPEN, FRAME_LEN, MAX_PAYLOAD,
+    VERSION,
 };
-
-/// Split a shell_v2 byte stream into `(id, payload)` frames.
-fn frames(mut stream: &[u8]) -> Vec<(u8, Vec<u8>)> {
-    let mut out = Vec::new();
-    while stream.len() >= 5 {
-        let id = stream[0];
-        let len = u32::from_le_bytes([stream[1], stream[2], stream[3], stream[4]]) as usize;
-        assert!(
-            stream.len() >= 5 + len,
-            "frame claims {len} bytes with only {} left: the stream is interleaved",
-            stream.len() - 5
-        );
-        out.push((id, stream[5..5 + len].to_vec()));
-        stream = &stream[5 + len..];
-    }
-    assert!(stream.is_empty(), "{} trailing bytes", stream.len());
-    out
-}
 
 /// The fake device never asks for AUTH, so this is only here to satisfy
 /// the handshake API.

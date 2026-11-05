@@ -140,11 +140,8 @@ async fn send_frame_async(
 ///   with [`AdbStatus::Protocol`] before anything is sent, as a NUL in
 ///   `command` is.
 /// * `rows`, `cols` — if `pty` and either is non-zero, a `WINDOW_SIZE_CHANGE`
-///   frame is sent right after the channel opens. The frame is a write like
-///   any other, header and payload in two WRTEs, so this call can need a
-///   read call running (see the [crate docs](crate)), and its caller has no
-///   shell handle yet to read on. To avoid the wait, pass 0, 0 and call
-///   [`adb_shell_set_window_size`] once a thread is reading.
+///   frame is sent right after the channel opens, a write like any other
+///   (see the [crate docs](crate)).
 ///
 /// On success, `*out_sh` receives a handle that must be released with
 /// [`adb_shell_free`]. Call [`adb_shell_close`] beforehand to tear down the
@@ -210,14 +207,14 @@ pub unsafe extern "C" fn adb_shell_open(
 
     if pty && (rows != 0 || cols != 0) {
         let payload = WindowSize { rows, cols }.encode();
-        let res = block_on::block_on(send_frame_async(
+        let send = send_frame_async(
             &writer,
             &send_lock,
             channel_id,
             FrameId::WindowSizeChange,
             payload.as_bytes(),
-        ));
-        if let Err(e) = res {
+        );
+        if let Err(e) = block_on::block_on_write(&reader_arc, &writer, channel_id, send) {
             let _ = block_on::block_on(writer.close_channel(channel_id));
             return error::fail_error(e);
         }
@@ -302,8 +299,11 @@ pub unsafe extern "C" fn adb_shell_read_frame(
 /// assembled and written under a lock, so frames arrive whole rather
 /// than interleaved with another sender's.
 ///
-/// The frame header and a payload go out as two WRTEs, so one call can
-/// need a read call running: see the [crate docs](crate).
+/// The frame header and a payload go out as two WRTEs, and the second
+/// can wait for the device: see the [crate docs](crate). A failure can
+/// leave the header out and the payload not, and the device then takes
+/// whatever comes next for that payload. After one the session's frame
+/// stream cannot be trusted: close it.
 ///
 /// # Safety
 /// `sh` must be a valid handle. `data` must be NULL or point to at least
@@ -391,6 +391,9 @@ unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: FrameId, payload: &[u8]) 
         return AdbStatus::ChannelClosed;
     }
     let ch = sh.channel_id;
-    ffi_try!(send_frame_async(&sh.writer, &sh.send_lock, ch, id, payload));
+    let send = send_frame_async(&sh.writer, &sh.send_lock, ch, id, payload);
+    if let Err(e) = block_on::block_on_write(&sh.reader, &sh.writer, ch, send) {
+        return error::fail_error(e);
+    }
     AdbStatus::Ok
 }

@@ -3,6 +3,7 @@
 
 use libadb::base::channel::ChannelId;
 
+use crate::block_on;
 use crate::connection::adb_connection_t;
 use crate::error::{self, AdbStatus};
 use crate::slice;
@@ -121,12 +122,12 @@ pub unsafe extern "C" fn adb_read_channel(
 ///
 /// They go out as WRTEs of at most the negotiated `max_payload`, and
 /// each can first wait for the device's OKAY to the one before it, or
-/// for credit under delayed ACK. Only a read call takes that OKAY off
-/// the connection, so this call can need one running even on its own,
-/// and socket timeouts do not reach the wait: see the
+/// for credit under delayed ACK. No read call has to be running for
+/// that: with none, this call reads the connection itself, and can then
+/// fail as a read does, with part of `buf` already sent. See the
 /// [crate docs](crate).
 ///
-/// Does not require the reader mutex — safe to call concurrently with
+/// Never waits for the read lock — safe to call concurrently with
 /// [`adb_read_channel`] on another thread.
 ///
 /// # Safety
@@ -151,7 +152,10 @@ pub unsafe extern "C" fn adb_write_channel(
         Ok(ch) => ch,
         Err(status) => return status,
     };
-    ffi_try!(conn.writer.write_channel(ch, slice));
+    let write = conn.writer.write_channel(ch, slice);
+    if let Err(e) = block_on::block_on_write(&conn.reader, &conn.writer, ch, write) {
+        return error::fail_error(e);
+    }
     AdbStatus::Ok
 }
 
