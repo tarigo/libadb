@@ -20,7 +20,7 @@ use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::session::ServiceChannel;
 use crate::base::slot::ChannelFault;
-use crate::base::wire::{recv_pkt, send_pkt};
+use crate::base::wire::{connection_gone, recv_pkt, send_pkt};
 use crate::device_banner::DeviceBanner;
 use crate::error::Error;
 
@@ -281,12 +281,17 @@ where
     /// nothing and is read past, so `Ok(0)` only answers an empty `buf`.
     ///
     /// What the device sent stays in the channel until it can be taken,
-    /// and bytes that owe an acknowledgement are taken only with the
-    /// write half in hand: a call dropped while it waits for that has
-    /// taken nothing, and the next read gets them. Dropping the call
+    /// and bytes that owe an acknowledgement are taken only once that
+    /// has been sent: a call dropped while it waits for the write half
+    /// has taken nothing, and the next read gets them. Dropping the call
     /// while it waits for a packet is another matter: the wait is a
     /// transport read, as under
     /// [`accept_incoming`](Self::accept_incoming).
+    ///
+    /// What arrived is handed over whatever has become of the connection
+    /// since: only a read that finds nothing buffered fails with that.
+    /// An acknowledgement that fails does not fail the read it belongs
+    /// to; the next call reports the connection's failure.
     ///
     /// A concurrent [`Writer::close_channel`] on the same channel does
     /// not wake this call directly — see the module-level note on
@@ -296,7 +301,6 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
-        self.shared.desync.check()?;
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
         }
@@ -311,9 +315,13 @@ where
                 self.shared.negotiated.config.max_payload(),
             )
             .await?;
-            self.dispatch(pkt, OnFault::FailCall).await?;
-            if let Some(n) = self.shared.take_buffered(ch, buf).await? {
-                return Ok(n);
+            // What the packet left for this channel goes first: what
+            // failed along the way is the next call's to report.
+            let dispatched = self.dispatch(pkt, OnFault::FailCall).await;
+            match (self.shared.take_buffered(ch, buf).await, dispatched) {
+                (Ok(Some(n)), _) => return Ok(n),
+                (_, Err(e)) | (Err(e), _) => return Err(e),
+                (Ok(None), Ok(())) => {}
             }
         }
     }
@@ -363,7 +371,21 @@ where
         self.shared.take_incoming()
     }
 
+    /// Act on `pkt`, whatever became of what it had to answer the device
+    /// with: once the device is gone there is nobody to answer, and what
+    /// it sent before it went is still to be received.
     async fn dispatch(
+        &mut self,
+        pkt: Packet,
+        on_fault: OnFault,
+    ) -> Result<(), Error<<RH as ErrorType>::Error>> {
+        match self.act_on(pkt, on_fault).await {
+            Err(e) if connection_gone(&e) => Ok(()),
+            acted => acted,
+        }
+    }
+
+    async fn act_on(
         &mut self,
         pkt: Packet,
         on_fault: OnFault,

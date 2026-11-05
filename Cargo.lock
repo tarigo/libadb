@@ -777,6 +777,7 @@ dependencies = [
  "embedded-io",
  "hkdf",
  "libadb",
+ "libc",
  "sha2",
  "tempfile",
 ]

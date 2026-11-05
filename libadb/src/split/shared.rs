@@ -20,7 +20,7 @@ use crate::base::ids::{ChannelIds, RemoteId};
 use crate::base::incoming::{IncomingQueue, PendingOpen};
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::Packet;
-use crate::base::slot::{ChannelFault, PendingAck};
+use crate::base::slot::{ChannelFault, ChannelSlot, PendingAck};
 use crate::base::wire::{send_okay_to, send_open, send_pkt, DesyncFlag};
 use crate::error::Error;
 
@@ -199,9 +199,17 @@ impl<WH> Shared<WH> {
     /// Take what `ch` has buffered into `buf` and send the OKAY it
     /// owes: `Ok(None)` while an open channel has nothing buffered.
     ///
-    /// Bytes that owe an acknowledgement leave the buffer only once the
-    /// write lock is held to send it, so a call dropped while it waits
-    /// for that lock has taken nothing.
+    /// What arrived is handed over whatever has become of the
+    /// connection, and only once nothing is left does a read fail with
+    /// that: a write given up on says nothing about bytes the device
+    /// already delivered. Nor does a failed OKAY fail the read it
+    /// belongs to. The failure is the connection's, and the next call
+    /// reports it.
+    ///
+    /// Bytes that owe an acknowledgement leave the buffer only once it
+    /// has been sent, so a call dropped while it waits for the write
+    /// lock has taken nothing, and one dropped in the middle of the
+    /// write leaves the bytes readable, with no gap in them.
     pub(super) async fn take_buffered(
         &self,
         ch: ChannelId,
@@ -212,34 +220,36 @@ impl<WH> Shared<WH> {
     {
         {
             let mut chs = self.lock_channels();
+            if !chs.get(ch).is_some_and(ChannelSlot::has_data) {
+                self.desync.check()?;
+            }
             let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-            // Nothing to take, or nothing this take acknowledges: no
-            // OKAY to send, so no lock to wait for.
-            if !slot.take_acks(buf.len()) {
-                let taken = slot.take_buffered(buf)?;
-                return Ok(taken.map(|(n, _)| n));
+            // Nothing to take, nothing this take acknowledges, or nobody
+            // left to send it to: no OKAY, so no lock to wait for.
+            if self.check_live::<Infallible>().is_err() || !slot.take_acks(buf.len()) {
+                return slot.take_buffered(buf);
             }
         }
-        let mut wh = self.lock_write().await?;
-        let taken = {
-            let mut chs = self.lock_channels();
-            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-            slot.take_buffered(buf)?
-        };
-        let Some((n, ack)) = taken else {
-            return Ok(None);
-        };
-        if let Some(ack) = ack {
-            send_okay_to(
-                &mut *wh,
-                &self.desync,
-                ack,
-                self.negotiated.ack_mode(),
-                self.negotiated.checksum(),
-            )
-            .await?;
+        if let Ok(mut wh) = self.lock_write().await {
+            let ack = {
+                let mut chs = self.lock_channels();
+                let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
+                slot.settle_take(buf.len())
+            };
+            if let Some(ack) = ack {
+                let _ = send_okay_to(
+                    &mut *wh,
+                    &self.desync,
+                    ack,
+                    self.negotiated.ack_mode(),
+                    self.negotiated.checksum(),
+                )
+                .await;
+            }
         }
-        Ok(Some(n))
+        let mut chs = self.lock_channels();
+        let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
+        slot.take_buffered(buf)
     }
 
     pub(super) async fn send_okay(

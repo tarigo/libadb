@@ -176,11 +176,17 @@ where
     /// the next WRTE on `ch`. A channel the device closed fails with
     /// [`Error::ChannelClosed`] once its buffered data is read.
     ///
+    /// What arrived is handed over whatever has become of the connection
+    /// since: only a read that finds nothing buffered fails with that.
+    /// An acknowledgement that fails does not fail the read it belongs
+    /// to; the next call reports the connection's failure.
+    ///
     /// Cancellation-safe while it waits — for data, or for the write
     /// lock an acknowledgement needs: nothing has been taken then, and
     /// the data stays buffered for the next call. Dropping the future
     /// while that acknowledgement is written desynchronizes the
-    /// connection, as with any cancelled write.
+    /// connection, as with any cancelled write, and has taken nothing
+    /// either.
     pub async fn read_channel(
         &self,
         ch: ChannelId,
@@ -215,9 +221,6 @@ where
         let mut interrupt = pin!(interrupt);
         let mut listener: Option<EventListener> = None;
         loop {
-            // Each time round: data that arrived just as another task
-            // desynchronized the connection is not handed out.
-            self.shared.desync.check()?;
             if let Some(n) = self.shared.take_buffered(ch, buf).await? {
                 return Ok(SelectResult::Data(n));
             }
@@ -264,8 +267,9 @@ where
     /// next as the rest of that packet. The connection is marked
     /// desynchronized instead: this and every other operation on it
     /// then fails with [`Error::Desynchronized`], including on the
-    /// paired [`Reader`] and calls already waiting on a `Writer`. Close
-    /// it and open a new one.
+    /// paired [`Reader`] and calls already waiting on a `Writer`, reads
+    /// once they have handed over what had already arrived. Close it
+    /// and open a new one.
     ///
     /// The mark goes up from the moment the header write is first
     /// polled, not only between the two writes — a transport that took

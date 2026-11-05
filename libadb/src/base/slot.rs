@@ -89,6 +89,12 @@ pub(crate) struct ChannelSlot {
     /// Bytes received for this channel that the peer has not been
     /// acknowledged for yet — the backpressure the device feels.
     unacked: usize,
+    /// How much of `rx_buf`, from its head, has its OKAY settled and is
+    /// yet to be taken. That OKAY lets the device send as much again,
+    /// which can land first, so these bytes are as good as gone for
+    /// what it may send; and what lands behind them owes an OKAY of its
+    /// own, so a take stops here.
+    settled: usize,
     /// The order concurrent writers take the budget in.
     send_queue: SendQueue,
     /// What broke this channel, once [`fail`](Self::fail) closed it for
@@ -108,6 +114,7 @@ impl ChannelSlot {
             wrte_acked: true,
             send_budget: 0,
             unacked: 0,
+            settled: 0,
             send_queue: SendQueue::default(),
             failed: None,
         }
@@ -198,7 +205,7 @@ impl ChannelSlot {
     pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, RxOverflow> {
         self.push_rx(payload)?;
         self.unacked = self.unacked.saturating_add(payload.len());
-        if self.policy.ack == AckMode::Classic && self.rx_buf.len() < self.policy.watermark {
+        if self.policy.ack == AckMode::Classic && self.held() < self.policy.watermark {
             if let Some(ack) = self.ack(payload.len()) {
                 self.unacked = 0;
                 return Ok(AckDecision::Now(ack));
@@ -207,38 +214,19 @@ impl ChannelSlot {
         Ok(AckDecision::Hold)
     }
 
-    /// Hand `taken` bytes of a freshly arrived packet to the caller,
-    /// buffer whatever is left of it, and say what to acknowledge.
-    pub fn deliver(
-        &mut self,
-        payload: &[u8],
-        taken: usize,
-    ) -> Result<Option<PendingAck>, RxOverflow> {
-        if taken < payload.len() {
-            self.push_rx(&payload[taken..])?;
-            self.unacked = self.unacked.saturating_add(payload.len() - taken);
-        }
+    /// Say what to acknowledge for a freshly arrived packet of `taken`
+    /// bytes that went straight to the caller, all of it. A packet with
+    /// any part left over belongs in [`apply_write`](Self::apply_write).
+    pub fn deliver(&mut self, taken: usize) -> Option<PendingAck> {
         if self.policy.ack == AckMode::Delayed {
-            return Ok(self.ack(taken).filter(|ack| ack.len > 0));
+            return self.ack(taken).filter(|ack| ack.len > 0);
         }
         if self.rx_buf.len() >= self.policy.watermark {
-            return Ok(None);
+            return None;
         }
-        let Some(ack) = self.ack(self.unacked) else {
-            return Ok(None);
-        };
+        let ack = self.ack(self.unacked)?;
         self.unacked = 0;
-        Ok(Some(ack))
-    }
-
-    /// Record that the application took `n` bytes from the channel
-    /// `ids` names, and say what to acknowledge as a result. Taking the
-    /// ids is what lets the bytes leave the count only with the OKAY
-    /// that acknowledges them.
-    fn consume(&mut self, ids: ChannelIds, n: usize) -> Option<PendingAck> {
-        let len = self.ack_len(n, self.rx_buf.len())?;
-        self.unacked -= len;
-        Some(PendingAck { ids, len })
+        Some(ack)
     }
 
     /// The OKAY for `len` bytes on this channel. `None` until the
@@ -268,43 +256,81 @@ impl ChannelSlot {
         }
     }
 
-    /// Copy buffered bytes into `buf`, and say what to acknowledge for
-    /// taking them. `None` while an open channel has nothing buffered;
-    /// once a closed one is drained, [`Error::ChannelClosed`] or the
-    /// fault that closed it.
+    /// Whether [`take_buffered`](Self::take_buffered) has bytes to hand
+    /// out.
     ///
     /// Nothing is taken before the device has named its end: what it
     /// wrote ahead of the READY to our OPEN stays buffered, and counted
     /// as unacknowledged, until that READY gives the OKAY for it
     /// somewhere to go. A channel closed before it ever opened has
     /// nothing to hand out.
-    pub fn take_buffered<E>(
-        &mut self,
-        buf: &mut [u8],
-    ) -> Result<Option<(usize, Option<PendingAck>)>, Error<E>> {
-        let Some(ids) = self.ids().filter(|_| !self.rx_buf.is_empty()) else {
+    pub fn has_data(&self) -> bool {
+        self.remote.is_some() && !self.rx_buf.is_empty()
+    }
+
+    /// Settle what taking up to `want` buffered bytes owes the device:
+    /// the bytes leave the count of what it has had no OKAY for, and
+    /// the OKAY comes back to send. `None` with nothing to settle, or
+    /// with bytes still settled, which go first.
+    ///
+    /// The bytes themselves stay until
+    /// [`take_buffered`](Self::take_buffered). A read goes through the
+    /// two in this order, the OKAY between them, so that a call dropped
+    /// in the middle of that write has taken nothing: its connection is
+    /// desynchronized, and what it left stays readable, with no gap in
+    /// it.
+    pub fn settle_take(&mut self, want: usize) -> Option<PendingAck> {
+        let ids = self.ids().filter(|_| self.settled == 0)?;
+        let n = want.min(self.rx_buf.len());
+        let len = self.ack_len(n, self.rx_buf.len() - n)?;
+        self.unacked -= len;
+        self.settled = n;
+        Some(PendingAck { ids, len })
+    }
+
+    /// Copy buffered bytes into `buf`: those settled if there are any,
+    /// and nothing behind them. `None` while an open channel has nothing
+    /// to hand out; once a closed one is drained,
+    /// [`Error::ChannelClosed`] or the fault that closed it. What this
+    /// owes the device is for [`settle_take`](Self::settle_take).
+    pub fn take_buffered<E>(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Error<E>> {
+        if !self.has_data() {
             return if self.is_closed() {
                 Err(self.closed_error())
             } else {
                 Ok(None)
             };
+        }
+        let ready = match self.settled {
+            0 => self.rx_buf.len(),
+            settled => settled,
         };
-        let n = buf.len().min(self.rx_buf.len());
+        let n = buf.len().min(ready);
         buf[..n].copy_from_slice(&self.rx_buf[..n]);
         self.rx_buf.advance(n);
-        Ok(Some((n, self.consume(ids, n))))
+        self.settled -= n.min(self.settled);
+        Ok(Some(n))
+    }
+
+    /// What `rx_buf` holds that is not on its way out.
+    fn held(&self) -> usize {
+        self.rx_buf.len() - self.settled
     }
 
     fn push_rx(&mut self, payload: &[u8]) -> Result<(), RxOverflow> {
-        if self.rx_buf.len().saturating_add(payload.len()) > self.policy.rx_cap {
+        if self.held().saturating_add(payload.len()) > self.policy.rx_cap {
             return Err(RxOverflow);
         }
         self.rx_buf.extend_from_slice(payload);
         Ok(())
     }
 
+    /// The device closed the channel. It has no socket left to take an
+    /// OKAY, so nothing it sent is owed one from here on, however much
+    /// of it is still to be read.
     pub fn apply_close(&mut self) {
         self.state = ChannelState::Closed;
+        self.unacked = 0;
     }
 
     /// How much may be sent now: `None` while we wait for the device's
@@ -333,15 +359,14 @@ impl ChannelSlot {
 #[cfg_attr(not(feature = "split"), allow(dead_code))]
 impl ChannelSlot {
     /// Whether taking up to `want` buffered bytes now would owe the
-    /// device an OKAY — what [`take_buffered`](Self::take_buffered)
-    /// would answer, without taking anything.
+    /// device an OKAY — what [`settle_take`](Self::settle_take) would
+    /// answer, without settling anything.
     pub fn take_acks(&self, want: usize) -> bool {
-        if self.rx_buf.is_empty() || self.remote.is_none() {
+        if !self.has_data() || self.settled > 0 {
             return false;
         }
         let n = want.min(self.rx_buf.len());
-        let remaining = self.rx_buf.len() - n;
-        self.ack_len(n, remaining).is_some()
+        self.ack_len(n, self.rx_buf.len() - n).is_some()
     }
 
     /// Spend up to `want` bytes of [`budget`](Self::budget) ahead of

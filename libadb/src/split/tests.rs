@@ -2,6 +2,7 @@
 //! channels and back-pressure each in a module of its own.
 
 use super::*;
+use crate::base::channel::ChannelId;
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::ids::{ChannelIds, LocalId, RemoteId};
 use crate::base::mock::{
@@ -16,6 +17,7 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::pin;
 use core::sync::atomic::{AtomicBool, Ordering};
+use embedded_io::ErrorKind;
 
 /// Stage one OPEN out of the queue, then deliver more packets —
 /// the device-side traffic a staged request can race against.
@@ -657,29 +659,223 @@ fn a_read_that_owes_no_ack_does_not_wait_for_the_write_lock() {
     assert_eq!(chs.get(ch).unwrap().unacked(), 1000);
 }
 
+/// A write given up on says nothing about bytes the device already
+/// delivered: the read gets them, and the next one the failure.
 #[test]
-fn a_read_woken_on_a_desynchronized_connection_hands_out_nothing() {
+fn a_read_woken_on_a_desynchronized_connection_hands_out_what_arrived() {
     use core::task::{Context, Waker};
 
     // Index 1: the header is out, the payload write hangs.
     let (_reader, writer, ch) = split_with_channel(Some(1));
     let mut buf = [0u8; 8];
-    let mut read = pin!(writer.read_channel(ch, &mut buf));
-    assert!(read
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+    let n = {
+        let mut read = pin!(writer.read_channel(ch, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
 
-    // Data lands while another task abandons a packet mid-write.
-    {
-        let mut chs = writer.shared.lock_channels();
-        let slot = chs.get_mut(ch).unwrap();
-        slot.apply_write(b"hi").unwrap();
-    }
-    abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+        // Data lands while another task abandons a packet mid-write.
+        hold_back(&writer, ch, b"hi");
+        abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
 
-    let err = now(read).unwrap_err();
+        now(read).unwrap()
+    };
+    assert_eq!(&buf[..n], b"hi");
+
+    let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// Put `data` in `ch`'s buffer as `run` leaves it under delayed ACK:
+/// waiting for a read, its OKAY held back until then.
+fn hold_back<WH: embedded_io_async::Write>(writer: &Writer<WH>, ch: ChannelId, data: &[u8]) {
+    let mut chs = writer.shared.lock_channels();
+    chs.get_mut(ch).unwrap().apply_write(data).unwrap();
+}
+
+/// The failure of an OKAY is the connection's and not the read's, whose
+/// bytes the device delivered all the same.
+#[test]
+fn a_failed_okay_costs_the_read_nothing() {
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello world");
+    seen.fail_writes(ErrorKind::Other);
+
+    let mut buf = [0u8; 5];
+    assert_eq!(now(writer.read_channel(ch, &mut buf)).unwrap(), 5);
+    assert_eq!(&buf, b"hello");
+
+    let mut rest = [0u8; 16];
+    let n = now(writer.read_channel(ch, &mut rest)).unwrap();
+    assert_eq!(&rest[..n], b" world", "the rest comes first");
+    let err = now(writer.read_channel(ch, &mut rest)).unwrap_err();
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// Writes fail like this once the device is gone, which leaves no
+/// stream to fall out of step with: reads go on to what it sent before
+/// it went, here and on the wire.
+#[test]
+fn an_okay_to_a_device_that_is_gone_desynchronizes_nothing() {
+    for kind in [
+        ErrorKind::ConnectionReset,
+        ErrorKind::ConnectionAborted,
+        ErrorKind::BrokenPipe,
+        ErrorKind::NotConnected,
+    ] {
+        let (mut reader, writer, ch, seen) =
+            crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+        hold_back(&writer, ch, b"hello");
+        seen.fail_writes(kind);
+
+        let mut buf = [0u8; 16];
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello", "{kind:?}");
+        writer
+            .shared
+            .desync
+            .check::<core::convert::Infallible>()
+            .unwrap_or_else(|_| panic!("{kind:?} raised a desync"));
+
+        seen.feed(&wrte(1, b"from the wire"));
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"from the wire", "{kind:?}");
+    }
+}
+
+/// An unknown failure is no such thing: the device may be there, and
+/// reading the rest of a packet from whatever comes next.
+#[test]
+fn an_okay_that_fails_otherwise_desynchronizes() {
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello");
+    seen.fail_writes(ErrorKind::TimedOut);
+
+    let mut buf = [0u8; 16];
+    now(writer.read_channel(ch, &mut buf)).unwrap();
+    assert!(writer
+        .shared
+        .desync
+        .check::<core::convert::Infallible>()
+        .is_err());
+}
+
+/// Without delayed ACK the OKAY goes out as the packet is dispatched,
+/// and a read cannot be left to fail with the packet still in the slot.
+#[test]
+fn a_reader_hands_over_a_packet_whose_okay_failed() {
+    let (mut reader, _writer, ch) = split_with_channel(None);
+    let seen = now(reader.shared.write_half.lock()).clone();
+    seen.feed(&wrte(1, b"hello"));
+    seen.fail_writes(ErrorKind::Other);
+
+    let mut buf = [0u8; 16];
+    let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// Taking the bytes ahead of the write would lose them with the call,
+/// and the next read, which a desync no longer stops, would come back
+/// past the gap with no word of it.
+#[test]
+fn a_read_dropped_writing_its_okay_leaves_no_gap() {
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello world");
+    seen.stall_writes();
+
+    let mut buf = [0u8; 5];
+    abandon(writer.read_channel(ch, &mut buf));
+
+    let mut got = Vec::new();
+    let mut rest = [0u8; 16];
+    let err = loop {
+        match now(writer.read_channel(ch, &mut rest)) {
+            Ok(n) => got.extend_from_slice(&rest[..n]),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(got, b"hello world");
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// An OKAY lets the device send as much again, and `run` takes that in
+/// with the write still finishing. It owes an OKAY of its own, which a
+/// read taking it along would leave unsent, and the credit gone for good.
+#[test]
+fn what_lands_during_an_okay_keeps_the_okay_it_owes() {
+    use core::task::{Context, Waker};
+
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello");
+    seen.slow_writes(1);
+
+    let mut buf = [0u8; 16];
+    let n = {
+        let mut read = pin!(writer.read_channel(ch, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+        hold_back(&writer, ch, b" world");
+        now(read).unwrap()
+    };
+    assert_eq!(&buf[..n], b"hello");
+
+    let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b" world");
+    assert_eq!(seen.acks_for(1), [5, 6], "credit for every byte read");
+}
+
+/// A stalled write half does not hold up what no OKAY can come of. A
+/// read that tried would never finish here: every write stalls.
+#[test]
+fn a_desynchronized_connection_is_sent_no_okay() {
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    seen.stall_writes();
+    abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+    hold_back(&writer, ch, b"hello");
+
+    let mut buf = [0u8; 16];
+    let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+}
+
+#[test]
+fn a_connection_nobody_reads_is_sent_no_okay() {
+    let (reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello");
+    drop(reader);
+    seen.stall_writes();
+
+    let mut buf = [0u8; 16];
+    let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
+    assert!(matches!(err, Error::Disconnected), "got {err:?}");
+}
+
+/// What a closed channel still holds owes nothing, so a read of it waits
+/// for no write half, however busy that is.
+#[test]
+fn a_closed_channel_is_read_without_the_write_half() {
+    let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    hold_back(&writer, ch, b"hello");
+    writer
+        .shared
+        .lock_channels()
+        .get_mut(ch)
+        .unwrap()
+        .apply_close();
+
+    let busy = now(writer.shared.write_half.lock());
+    let mut buf = [0u8; 16];
+    let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    drop(busy);
+    assert!(seen.acks_for(1).is_empty());
 }
 
 #[test]

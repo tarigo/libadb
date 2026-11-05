@@ -25,6 +25,7 @@ libadb = { path = "../libadb", version = "0.9.0", default-features = false, feat
 embedded-io = "0.6"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
 # The pairing test writes the device's half of the cipher out again
 # rather than borrowing the crate's, so both sides agree on the key

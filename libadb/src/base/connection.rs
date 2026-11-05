@@ -29,7 +29,8 @@ use super::protocol::features::Feature;
 use super::protocol::Packet;
 use super::slot::{ChannelSlot, PendingAck};
 use super::wire::{
-    recv_pkt, recv_pkt_or, send_okay_to, send_open, send_pkt, send_raw, DesyncFlag, Received,
+    connection_gone, recv_pkt, recv_pkt_or, send_okay_to, send_open, send_pkt, send_raw,
+    DesyncFlag, Received,
 };
 use crate::error::Error;
 
@@ -317,6 +318,13 @@ where
     /// channel nobody reads stops the device writing to it rather than
     /// growing without bound.
     ///
+    /// What arrived is handed over whatever has become of the
+    /// connection: an acknowledgement that fails does not fail the read
+    /// it belongs to, and the next call reports the failure. On a
+    /// desynchronized connection a read hands over what is buffered and
+    /// then fails with [`Error::Desynchronized`]. Should the device be
+    /// gone it goes on to what it sent before it went.
+    ///
     /// [`ConnectionConfig::rx_watermark`]: crate::ConnectionConfig::rx_watermark
     pub async fn read_channel(
         &mut self,
@@ -343,7 +351,8 @@ where
     /// them leaves the device reading whatever we send next as the rest
     /// of that packet. The connection is marked desynchronized instead:
     /// every later operation on it fails with
-    /// [`Error::Desynchronized`].
+    /// [`Error::Desynchronized`], reads once they have handed over what
+    /// had already arrived.
     ///
     /// The mark goes up from the moment the header write is first
     /// polled, not only between the two writes — a transport that took
@@ -500,12 +509,7 @@ where
         interrupt: F,
         race: bool,
     ) -> Result<SelectResult<F::Output>, Error<<T as ErrorType>::Error>> {
-        self.desync.check()?;
-        let buffered = self.slot_mut(ch)?.take_buffered(buf)?;
-        if let Some((n, ack)) = buffered {
-            if let Some(ack) = ack {
-                self.send_okay(ack).await?;
-            }
+        if let Some(n) = self.take_buffered(ch, buf).await? {
             return Ok(SelectResult::Data(n));
         }
 
@@ -526,15 +530,15 @@ where
                 Received::Interrupted(val) => return Ok(SelectResult::Interrupted(val)),
             };
             match pkt.command {
-                Command::Write if pkt.arg1 == ids.local.raw() => {
-                    let n = buf.len().min(pkt.data.len());
-                    buf[..n].copy_from_slice(&pkt.data[..n]);
-                    let ack = match self.table.get_mut(ch) {
-                        Some(slot) => slot.deliver(&pkt.data, n)?,
-                        None => None,
-                    };
+                // Straight to the caller, but only whole: the part of a
+                // packet left in the slot would read on as if nothing
+                // came before it, were the call dropped during the OKAY.
+                Command::Write if pkt.arg1 == ids.local.raw() && pkt.data.len() <= buf.len() => {
+                    let n = pkt.data.len();
+                    buf[..n].copy_from_slice(&pkt.data);
+                    let ack = self.table.get_mut(ch).and_then(|slot| slot.deliver(n));
                     if let Some(ack) = ack {
-                        self.send_okay(ack).await?;
+                        let _ = self.send_okay(ack).await;
                     }
                     return Ok(SelectResult::Data(n));
                 }
@@ -545,10 +549,39 @@ where
                     return Err(Error::ChannelClosed);
                 }
                 _ => {
-                    self.dispatch(pkt).await?;
+                    // What the packet left for this channel goes first:
+                    // what failed along the way is the next call's to
+                    // report.
+                    let dispatched = self.dispatch(pkt).await;
+                    match (self.take_buffered(ch, buf).await, dispatched) {
+                        (Ok(Some(n)), _) => return Ok(SelectResult::Data(n)),
+                        (_, Err(e)) | (Err(e), _) => return Err(e),
+                        (Ok(None), Ok(())) => {}
+                    }
                 }
             }
         }
+    }
+
+    /// Take what `ch` has buffered into `buf`: `Ok(None)` while an open
+    /// channel has nothing buffered.
+    ///
+    /// Only once nothing is left does a read fail with what became of
+    /// the connection. The OKAY goes first, so that a call dropped in
+    /// the middle of it leaves the bytes readable, and whatever becomes
+    /// of it, the bytes are the read's: the next call reports a failure.
+    async fn take_buffered(
+        &mut self,
+        ch: ChannelId,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, Error<<T as ErrorType>::Error>> {
+        if !self.table.get(ch).is_some_and(ChannelSlot::has_data) {
+            self.desync.check()?;
+        }
+        if let Some(ack) = self.slot_mut(ch)?.settle_take(buf.len()) {
+            let _ = self.send_okay(ack).await;
+        }
+        self.slot_mut(ch)?.take_buffered(buf)
     }
 
     fn slot_mut(
@@ -564,7 +597,17 @@ where
         send_okay_to(&mut self.transport, &self.desync, ack, mode, checksum).await
     }
 
+    /// Act on `pkt`, whatever became of what it had to answer the device
+    /// with: once the device is gone there is nobody to answer, and what
+    /// it sent before it went is still to be received.
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
+        match self.act_on(pkt).await {
+            Err(e) if connection_gone(&e) => Ok(()),
+            acted => acted,
+        }
+    }
+
+    async fn act_on(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.negotiated.checksum();
         match self.table.dispatch(&pkt) {
             DispatchOutcome::AckWrite { ack, .. } => self.send_okay(ack).await?,

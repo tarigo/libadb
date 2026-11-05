@@ -358,6 +358,27 @@ impl FakeSession {
         self.last_open_asb
     }
 
+    /// Wait until everything sent so far has reached the host. A device
+    /// that hangs up any sooner loses what is still on its way: the
+    /// first OKAY to reach the closed socket is answered with a reset,
+    /// which takes it all down, so no host could ever read it.
+    pub async fn delivered(&self) {
+        #[cfg(target_os = "linux")]
+        loop {
+            use std::os::fd::AsRawFd;
+            let mut unacked: libc::c_int = 0;
+            // SAFETY: the socket is open, and `unacked` is what this
+            // request writes to.
+            let status =
+                unsafe { libc::ioctl(self.stream.as_raw_fd(), libc::TIOCOUTQ, &mut unacked) };
+            assert_eq!(status, 0, "TIOCOUTQ");
+            if unacked == 0 {
+                return;
+            }
+            rt::sleep_ms(1).await;
+        }
+    }
+
     /// Low-level: send a message with command + args + payload.
     pub async fn send(&mut self, cmd: u32, arg0: u32, arg1: u32, payload: &[u8]) {
         let mut buf = [0u8; HEADER_SIZE];

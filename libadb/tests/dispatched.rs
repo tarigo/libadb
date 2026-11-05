@@ -78,7 +78,8 @@ async fn shell_v2_exec_runs_over_the_writer() {
 // dispatches packets in order. It also holds one of the two slots, so
 // the last open can only get the one the shell gave back. With delayed
 // ACK every OKAY leaves from the read that took the data, which puts the
-// host's packets in one order for the device to expect.
+// host's packets in one order for the device to expect, and the shell's
+// data has none: the channel it came on was closed before it was read.
 rt_test! {
 async fn close_stdin_finds_the_channel_already_closed() {
     let dev = FakeDevice::new().banner(b"device::features=shell_v2,delayed_ack".to_vec()).delayed_ack(4096);
@@ -98,8 +99,6 @@ async fn close_stdin_finds_the_channel_already_closed() {
 
         let (okay, _) = s.expect(CMD_OKAY).await;
         assert_eq!((okay.arg0, okay.arg1), (marker_cli, marker_dev));
-        let (okay, _) = s.expect(CMD_OKAY).await;
-        assert_eq!((okay.arg0, okay.arg1), (shell_cli, shell_dev));
         let (close, _) = s.expect(CMD_CLSE).await;
         assert_eq!((close.arg0, close.arg1), (shell_cli, shell_dev));
         s.accept_open(b"again:\0").await;

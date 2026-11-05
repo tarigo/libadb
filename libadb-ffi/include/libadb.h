@@ -285,8 +285,9 @@ adb_status_t adb_pair(
  * over. A write timeout is a harder stop even on Unix: firing
  * mid-packet abandons a write the device has partially seen, so the
  * connection is marked desynchronized and every later channel
- * operation fails with ADB_ERR_DESYNCHRONIZED (metadata queries and
- * this setter still answer). Both hold on a TLS (wireless-debugging)
+ * operation fails with ADB_ERR_DESYNCHRONIZED, reads once they have
+ * handed over what had already arrived (metadata queries and this
+ * setter still answer). Both hold on a TLS (wireless-debugging)
  * connection too: the timeouts sit on the socket underneath, a
  * timed-out read leaves the session and the partial packet intact, and
  * a timed-out write is the same abandoned packet. Prefer the read

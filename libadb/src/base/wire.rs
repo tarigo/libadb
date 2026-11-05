@@ -105,6 +105,22 @@ impl Drop for Staged<'_> {
     }
 }
 
+/// Whether `e` says for certain that the other end is gone: nothing
+/// more can be sent to it, whereas what it sent before going can still
+/// be read.
+///
+/// A timeout is no such thing, and cannot be told from it by anything
+/// short of these kinds: on unix `SO_RCVTIMEO` comes back as
+/// `WouldBlock`, which `embedded_io` has no kind for but
+/// [`Other`](embedded_io::ErrorKind::Other).
+pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
+    use embedded_io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
+    matches!(e, Error::Io(e) if matches!(
+        e.kind(),
+        ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
+    ))
+}
+
 /// Tracks whether a packet was left half-written.
 ///
 /// A packet goes out as a header write followed by a payload write. Drop
@@ -112,7 +128,8 @@ impl Drop for Staged<'_> {
 /// lost the race — and the device is left waiting for a payload it will
 /// take from whatever we send next. Nothing on this side can put the
 /// framing back, so the flag is one-way: once raised, every operation on
-/// the connection fails with [`Error::Desynchronized`].
+/// the connection fails with [`Error::Desynchronized`], reads once they
+/// have handed over what had already arrived.
 pub(crate) struct DesyncFlag(AtomicBool);
 
 impl DesyncFlag {
@@ -320,6 +337,10 @@ pub(crate) async fn send_open<T: Write>(
 
 /// Put an encoded header and its payload on the wire, raising `desync`
 /// if the packet does not get out whole.
+///
+/// Unless the other end is gone. Then no stream is left to fall out of
+/// step with, and raising the flag would only stop reads short of what
+/// it sent before it went.
 async fn send_frame<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
@@ -327,6 +348,18 @@ async fn send_frame<T: Write>(
     payload: &[u8],
 ) -> Result<(), Error<T::Error>> {
     let armed = desync.arm();
+    let sent = write_frame(t, header, payload).await;
+    if sent.as_ref().err().is_none_or(connection_gone) {
+        armed.disarm();
+    }
+    sent
+}
+
+async fn write_frame<T: Write>(
+    t: &mut T,
+    header: &[u8; MESSAGE_SIZE],
+    payload: &[u8],
+) -> Result<(), Error<T::Error>> {
     write_all(t, header).await?;
     if !payload.is_empty() {
         write_all(t, payload).await?;
@@ -334,9 +367,7 @@ async fn send_frame<T: Write>(
     // A transport that buffers, as TLS does, may still hold part of the
     // packet, and only the flush puts all of it on the wire; the rest
     // have nothing to flush. So it stays inside the armed stretch.
-    t.flush().await.map_err(Error::Io)?;
-    armed.disarm();
-    Ok(())
+    t.flush().await.map_err(Error::Io)
 }
 
 /// Send the OKAY `ack` stands for. Under delayed ACK it carries the

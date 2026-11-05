@@ -36,6 +36,11 @@
 //! one the device opened. Calls that need no answer — a write the
 //! credit already covers, a close — still reach the transport.
 //!
+//! What arrived stays readable however the connection fails: a read
+//! hands over what its channel has buffered first, and only then fails
+//! with [`Error::Disconnected`] or [`Error::Desynchronized`]. Every
+//! other call on a desynchronized connection fails at once.
+//!
 //! Available under the `split` feature (implied by every runtime
 //! feature: `tokio`, `smol`, `nusb`, `rusb`). Pulls `std` into the
 //! build for its sync primitives; a pure `no_std` variant would need a

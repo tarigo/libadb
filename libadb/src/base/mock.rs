@@ -9,6 +9,7 @@ use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
 use bytes::BytesMut;
+use embedded_io::ErrorKind;
 
 use crate::base::channel::ChannelId;
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
@@ -16,8 +17,9 @@ use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::protocol::{command, Checksum};
 
+/// A transport failure of the kind a test asked for.
 #[derive(Debug, PartialEq, Eq)]
-pub struct MockError;
+pub struct MockError(ErrorKind);
 
 impl core::fmt::Display for MockError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -26,8 +28,8 @@ impl core::fmt::Display for MockError {
 }
 
 impl embedded_io::Error for MockError {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
+    fn kind(&self) -> ErrorKind {
+        self.0
     }
 }
 
@@ -37,8 +39,13 @@ pub(crate) struct Mock {
     inbound: VecDeque<u8>,
     writes: Vec<Vec<u8>>,
     stall_write: Option<usize>,
+    /// What every write fails with, once one has been asked for.
+    write_failure: Option<ErrorKind>,
     /// Reads that report `Pending` before any data comes back.
     slow_reads: usize,
+    /// Writes that report `Pending` before they go through.
+    #[cfg(feature = "split")]
+    slow_writes: usize,
     cancel_safe: bool,
     /// Cap on what one read hands back; 0 means none.
     drip: usize,
@@ -50,10 +57,33 @@ impl Mock {
             inbound: VecDeque::new(),
             writes: Vec::new(),
             stall_write: None,
+            write_failure: None,
             slow_reads: 0,
+            #[cfg(feature = "split")]
+            slow_writes: 0,
             cancel_safe: true,
             drip: 0,
         }
+    }
+
+    /// Fail every write from now on with `kind`.
+    pub(crate) fn fail_writes(&mut self, kind: ErrorKind) -> &mut Self {
+        self.write_failure = Some(kind);
+        self
+    }
+
+    /// Stall every write from now on.
+    pub(crate) fn stall_writes(&mut self) -> &mut Self {
+        self.stall_write = Some(self.writes.len());
+        self
+    }
+
+    /// Park the next `n` writes once each before they go through, so
+    /// that something can happen with one in flight.
+    #[cfg(feature = "split")]
+    pub(crate) fn slow_writes(&mut self, n: usize) -> &mut Self {
+        self.slow_writes = n;
+        self
     }
 
     /// Hand back at most `n` bytes a read, as TLS hands back a record at
@@ -113,9 +143,12 @@ impl Mock {
         self.stall_write == Some(self.writes.len())
     }
 
-    fn push(&mut self, buf: &[u8]) -> usize {
+    fn push(&mut self, buf: &[u8]) -> Result<usize, MockError> {
+        if let Some(kind) = self.write_failure {
+            return Err(MockError(kind));
+        }
         self.writes.push(buf.to_vec());
-        buf.len()
+        Ok(buf.len())
     }
 }
 
@@ -155,7 +188,7 @@ impl embedded_io_async::Write for Mock {
         if self.stalls_now() {
             core::future::pending::<()>().await;
         }
-        Ok(self.push(buf))
+        self.push(buf)
     }
 
     async fn flush(&mut self) -> Result<(), MockError> {
@@ -184,6 +217,22 @@ impl SharedMock {
     /// Queue a packet for the reader, as the device would send it.
     pub(crate) fn feed(&self, pkt: &Packet) {
         self.lock().feed(pkt);
+    }
+
+    /// Fail every write from now on with `kind`.
+    pub(crate) fn fail_writes(&self, kind: ErrorKind) {
+        self.lock().fail_writes(kind);
+    }
+
+    /// Stall every write from now on.
+    pub(crate) fn stall_writes(&self) {
+        self.lock().stall_writes();
+    }
+
+    /// Park the next `n` writes once each before they go through, so
+    /// that something can happen with one in flight.
+    pub(crate) fn slow_writes(&self, n: usize) {
+        self.lock().slow_writes(n);
     }
 
     pub(crate) fn new(mock: Mock) -> Self {
@@ -215,7 +264,12 @@ impl embedded_io_async::Write for SharedMock {
         if self.lock().stalls_now() {
             core::future::pending::<()>().await;
         }
-        Ok(self.lock().push(buf))
+        let slow = self.lock().slow_writes > 0;
+        if slow {
+            self.lock().slow_writes -= 1;
+            park_once().await;
+        }
+        self.lock().push(buf)
     }
 
     async fn flush(&mut self) -> Result<(), MockError> {

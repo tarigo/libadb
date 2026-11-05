@@ -71,10 +71,13 @@ pub enum Error<E> {
     /// A packet may have been left half-written, so the byte stream can
     /// no longer be trusted to line up with what the device expects.
     ///
-    /// Raised by every later operation on the connection. A packet
-    /// reaches the wire as a header write followed by a payload write;
-    /// dropping that future in between leaves the device reading the
-    /// next bytes we send as the rest of the abandoned packet.
+    /// Raised by every later operation on the connection, except that
+    /// a read first hands over what had already arrived for its
+    /// channel: an abandoned write says nothing about bytes the device
+    /// delivered. A packet reaches the wire as a header write followed
+    /// by a payload write; dropping that future in between leaves the
+    /// device reading the next bytes we send as the rest of the
+    /// abandoned packet.
     ///
     /// The judgement is deliberately conservative: it also covers a
     /// write that was polled and then dropped or failed before any byte
@@ -82,6 +85,12 @@ pub enum Error<E> {
     /// returned `Pending` or an error is indistinguishable from one
     /// that took none. Nothing can recover the framing from this side —
     /// close the connection and open a new one.
+    ///
+    /// A write that failed because the device is gone is not such a
+    /// write: the transport said connection reset or aborted, broken
+    /// pipe or not connected, so there is no stream left to fall out of
+    /// step with. The write fails with [`Error::Io`], and reads go on
+    /// to what the device sent before it went.
     Desynchronized,
     /// The read half of a split connection is gone: its `Reader::run`
     /// ended or the `Reader` was dropped, so nothing more will arrive

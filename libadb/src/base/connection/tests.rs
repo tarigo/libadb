@@ -1,13 +1,15 @@
 //! What a dropped write leaves behind on the wire.
 
 use alloc::vec;
+use alloc::vec::Vec;
 use core::future::Future;
 use core::task::Poll;
 
 use super::*;
 use crate::base::mock::{
-    abandon, cnxn, connected_for_select, connected_with_channel, now, stls, two_channels_classic,
-    two_channels_delayed_ack, wrte, Mock, NoAuth, Signs, Withholds,
+    abandon, clse, cnxn, connected_for_select, connected_with_channel, now, stls,
+    two_channels_classic, two_channels_delayed_ack, wrte, Mock, MockError, NoAuth, Signs,
+    Withholds,
 };
 use crate::base::protocol::command::{Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
 use crate::base::protocol::Packet;
@@ -46,6 +48,167 @@ fn a_desynchronized_connection_refuses_every_operation() {
     ));
     assert!(matches!(
         now(conn.select_channel(ch, &mut buf, core::future::pending::<()>())),
+        Err(Error::Desynchronized)
+    ));
+}
+
+/// What had arrived for a channel by the time a write was given up on
+/// is the device's to have delivered: reads get it, and then the error.
+#[test]
+fn a_desync_leaves_what_arrived_readable() {
+    let (mut conn, a, b) = two_channels_delayed_ack(
+        4096,
+        &[wrte(2, b"for-b-first"), wrte(2, b"-second"), wrte(1, b"x")],
+    );
+    let mut buf = [0u8; 32];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+
+    // The header goes, and the payload is what hangs.
+    conn.transport_mut().stall_writes();
+    abandon(conn.write_channel(a, b"payload-that-never-made-it"));
+    assert!(matches!(
+        now(conn.write_channel(a, b"more")),
+        Err(Error::Desynchronized)
+    ));
+
+    let mut got = Vec::new();
+    let err = loop {
+        match now(conn.read_channel(b, &mut buf[..4])) {
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(got, b"for-b-first-second", "in the order it came");
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// The failure of an OKAY is the connection's, whether the bytes it is
+/// for sat in the slot or came straight off the wire.
+#[test]
+fn a_failed_okay_costs_a_read_nothing() {
+    use embedded_io::ErrorKind;
+
+    // Buffered: a read of `a` leaves `b`'s packet in its slot.
+    let (mut conn, a, b) = two_channels_delayed_ack(4096, &[wrte(2, b"for-b"), wrte(1, b"x")]);
+    let mut buf = [0u8; 32];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+    conn.transport_mut().fail_writes(ErrorKind::Other);
+    let n = now(conn.read_channel(b, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"for-b");
+    assert!(matches!(
+        now(conn.read_channel(b, &mut buf)),
+        Err(Error::Desynchronized)
+    ));
+
+    // Off the wire, in a read the packet fits and in one it does not.
+    for size in [32, 2] {
+        let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, b"for-a")]);
+        conn.transport_mut().fail_writes(ErrorKind::Other);
+        let mut got = Vec::new();
+        let err = loop {
+            match now(conn.read_channel(a, &mut buf[..size])) {
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(got, b"for-a", "reads of {size}");
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+    }
+}
+
+/// A write that fails because the device is gone leaves no stream to
+/// fall out of step with: the read goes on to what it sent before going.
+#[test]
+fn an_okay_to_a_device_that_is_gone_stops_no_read() {
+    use embedded_io::ErrorKind;
+
+    let (mut conn, a, _) =
+        two_channels_delayed_ack(4096, &[wrte(1, b"one"), wrte(1, b"two"), clse(1)]);
+    conn.transport_mut().fail_writes(ErrorKind::BrokenPipe);
+    let mut buf = [0u8; 32];
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"one");
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"two");
+    assert!(matches!(
+        now(conn.read_channel(a, &mut buf)),
+        Err(Error::ChannelClosed)
+    ));
+}
+
+/// Without delayed ACK a packet is acknowledged as it lands, and that
+/// stops neither the read it is for nor the packets behind it.
+#[test]
+fn a_failed_okay_for_another_channel_stops_no_read_of_what_is_left() {
+    use embedded_io::ErrorKind;
+
+    let (mut conn, a, b) = two_channels_classic(
+        ConnectionConfig::new(),
+        &[wrte(2, b"for-b"), wrte(1, b"for-a")],
+    );
+    conn.transport_mut().fail_writes(ErrorKind::BrokenPipe);
+    let mut buf = [0u8; 32];
+    let n = now(conn.read_channel(a, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"for-a");
+    let n = now(conn.read_channel(b, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"for-b");
+}
+
+/// Everything left to read on `ch`, in as many reads as that takes, and
+/// what ended them.
+fn read_to_the_end(conn: &mut Connection<Mock>, ch: ChannelId) -> (Vec<u8>, Error<MockError>) {
+    let mut got = Vec::new();
+    let mut buf = [0u8; 32];
+    loop {
+        match now(conn.read_channel(ch, &mut buf)) {
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(e) => return (got, e),
+        }
+    }
+}
+
+/// A read dropped during its OKAY has taken nothing from the slot, so
+/// the next reads come back with all of it, not past a gap.
+#[test]
+fn a_read_dropped_writing_its_okay_leaves_no_gap() {
+    let (mut conn, a, b) = two_channels_delayed_ack(4096, &[wrte(2, b"for-b"), wrte(1, b"x")]);
+    let mut buf = [0u8; 32];
+    now(conn.read_channel(a, &mut buf)).unwrap();
+
+    conn.transport_mut().stall_writes();
+    abandon(conn.read_channel(b, &mut buf[..2]));
+
+    let (got, err) = read_to_the_end(&mut conn, b);
+    assert_eq!(got, b"for-b");
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// The same for a packet off the wire that does not fit the read: what
+/// is left of it must not read on as if nothing came before it.
+#[test]
+fn a_read_dropped_writing_the_okay_of_a_packet_it_split_leaves_no_gap() {
+    let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, b"for-a")]);
+    conn.transport_mut().stall_writes();
+    let mut buf = [0u8; 32];
+    abandon(conn.read_channel(a, &mut buf[..2]));
+
+    let (got, err) = read_to_the_end(&mut conn, a);
+    assert_eq!(got, b"for-a");
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+}
+
+/// One that fits went straight to the dropped call, and there is
+/// nothing left to read past: the next read says so, rather than go
+/// back to the wire with the packet missing.
+#[test]
+fn a_read_dropped_writing_the_okay_of_a_whole_packet_fails_the_next() {
+    let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, b"for-a"), wrte(1, b"more")]);
+    conn.transport_mut().stall_writes();
+    let mut buf = [0u8; 32];
+    abandon(conn.read_channel(a, &mut buf));
+
+    assert!(matches!(
+        now(conn.read_channel(a, &mut buf)),
         Err(Error::Desynchronized)
     ));
 }

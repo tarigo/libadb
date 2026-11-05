@@ -318,9 +318,10 @@ fn connect_with_key(
 /// A *write* timeout is a harder stop even on Unix: firing mid-packet
 /// abandons a write the device has partially seen, so the connection
 /// is marked desynchronized and every later channel operation fails
-/// with [`AdbStatus::Desynchronized`] — metadata queries and this
-/// setter still answer. Set it only where tearing the connection down
-/// beats blocking; for a recoverable bound, use the read timeout.
+/// with [`AdbStatus::Desynchronized`] — reads once they have handed
+/// over what had already arrived; metadata queries and this setter
+/// still answer. Set it only where tearing the connection down beats
+/// blocking; for a recoverable bound, use the read timeout.
 ///
 /// Both hold on a TLS (wireless-debugging) connection too: the timeouts
 /// sit on the socket underneath, a timed-out read leaves the session

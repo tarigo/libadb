@@ -295,6 +295,27 @@ impl Device {
         }
     }
 
+    /// Wait until everything sent so far has reached the host. A device
+    /// that hangs up any sooner loses what is still on its way: the
+    /// first OKAY to reach the closed socket is answered with a reset,
+    /// which takes it all down, so no host could ever read it.
+    pub fn wait_until_delivered(&self) {
+        #[cfg(target_os = "linux")]
+        loop {
+            use std::os::fd::AsRawFd;
+            let mut unacked: libc::c_int = 0;
+            // SAFETY: the socket is open, and `unacked` is what this
+            // request writes to.
+            let status =
+                unsafe { libc::ioctl(self.stream.as_raw_fd(), libc::TIOCOUTQ, &mut unacked) };
+            assert_eq!(status, 0, "TIOCOUTQ");
+            if unacked == 0 {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     pub fn send(&mut self, cmd: u32, arg0: u32, arg1: u32, payload: &[u8]) {
         self.stream
             .write_all(&header(cmd, arg0, arg1, payload))
