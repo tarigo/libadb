@@ -89,7 +89,7 @@ where
         };
         let Some(ch) = reserved else {
             // No slot to give: refuse, and consume the request.
-            let mut wh = shared.lock_write().await?;
+            let mut wh = shared.lock_write_half().await;
             send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
             self.pending.take();
             return Err(Error::NoFreeChannels);
@@ -102,7 +102,7 @@ where
             None => Vec::new(),
         };
         {
-            let mut wh = shared.lock_write().await?;
+            let mut wh = shared.lock_write_half().await;
             send_pkt(
                 &mut *wh,
                 &shared.desync,
@@ -138,7 +138,7 @@ where
         let shared = Arc::clone(&self.shared);
         let checksum = shared.negotiated.checksum();
         {
-            let mut wh = shared.lock_write().await?;
+            let mut wh = shared.lock_write_half().await;
             send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
         }
         self.pending.take();

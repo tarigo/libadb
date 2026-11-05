@@ -89,8 +89,9 @@ pub(crate) struct Shared<WH> {
 
 /// A packet the device is owed, kept here from before any wait until it
 /// is on the wire. Waiting for the write half is a cancellation point,
-/// and `Drop` cannot send anything, so whoever takes the write half next
-/// sends it, and a call that receives does so first.
+/// and `Drop` cannot send anything, so
+/// [`lock_write`](Shared::lock_write) sends it for the next call that
+/// writes, and a call that receives does so first.
 #[derive(Clone, Copy)]
 pub(super) enum Owed {
     /// The OKAY for data that arrived.
@@ -258,22 +259,21 @@ impl<WH> Shared<WH> {
                 return slot.take_buffered(buf);
             }
         }
-        if let Ok(mut wh) = self.lock_write().await {
-            let ack = {
-                let mut chs = self.lock_channels();
-                let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-                slot.settle_take(buf.len())
-            };
-            if let Some(ack) = ack {
-                let _ = send_okay_to(
-                    &mut *wh,
-                    &self.desync,
-                    ack,
-                    self.negotiated.ack_mode(),
-                    self.negotiated.checksum(),
-                )
-                .await;
-            }
+        let mut wh = self.lock_write_half().await;
+        let ack = {
+            let mut chs = self.lock_channels();
+            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
+            slot.settle_take(buf.len())
+        };
+        if let Some(ack) = ack {
+            let _ = send_okay_to(
+                &mut *wh,
+                &self.desync,
+                ack,
+                self.negotiated.ack_mode(),
+                self.negotiated.checksum(),
+            )
+            .await;
         }
         let mut chs = self.lock_channels();
         let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
@@ -439,6 +439,21 @@ impl<WH> Shared<WH> {
         Ok(())
     }
 
+    /// Take the write half for the caller's own packet, and nothing
+    /// more: for a call that promises its wait is safe to drop, which
+    /// it would not be with anything written along the way.
+    ///
+    /// Its packet is another matter, and so a call dropped on a stalled
+    /// transport goes the way of any abandoned write once it gets that
+    /// far. What the wait keeps from happening is a call that has
+    /// nothing of its own to send being caught writing someone else's.
+    pub(super) async fn lock_write_half(&self) -> WriteLock<'_, WH> {
+        WriteLock {
+            guard: self.write_half.lock().await,
+            shared: self,
+        }
+    }
+
     /// Take the write half for one packet, once what is owed is out.
     ///
     /// A debt leaves the list only once it is on the wire, so a call
@@ -450,10 +465,7 @@ impl<WH> Shared<WH> {
     where
         WH: Write,
     {
-        let mut lock = WriteLock {
-            guard: self.write_half.lock().await,
-            shared: self,
-        };
+        let mut lock = self.lock_write_half().await;
         loop {
             let owed = self.lock_owed().front().copied();
             let Some(debt) = owed else {

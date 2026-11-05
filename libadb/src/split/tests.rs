@@ -1210,6 +1210,242 @@ mod debt_tests {
     }
 }
 
+/// The wait for the write half is a cancellation point callers are
+/// promised, so it writes nothing, whatever is owed: what they go on to
+/// write is their own packet alone, and what is owed stays for a call
+/// that writes as a matter of course.
+mod lock_wait_tests {
+    use alloc::boxed::Box;
+    use core::convert::Infallible;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::ids::{ChannelIds, LocalId, RemoteId};
+    use crate::base::mock::{
+        cnxn, now, okay, split_one_channel_delayed_ack, Mock, NoAuth, SharedMock,
+    };
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+
+    use super::super::shared::Owed;
+    use super::{hold_back, Reader, SplitIncoming, Writer};
+
+    /// The device's end of a channel the host owes a CLSE.
+    const OWED_TO: u32 = 44;
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// Poll `fut` once and drop it where that leaves it, as a timeout
+    /// would, and say whether it was done by then.
+    fn one_poll<F: Future>(fut: F) -> bool {
+        poll_once(Box::pin(fut).as_mut()).is_ready()
+    }
+
+    fn owe_a_close(writer: &Writer<SharedMock>) {
+        writer.shared.owe(Owed::Close(ChannelIds {
+            local: LocalId::from(9),
+            remote: RemoteId::from(OWED_TO),
+        }));
+    }
+
+    fn in_step(writer: &Writer<SharedMock>) -> bool {
+        writer.shared.desync.check::<Infallible>().is_ok()
+    }
+
+    /// A request for a verdict, with a CLSE owed behind it.
+    fn request_with_a_close_owed() -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        SplitIncoming<SharedMock>,
+        SharedMock,
+    ) {
+        let (mut reader, writer, _ch, seen) = split_one_channel_delayed_ack(0, &[]);
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        let incoming = now(reader.accept_incoming()).unwrap();
+        owe_a_close(&writer);
+        (reader, writer, incoming, seen)
+    }
+
+    #[test]
+    fn a_read_goes_past_what_is_owed() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        hold_back(&writer, ch, b"hello");
+        owe_a_close(&writer);
+        seen.stall_closes_to(OWED_TO);
+
+        let mut buf = [0u8; 8];
+        let done = one_poll(writer.read_channel(ch, &mut buf));
+        assert!(in_step(&writer), "a dropped read abandoned a packet");
+        assert!(done, "the read went for a packet not its own");
+        assert_eq!(seen.acks_for(1), [5]);
+        assert_eq!(writer.shared.lock_owed().len(), 1);
+    }
+
+    #[test]
+    fn an_accept_goes_past_what_is_owed() {
+        let (_reader, writer, incoming, seen) = request_with_a_close_owed();
+        seen.stall_closes_to(OWED_TO);
+
+        let done = one_poll(incoming.accept());
+        assert!(in_step(&writer), "a dropped accept abandoned a packet");
+        assert!(done, "the accept went for a packet not its own");
+        let (cmd, _, remote, _) = seen.sent().last().unwrap().clone();
+        assert_eq!((cmd, remote), (Command::Ready, 77));
+        assert_eq!(writer.shared.lock_owed().len(), 1);
+    }
+
+    #[test]
+    fn a_reject_goes_past_what_is_owed() {
+        let (_reader, writer, incoming, seen) = request_with_a_close_owed();
+        seen.stall_closes_to(OWED_TO);
+
+        let done = one_poll(incoming.reject());
+        assert!(in_step(&writer), "a dropped reject abandoned a packet");
+        assert!(done, "the reject went for a packet not its own");
+        let (cmd, _, remote, _) = seen.sent().last().unwrap().clone();
+        assert_eq!((cmd, remote), (Command::Close, 77));
+        assert_eq!(writer.shared.lock_owed().len(), 1);
+    }
+
+    /// With no slot to give, the accept is a refusal, and goes the same
+    /// way.
+    #[test]
+    fn an_accept_with_no_slot_goes_past_what_is_owed() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        now(reader.open_channel(b"shell:\0")).unwrap();
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        let incoming = now(reader.accept_incoming()).unwrap();
+        owe_a_close(&writer);
+        seen.stall_closes_to(OWED_TO);
+
+        let done = one_poll(incoming.accept());
+        assert!(in_step(&writer), "a dropped accept abandoned a packet");
+        assert!(done, "the accept went for a packet not its own");
+    }
+
+    /// On a transport that takes nothing any more a call stalls on the
+    /// first thing it writes. A read that, by the time it has the write
+    /// half, has nothing of its own to write has no business there: the
+    /// device closed the channel while it waited, so no OKAY is owed.
+    #[test]
+    fn a_read_left_with_nothing_to_send_writes_nothing() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        hold_back(&writer, ch, b"hello");
+        owe_a_close(&writer);
+        seen.stall_writes();
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+        writer
+            .shared
+            .lock_channels()
+            .get_mut(ch)
+            .unwrap()
+            .apply_close();
+        drop(busy);
+
+        let done = poll_once(read.as_mut()).is_ready();
+        drop(read);
+        assert!(in_step(&writer), "a dropped read abandoned a packet");
+        assert!(done, "the read went for a packet not its own");
+        assert_eq!(&buf[..5], b"hello");
+    }
+
+    /// The wait itself was never the trouble, and stays safe to drop.
+    #[test]
+    fn a_call_dropped_waiting_for_the_write_half_abandons_nothing() {
+        let (_reader, writer, incoming, seen) = request_with_a_close_owed();
+        let ch = {
+            let mut chs = writer.shared.lock_channels();
+            let ch = chs.allocate().unwrap();
+            chs.insert_accepted(ch, RemoteId::from(50), 0);
+            ch
+        };
+        hold_back(&writer, ch, b"hello");
+        seen.stall_writes();
+        let busy = now(writer.shared.write_half.lock());
+
+        let mut buf = [0u8; 8];
+        assert!(!one_poll(writer.read_channel(ch, &mut buf)));
+        assert!(!one_poll(incoming.accept()));
+        let incoming = writer.shared.take_incoming().expect("back in the queue");
+        assert!(!one_poll(incoming.reject()));
+        drop(busy);
+        assert!(in_step(&writer));
+    }
+
+    /// A transport that takes nothing stalls a call in its own packet,
+    /// which what is owed never reached, and from which nothing can walk
+    /// away: the write has been polled, and a drop abandons it. It costs
+    /// the call nothing it promised to keep.
+    #[test]
+    fn a_read_dropped_writing_its_own_packet_desynchronizes() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        hold_back(&writer, ch, b"hello");
+        owe_a_close(&writer);
+        seen.stall_writes();
+
+        let mut buf = [0u8; 8];
+        assert!(!one_poll(writer.read_channel(ch, &mut buf)));
+        assert!(!in_step(&writer));
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+    }
+
+    #[test]
+    fn an_accept_dropped_writing_its_own_packet_desynchronizes() {
+        let (_reader, writer, incoming, seen) = request_with_a_close_owed();
+        seen.stall_writes();
+
+        assert!(!one_poll(incoming.accept()));
+        assert!(!in_step(&writer));
+        assert!(writer.shared.take_incoming().is_some(), "the request stays");
+    }
+
+    #[test]
+    fn a_reject_dropped_writing_its_own_packet_desynchronizes() {
+        let (_reader, writer, incoming, seen) = request_with_a_close_owed();
+        seen.stall_writes();
+
+        assert!(!one_poll(incoming.reject()));
+        assert!(!in_step(&writer));
+        assert!(writer.shared.take_incoming().is_some(), "the request stays");
+    }
+
+    /// What a call leaves owing goes with whatever writes next.
+    #[test]
+    fn what_a_read_left_owing_goes_out_with_the_next_write() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        hold_back(&writer, ch, b"hello");
+        owe_a_close(&writer);
+
+        let mut buf = [0u8; 8];
+        now(writer.read_channel(ch, &mut buf)).unwrap();
+        now(writer.write_channel(ch, b"y")).unwrap();
+        let sent = seen.sent();
+        let (cmd, _, remote, _) = sent[sent.len() - 2].clone();
+        assert_eq!((cmd, remote), (Command::Close, OWED_TO));
+        let (cmd, ..) = sent[sent.len() - 1];
+        assert_eq!(cmd, Command::Write);
+    }
+}
+
 mod send_queue_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;

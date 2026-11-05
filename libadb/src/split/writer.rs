@@ -118,10 +118,11 @@ where
     /// **Not cancellation-safe.** Dropping the future after OPEN went
     /// out gives the channel up before the device answers. Should it
     /// accept after all, `run` answers its READY with CLSE; if `run`
-    /// took that READY before the drop, the CLSE goes out with the
-    /// next packet anyone writes or `run` receives. Either way the
-    /// device's end does not stay open for long — unless the
-    /// [`Reader`] is gone, and with it whatever would read the READY.
+    /// took that READY before the drop, the CLSE goes out ahead of the
+    /// next write, open or close on the connection, or the next packet
+    /// `run` receives. Either way the device's end does not stay open
+    /// for long — unless the [`Reader`] is gone, and with it whatever
+    /// would read the READY.
     pub async fn open_channel(
         &self,
         destination: &[u8],

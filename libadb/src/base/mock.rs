@@ -41,6 +41,8 @@ pub(crate) struct Mock {
     stall_write: Option<usize>,
     /// What every write fails with, once one has been asked for.
     write_failure: Option<ErrorKind>,
+    /// The device's end a CLSE's header stalls on, if any does.
+    stall_close_to: Option<u32>,
     /// Reads that report `Pending` before any data comes back.
     slow_reads: usize,
     /// Writes that report `Pending` before they go through.
@@ -58,6 +60,7 @@ impl Mock {
             writes: Vec::new(),
             stall_write: None,
             write_failure: None,
+            stall_close_to: None,
             slow_reads: 0,
             #[cfg(feature = "split")]
             slow_writes: 0,
@@ -83,6 +86,16 @@ impl Mock {
     #[cfg(feature = "split")]
     pub(crate) fn slow_writes(&mut self, n: usize) -> &mut Self {
         self.slow_writes = n;
+        self
+    }
+
+    /// Stall the write of a CLSE to the device's end `remote`, and let
+    /// everything else through: no socket does this, but it tells a
+    /// call that writes that packet from one that does not, which a
+    /// transport stalled for good cannot.
+    #[cfg(feature = "split")]
+    pub(crate) fn stall_closes_to(&mut self, remote: u32) -> &mut Self {
+        self.stall_close_to = Some(remote);
         self
     }
 
@@ -139,8 +152,15 @@ impl Mock {
         n
     }
 
-    fn stalls_now(&self) -> bool {
-        self.stall_write == Some(self.writes.len())
+    fn stalls_on(&self, buf: &[u8]) -> bool {
+        let closes_to = |remote: u32| {
+            let word =
+                |at: usize| u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
+            buf.len() == crate::base::protocol::MESSAGE_SIZE
+                && word(0) == u32::from(Command::Close)
+                && word(8) == remote
+        };
+        self.stall_write == Some(self.writes.len()) || self.stall_close_to.is_some_and(closes_to)
     }
 
     fn push(&mut self, buf: &[u8]) -> Result<usize, MockError> {
@@ -185,7 +205,7 @@ async fn park_once() {
 
 impl embedded_io_async::Write for Mock {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, MockError> {
-        if self.stalls_now() {
+        if self.stalls_on(buf) {
             core::future::pending::<()>().await;
         }
         self.push(buf)
@@ -235,6 +255,12 @@ impl SharedMock {
         self.lock().slow_writes(n);
     }
 
+    /// Stall the write of a CLSE to the device's end `remote`, and let
+    /// everything else through.
+    pub(crate) fn stall_closes_to(&self, remote: u32) {
+        self.lock().stall_closes_to(remote);
+    }
+
     pub(crate) fn new(mock: Mock) -> Self {
         Self(alloc::sync::Arc::new(std::sync::Mutex::new(mock)))
     }
@@ -261,7 +287,7 @@ impl embedded_io_async::Write for SharedMock {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, MockError> {
         // The lock is released before the await: a stalled write must
         // not hold the other half out.
-        if self.lock().stalls_now() {
+        if self.lock().stalls_on(buf) {
             core::future::pending::<()>().await;
         }
         let slow = self.lock().slow_writes > 0;
