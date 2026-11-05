@@ -246,6 +246,14 @@ impl<WH> Shared<WH> {
     /// has been sent, so a call dropped while it waits for the write
     /// lock has taken nothing, and one dropped in the middle of the
     /// write leaves the bytes readable, with no gap in them.
+    ///
+    /// Nothing is held across those waits: settled bytes owe nothing
+    /// more, so another read may take them on the way, and what lands in
+    /// their place owes an OKAY of its own. So a read decides again
+    /// after each wait, rather than take what it finds on the strength
+    /// of the OKAY it sent. It goes round once to take what it settled,
+    /// and again only if another read took that and the device sent
+    /// more.
     pub(super) async fn take_buffered(
         &self,
         ch: ChannelId,
@@ -254,37 +262,37 @@ impl<WH> Shared<WH> {
     where
         WH: Write,
     {
-        {
-            let mut chs = self.lock_channels();
-            if !chs.get(ch).is_some_and(ChannelSlot::has_data) {
-                self.desync.check()?;
+        loop {
+            {
+                let mut chs = self.lock_channels();
+                if !chs.get(ch).is_some_and(ChannelSlot::has_data) {
+                    self.desync.check()?;
+                }
+                let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
+                // Nothing to take, nothing this take acknowledges, or
+                // nobody left to send it to: no OKAY, so no lock to wait
+                // for.
+                if self.check_live::<Infallible>().is_err() || !slot.take_acks(buf.len()) {
+                    return slot.take_buffered(buf);
+                }
             }
-            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-            // Nothing to take, nothing this take acknowledges, or nobody
-            // left to send it to: no OKAY, so no lock to wait for.
-            if self.check_live::<Infallible>().is_err() || !slot.take_acks(buf.len()) {
-                return slot.take_buffered(buf);
+            let mut wh = self.lock_write_half().await;
+            let ack = {
+                let mut chs = self.lock_channels();
+                let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
+                slot.settle_take(buf.len())
+            };
+            if let Some(ack) = ack {
+                let _ = send_okay_to(
+                    &mut *wh,
+                    &self.desync,
+                    ack,
+                    self.negotiated.ack_mode(),
+                    self.negotiated.checksum(),
+                )
+                .await;
             }
         }
-        let mut wh = self.lock_write_half().await;
-        let ack = {
-            let mut chs = self.lock_channels();
-            let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-            slot.settle_take(buf.len())
-        };
-        if let Some(ack) = ack {
-            let _ = send_okay_to(
-                &mut *wh,
-                &self.desync,
-                ack,
-                self.negotiated.ack_mode(),
-                self.negotiated.checksum(),
-            )
-            .await;
-        }
-        let mut chs = self.lock_channels();
-        let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-        slot.take_buffered(buf)
     }
 
     /// Wrap a request that never reached the queue in its owned

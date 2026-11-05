@@ -831,6 +831,84 @@ fn what_lands_during_an_okay_keeps_the_okay_it_owes() {
     assert_eq!(seen.acks_for(1), [5, 6], "credit for every byte read");
 }
 
+/// Read `ch` with the OKAY for `packets[0]` held up on its way out, a
+/// second read taking the bytes it settled, and `packets[1]` landing in
+/// their place before it gets out. The first read has nothing left of
+/// what it settled, and what it finds instead owes an OKAY of its own.
+fn read_overtaken_during_its_okay(
+    reader: &mut Reader<SharedMock, SharedMock>,
+    writer: &Writer<SharedMock>,
+    ch: ChannelId,
+    seen: &SharedMock,
+    packets: [&[u8]; 2],
+) {
+    use core::task::{Context, Waker};
+
+    seen.feed(&wrte(1, packets[0]));
+    now(reader.dispatch_one()).unwrap();
+    seen.slow_writes(1);
+
+    let second = writer.clone();
+    let mut buf = [0u8; 2048];
+    let n = {
+        let mut read = pin!(writer.read_channel(ch, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+
+        let mut settled = [0u8; 2048];
+        let n = now(second.read_channel(ch, &mut settled)).unwrap();
+        assert_eq!(&settled[..n], packets[0]);
+
+        seen.feed(&wrte(1, packets[1]));
+        now(reader.dispatch_one()).unwrap();
+
+        now(read).unwrap()
+    };
+    assert_eq!(&buf[..n], packets[1]);
+
+    let chs = writer.shared.lock_channels();
+    let slot = chs.get(ch).unwrap();
+    assert_eq!(slot.buffered(), 0);
+    assert_eq!(slot.unacked(), 0, "bytes gone with no OKAY for them");
+}
+
+/// Under delayed ACK nothing would acknowledge those bytes later: with
+/// the buffer empty no read has anything to settle, and the credit they
+/// took is gone for good.
+#[test]
+fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead() {
+    let (mut reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
+    read_overtaken_during_its_okay(&mut reader, &writer, ch, &seen, [b"hello", b" world"]);
+    assert_eq!(seen.acks_for(1), [5, 6], "credit for every byte read");
+}
+
+/// Without delayed ACK a packet that reaches the watermark holds back
+/// its OKAY for a read, and it is the one OKAY the device waits for
+/// before it sends another: going without stops the channel.
+#[test]
+fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead_without_delayed_ack() {
+    let mut mock = Mock::new();
+    mock.feed(&crate::base::mock::cnxn()).feed(&okay(1));
+    let seen = SharedMock::new(mock);
+    let conn = now(Connection::connect(
+        seen.clone(),
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new()
+            .with_max_payload(1024)
+            .with_initial_ack_bytes(1024),
+    ))
+    .unwrap();
+    let (mut reader, writer) = conn.split().unwrap();
+    let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+
+    let packets: [&[u8]; 2] = [&[0xAA; 1024], &[0xBB; 1024]];
+    read_overtaken_during_its_okay(&mut reader, &writer, ch, &seen, packets);
+    assert_eq!(seen.acks_for(1), [0, 0], "an OKAY for each packet");
+}
+
 /// A stalled write half does not hold up what no OKAY can come of. A
 /// read that tried would never finish here: every write stalls.
 #[test]
