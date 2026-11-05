@@ -25,10 +25,15 @@ use rusb::{Context, Direction, TransferType, UsbContext};
 
 use crate::transport::runtime::Runtime;
 use crate::transport::uri::UsbSelector;
-use crate::transport::usb::{scan, speaks_adb, Enumerated, ScanError};
+use crate::transport::usb::{ends_on_packet_boundary, scan, speaks_adb, Enumerated, ScanError};
 
 const NO_TIMEOUT: Duration = Duration::ZERO;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The bits of `wMaxPacketSize` that hold the packet size. `rusb` hands
+/// over the raw field, and the bits above say how many transactions a
+/// high-speed periodic endpoint takes per microframe.
+const PACKET_SIZE_MASK: u16 = 0x07ff;
 
 /// USB transport wrapping a `rusb::DeviceHandle` with bulk endpoints.
 ///
@@ -37,6 +42,11 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 /// same libusb handle and endpoints, which makes it safe to use one
 /// clone for reading and another for writing concurrently (see
 /// [`Splittable`](crate::Splittable)).
+///
+/// [`write`](Self::write) follows a transfer that fills its last USB
+/// packet with a zero-length one. adbd reads in 16 KiB requests, and
+/// only a short packet completes one early, so the bytes would
+/// otherwise sit on the device until the next write.
 ///
 /// # Cancellation
 ///
@@ -54,8 +64,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 /// interrupt between reads rather than racing it against one.
 pub struct UsbTransport<R> {
     handle: Arc<rusb::DeviceHandle<Context>>,
-    ep_in: u8,
-    ep_out: u8,
+    endpoints: BulkEndpoints,
     runtime: core::marker::PhantomData<R>,
     // Moved into each blocking call, which cannot borrow the caller's
     // buffer, and back out, so the transfers share one allocation.
@@ -66,8 +75,7 @@ impl<R> Clone for UsbTransport<R> {
     fn clone(&self) -> Self {
         Self {
             handle: self.handle.clone(),
-            ep_in: self.ep_in,
-            ep_out: self.ep_out,
+            endpoints: self.endpoints,
             runtime: core::marker::PhantomData,
             buffer: Vec::new(),
         }
@@ -76,26 +84,26 @@ impl<R> Clone for UsbTransport<R> {
 
 impl<R: Runtime> UsbTransport<R> {
     /// Build a transport from an already-claimed `rusb::DeviceHandle`,
-    /// picking bulk IN/OUT endpoints from the given interface.
+    /// picking bulk IN/OUT endpoints from the given interface, and how
+    /// large a packet the OUT one takes.
     pub fn new(handle: rusb::DeviceHandle<Context>, iface: u8) -> Result<Self, UsbConnectError> {
         let config = handle
             .device()
             .active_config_descriptor()
             .map_err(UsbConnectError::Descriptor)?;
-        let (ep_in, ep_out) = config
+        let endpoints = config
             .interfaces()
             .filter(|i| i.number() == iface)
             .flat_map(|i| i.descriptors())
             .find_map(|desc| bulk_endpoints(&desc))
             .ok_or(UsbConnectError::NoBulkEndpoints)?;
-        Ok(Self::from_parts(handle, ep_in, ep_out))
+        Ok(Self::from_parts(handle, endpoints))
     }
 
-    fn from_parts(handle: rusb::DeviceHandle<Context>, ep_in: u8, ep_out: u8) -> Self {
+    fn from_parts(handle: rusb::DeviceHandle<Context>, endpoints: BulkEndpoints) -> Self {
         Self {
             handle: Arc::new(handle),
-            ep_in,
-            ep_out,
+            endpoints,
             runtime: core::marker::PhantomData,
             buffer: Vec::new(),
         }
@@ -104,7 +112,7 @@ impl<R: Runtime> UsbTransport<R> {
     /// Read from the bulk IN endpoint, on `R`'s blocking pool.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, UsbError> {
         let handle = self.handle.clone();
-        let ep = self.ep_in;
+        let ep = self.endpoints.ep_in;
         let mut buffer = core::mem::take(&mut self.buffer);
         buffer.resize(buf.len(), 0);
         let (n, buffer) = R::run_blocking(move || {
@@ -118,15 +126,17 @@ impl<R: Runtime> UsbTransport<R> {
         Ok(n)
     }
 
-    /// Write to the bulk OUT endpoint, on `R`'s blocking pool.
+    /// Write to the bulk OUT endpoint, on `R`'s blocking pool, as one
+    /// transfer and, if that fills its last packet, a zero-length one
+    /// to end it. An empty `buf` sends nothing.
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, UsbError> {
         let handle = self.handle.clone();
-        let ep = self.ep_out;
+        let endpoints = self.endpoints;
         let mut buffer = core::mem::take(&mut self.buffer);
         buffer.clear();
         buffer.extend_from_slice(buf);
         let (n, buffer) = R::run_blocking(move || {
-            let n = bulk_write(&handle, ep, &buffer)?;
+            let n = bulk_write(&handle, endpoints, &buffer)?;
             Ok::<_, UsbError>((n, buffer))
         })
         .await
@@ -149,13 +159,26 @@ fn bulk_read(
         .map_err(UsbError::Transfer)
 }
 
-fn bulk_write(handle: &rusb::DeviceHandle<Context>, ep: u8, buf: &[u8]) -> Result<usize, UsbError> {
+fn bulk_write(
+    handle: &rusb::DeviceHandle<Context>,
+    endpoints: BulkEndpoints,
+    buf: &[u8],
+) -> Result<usize, UsbError> {
     if buf.is_empty() {
         return Ok(0);
     }
-    handle
+    let ep = endpoints.ep_out;
+    let n = handle
         .write_bulk(ep, buf, NO_TIMEOUT)
-        .map_err(UsbError::Transfer)
+        .map_err(UsbError::Transfer)?;
+    // A shorter count leaves the rest to the next write, whose length
+    // then decides.
+    if n == buf.len() && ends_on_packet_boundary(n, endpoints.out_packet_size) {
+        handle
+            .write_bulk(ep, &[], NO_TIMEOUT)
+            .map_err(UsbError::Transfer)?;
+    }
+    Ok(n)
 }
 
 impl<R> embedded_io::ErrorType for UsbTransport<R> {
@@ -326,7 +349,7 @@ pub fn connect_by_selector<R: Runtime>(
         handle
             .claim_interface(iface.number)
             .map_err(UsbConnectError::Claim)?;
-        Ok(UsbTransport::from_parts(handle, iface.ep_in, iface.ep_out))
+        Ok(UsbTransport::from_parts(handle, iface.endpoints))
     })
 }
 
@@ -417,8 +440,17 @@ impl ScanError for UsbConnectError {
 /// that opening the device need not read the descriptor again.
 struct AdbInterface {
     number: u8,
+    endpoints: BulkEndpoints,
+}
+
+/// The bulk endpoints of one interface setting.
+#[derive(Clone, Copy)]
+struct BulkEndpoints {
     ep_in: u8,
     ep_out: u8,
+    /// How large a packet `ep_out` takes, which is what tells a write
+    /// whether it needs a zero-length packet.
+    out_packet_size: usize,
 }
 
 /// The first of the ADB interface settings, each given as its number
@@ -427,7 +459,7 @@ struct AdbInterface {
 /// A device whose every ADB setting lacks them is turned down for that
 /// rather than for speaking no ADB, and before it is opened or claimed.
 fn first_with_bulk_endpoints(
-    settings: impl IntoIterator<Item = (u8, Option<(u8, u8)>)>,
+    settings: impl IntoIterator<Item = (u8, Option<BulkEndpoints>)>,
 ) -> Result<Option<AdbInterface>, UsbConnectError> {
     let mut settings = settings.into_iter().peekable();
     if settings.peek().is_none() {
@@ -435,30 +467,48 @@ fn first_with_bulk_endpoints(
     }
     settings
         .find_map(|(number, endpoints)| {
-            let (ep_in, ep_out) = endpoints?;
             Some(AdbInterface {
                 number,
-                ep_in,
-                ep_out,
+                endpoints: endpoints?,
             })
         })
         .map(Some)
         .ok_or(UsbConnectError::NoBulkEndpoints)
 }
 
-/// The bulk IN and OUT endpoint addresses of one interface setting.
-fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<(u8, u8)> {
+/// The bulk IN and OUT endpoints of one interface setting.
+fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<BulkEndpoints> {
+    pick_bulk_endpoints(desc.endpoint_descriptors().map(|ep| {
+        (
+            ep.transfer_type(),
+            ep.direction(),
+            ep.address(),
+            ep.max_packet_size(),
+        )
+    }))
+}
+
+/// The bulk IN and OUT endpoints among `endpoints`, each given by the
+/// type, direction, address and `wMaxPacketSize` its descriptor lists.
+fn pick_bulk_endpoints(
+    endpoints: impl IntoIterator<Item = (TransferType, Direction, u8, u16)>,
+) -> Option<BulkEndpoints> {
     let mut ep_in = None;
     let mut ep_out = None;
-    for ep in desc.endpoint_descriptors() {
-        if ep.transfer_type() == TransferType::Bulk {
-            match ep.direction() {
-                Direction::In => ep_in = Some(ep.address()),
-                Direction::Out => ep_out = Some(ep.address()),
+    for (transfer_type, direction, address, max_packet_size) in endpoints {
+        if transfer_type == TransferType::Bulk {
+            match direction {
+                Direction::In => ep_in = Some(address),
+                Direction::Out => ep_out = Some((address, max_packet_size)),
             }
         }
     }
-    Some((ep_in?, ep_out?))
+    let (ep_out, max_packet_size) = ep_out?;
+    Some(BulkEndpoints {
+        ep_in: ep_in?,
+        ep_out,
+        out_packet_size: usize::from(max_packet_size & PACKET_SIZE_MASK),
+    })
 }
 
 #[cfg(test)]
@@ -498,19 +548,53 @@ mod tests {
     /// ADB: the scan rejects it before opening it.
     #[test]
     fn the_adb_interface_is_the_first_with_both_bulk_endpoints() {
-        use crate::transport::rusb::{first_with_bulk_endpoints, UsbConnectError};
+        use crate::transport::rusb::{first_with_bulk_endpoints, BulkEndpoints, UsbConnectError};
+        let endpoints = |ep_in, ep_out| {
+            Some(BulkEndpoints {
+                ep_in,
+                ep_out,
+                out_packet_size: 512,
+            })
+        };
         let found = first_with_bulk_endpoints([
             (0, None),
-            (1, Some((0x81, 0x01))),
-            (2, Some((0x82, 0x02))),
+            (1, endpoints(0x81, 0x01)),
+            (2, endpoints(0x82, 0x02)),
         ]);
         let iface = found.expect("the descriptor was read").expect("found");
-        assert_eq!((iface.number, iface.ep_in, iface.ep_out), (1, 0x81, 0x01));
+        let BulkEndpoints { ep_in, ep_out, .. } = iface.endpoints;
+        assert_eq!((iface.number, ep_in, ep_out), (1, 0x81, 0x01));
         assert!(matches!(
             first_with_bulk_endpoints([(0, None)]),
             Err(UsbConnectError::NoBulkEndpoints)
         ));
         assert!(matches!(first_with_bulk_endpoints([]), Ok(None)));
+    }
+
+    /// A write goes by the packet size of the OUT endpoint, wherever the
+    /// descriptor lists it and whatever the other endpoints take, and of
+    /// `wMaxPacketSize` it keeps nothing but the size.
+    #[test]
+    fn the_adb_interface_keeps_the_packet_size_of_its_out_endpoint() {
+        use crate::transport::rusb::{first_with_bulk_endpoints, pick_bulk_endpoints};
+        use rusb::{Direction, TransferType};
+        let bulk_in = (TransferType::Bulk, Direction::In, 0x81, 1024);
+        let bulk_out = (TransferType::Bulk, Direction::Out, 0x01, 512);
+        let interrupt_out = (TransferType::Interrupt, Direction::Out, 0x02, 64);
+        let flagged_out = (TransferType::Bulk, Direction::Out, 0x01, 0x1000 | 512);
+
+        for endpoints in [
+            alloc::vec![bulk_out, bulk_in],
+            alloc::vec![bulk_in, interrupt_out, bulk_out],
+            alloc::vec![bulk_out, interrupt_out, bulk_in],
+            alloc::vec![bulk_in, flagged_out],
+        ] {
+            let iface = first_with_bulk_endpoints([(0, pick_bulk_endpoints(endpoints))])
+                .expect("the descriptor was read")
+                .expect("found");
+            assert_eq!(iface.endpoints.out_packet_size, 512);
+        }
+        assert!(pick_bulk_endpoints([bulk_in, interrupt_out]).is_none());
     }
 
     #[test]

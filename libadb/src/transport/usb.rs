@@ -1,5 +1,6 @@
-//! Device selection shared by the USB backends: which enumerated device
-//! a [`UsbSelector`] picks, and what is reported when none will do.
+//! What the USB backends share: which enumerated device a
+//! [`UsbSelector`] picks, what is reported when none will do, and which
+//! bulk OUT transfers a zero-length packet has to end.
 
 #[cfg(test)]
 mod tests;
@@ -146,4 +147,19 @@ fn admit<D: Enumerated>(
     }
 
     Ok(Some(iface))
+}
+
+/// Whether a bulk OUT of `len` bytes fills the last of its packets of
+/// `max_packet` bytes, and so takes a zero-length packet to end.
+///
+/// A transfer ends at a short packet or when the request reading it is
+/// full, and adbd reads in 16 KiB requests, so without an end of its
+/// own a shorter transfer sits on the device until the next one comes
+/// along. Length alone decides, a transfer of 16 KiB included: adbd
+/// passes over the empty read that leaves it.
+///
+/// A descriptor reporting a packet size of 0 gives no boundary to end
+/// on, and a `len` of 0 is no transfer to end.
+pub(super) fn ends_on_packet_boundary(len: usize, max_packet: usize) -> bool {
+    len != 0 && len.checked_rem(max_packet) == Some(0)
 }
