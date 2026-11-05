@@ -61,7 +61,10 @@ impl<E: embedded_io::Error> embedded_io::Error for TlsError<E> {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
             Self::Io(e) => e.kind(),
-            Self::Tls(_) | Self::HandshakeClosed => embedded_io::ErrorKind::Other,
+            // Nothing takes a failed session back: every later read and
+            // write gets the same failure.
+            Self::Tls(_) => embedded_io::ErrorKind::ConnectionAborted,
+            Self::HandshakeClosed => embedded_io::ErrorKind::Other,
             Self::WriteZero => embedded_io::ErrorKind::WriteZero,
             Self::NotAvailable => embedded_io::ErrorKind::Unsupported,
             Self::Closed => embedded_io::ErrorKind::BrokenPipe,
@@ -109,5 +112,23 @@ impl<E> TlsError<E> {
             // handshake, and the connect path names that on its own.
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use embedded_io::{Error as _, ErrorKind};
+
+    use super::TlsError;
+
+    /// What the connection goes by to tell a session past saving from a
+    /// failure that may pass.
+    #[test]
+    fn a_failed_session_is_an_aborted_connection() {
+        let session = TlsError::<std::io::Error>::Tls(rustls::Error::DecryptError);
+        assert_eq!(session.kind(), ErrorKind::ConnectionAborted);
+
+        let timeout = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert_eq!(TlsError::Io(timeout).kind(), ErrorKind::Other);
     }
 }
