@@ -440,7 +440,10 @@ fn reading_past_the_watermark_releases_the_held_ack() {
 
 mod incoming {
     use super::*;
-    use crate::base::mock::{cnxn_with, now, withdraw, wrte, Mock, NoAuth, FAILED_WRITES};
+    use crate::base::mock::{
+        cnxn_with, now, one_slot, withdraw, wrte, Mock, NoAuth, FAILED_WRITES,
+    };
+    use embedded_io::ErrorKind;
 
     fn connected(host: &'static [u8], device: &str) -> Connection<Mock> {
         let mut mock = Mock::new();
@@ -608,34 +611,84 @@ mod incoming {
         assert_eq!(again.destination(), b"tcp:6\0");
     }
 
-    /// A READY that finds the device gone leaves nobody to take the
-    /// channel, so the request goes, and a caller that carries on gets to
-    /// what the device sent before it went, and to the end of that,
-    /// rather than be handed the same request for ever. Any other failure
-    /// leaves the request in the queue, behind the desync it raised.
+    /// A device that is gone leaves nobody to answer, so a verdict that
+    /// finds that consumes the request, and a caller that carries on gets
+    /// to the packet behind it and the end of the stream, rather than be
+    /// handed the same request for ever. Any other failure leaves the
+    /// request in the queue, behind the desync it raised.
+    fn assert_next_call_after_failing_on(
+        kind: ErrorKind,
+        left: usize,
+        conn: &mut Connection<Mock>,
+        ch: ChannelId,
+    ) {
+        let next = now(conn.accept_incoming()).map(|_| ()).unwrap_err();
+        if left == 0 {
+            assert!(matches!(next, Error::UnexpectedEof), "{kind:?}: {next:?}");
+            let mut buf = [0u8; 16];
+            let n = now(conn.read_channel(ch, &mut buf)).unwrap();
+            assert_eq!(&buf[..n], b"behind it", "{kind:?}");
+        } else {
+            assert!(matches!(next, Error::Desynchronized), "{kind:?}: {next:?}");
+        }
+        assert_eq!(conn.incoming.len(), left, "{kind:?}");
+    }
+
+    /// A connection with a channel open and a slot to spare, a request
+    /// queued on it, a packet behind that, and every write failing with
+    /// `kind`.
+    fn request_failing_with(kind: ErrorKind) -> (Connection<Mock>, ChannelId) {
+        let (mut conn, ch) = connected_with_channel(None);
+        conn.transport.feed(&open_pkt(77, 0, b"tcp:80\0"));
+        conn.transport.feed(&wrte(1, b"behind it"));
+        conn.transport.fail_writes(kind);
+        (conn, ch)
+    }
+
+    /// A READY, whose slot goes back whatever becomes of the request.
     #[test]
     fn an_accept_that_fails_keeps_the_request_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
-            let (mut conn, ch) = connected_with_channel(None);
-            conn.transport.feed(&open_pkt(77, 0, b"tcp:80\0"));
-            conn.transport.feed(&wrte(1, b"behind it"));
-            conn.transport.fail_writes(kind);
+            let (mut conn, ch) = request_failing_with(kind);
 
             let incoming = now(conn.accept_incoming()).unwrap();
             let err = now(incoming.accept()).unwrap_err();
             assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
             assert_eq!(conn.table.in_use(), 1, "{kind:?}");
 
-            let next = now(conn.accept_incoming()).map(|_| ()).unwrap_err();
-            if left == 0 {
-                assert!(matches!(next, Error::UnexpectedEof), "{kind:?}: {next:?}");
-                let mut buf = [0u8; 16];
-                let n = now(conn.read_channel(ch, &mut buf)).unwrap();
-                assert_eq!(&buf[..n], b"behind it", "{kind:?}");
-            } else {
-                assert!(matches!(next, Error::Desynchronized), "{kind:?}: {next:?}");
-            }
-            assert_eq!(conn.incoming.len(), left, "{kind:?}");
+            assert_next_call_after_failing_on(kind, left, &mut conn, ch);
+        }
+    }
+
+    /// With no slot to give, an accept is a refusal, and goes the same
+    /// way.
+    #[test]
+    fn an_accept_with_no_slot_that_fails_keeps_the_request_unless_the_device_is_gone() {
+        let queued = [open_pkt(77, 0, b"tcp:80\0"), wrte(1, b"behind it")];
+        for (kind, left) in FAILED_WRITES {
+            let mut conn = one_slot("shell_v2", &queued);
+            let ch = now(conn.open_channel(b"shell:\0")).unwrap();
+            conn.transport.fail_writes(kind);
+
+            let incoming = now(conn.accept_incoming()).unwrap();
+            let err = now(incoming.accept()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+
+            assert_next_call_after_failing_on(kind, left, &mut conn, ch);
+        }
+    }
+
+    /// A refusal the caller asked for goes the same way again.
+    #[test]
+    fn a_reject_that_fails_keeps_the_request_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (mut conn, ch) = request_failing_with(kind);
+
+            let incoming = now(conn.accept_incoming()).unwrap();
+            let err = now(incoming.reject()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+
+            assert_next_call_after_failing_on(kind, left, &mut conn, ch);
         }
     }
 

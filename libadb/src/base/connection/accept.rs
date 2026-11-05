@@ -46,11 +46,11 @@ where
     /// With every slot in use the request is refused with CLSE and
     /// [`Error::NoFreeChannels`] comes back.
     ///
-    /// A READY that fails comes back as the error, with the slot released
-    /// and the request back in the queue, unless the device is gone:
-    /// nobody is left to answer then, so the request is consumed, and the
-    /// next [`accept_incoming`](Connection::accept_incoming) goes on to
-    /// whatever comes after it.
+    /// A READY or CLSE that fails comes back as the error, with the slot
+    /// released and the request back in the queue, unless the device is
+    /// gone: nobody is left to answer then, so the request is consumed,
+    /// and the next [`accept_incoming`](Connection::accept_incoming) goes
+    /// on to whatever comes after it.
     ///
     /// Dropping this future never loses the request: the reserved slot
     /// is released and the request returns to the queue. The connection
@@ -61,17 +61,9 @@ where
     pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
         let (remote, credit) = (pending.remote, pending.credit);
-        let checksum = self.conn.negotiated.checksum();
 
         let Ok(ch) = self.conn.table.allocate() else {
-            send_pkt(
-                &mut self.conn.transport,
-                &self.conn.desync,
-                &Packet::refuse(remote),
-                checksum,
-            )
-            .await?;
-            self.pending.take();
+            self.answer(&Packet::refuse(remote)).await?;
             return Err(Error::NoFreeChannels);
         };
         self.conn.table.insert_accepted(ch, remote, credit);
@@ -82,18 +74,13 @@ where
             Some(credit) => credit.to_le_bytes().to_vec(),
             None => alloc::vec::Vec::new(),
         };
-        let ready = send_pkt(
-            &mut self.conn.transport,
-            &self.conn.desync,
-            &Packet::new(Command::Ready, ch.local.raw(), remote.raw(), payload),
-            checksum,
-        )
-        .await;
-        // Any other failure leaves the request for `Drop` to put back.
-        if ready.as_ref().err().is_none_or(connection_gone) {
-            self.pending.take();
-        }
-        ready?;
+        self.answer(&Packet::new(
+            Command::Ready,
+            ch.local.raw(),
+            remote.raw(),
+            payload,
+        ))
+        .await?;
 
         // READY is out: the slot is committed.
         self.reserved = None;
@@ -107,18 +94,33 @@ where
     /// queue. The connection itself survives only a drop that lands
     /// before the CLSE write is first polled; after that it is marked
     /// desynchronized, as with any cancelled write.
+    ///
+    /// A CLSE that fails comes back as the error, with the request back
+    /// in the queue, unless the device is gone: nobody is left to answer
+    /// then, so the request is consumed, and the next
+    /// [`accept_incoming`](Connection::accept_incoming) goes on to
+    /// whatever comes after it.
     pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
         let remote = self.pending.as_ref().expect("undecided").remote;
+        self.answer(&Packet::refuse(remote)).await
+    }
+
+    /// Send `verdict`, which settles the request, as does finding the
+    /// device gone: nobody is left to answer. Any other failure leaves
+    /// the request undecided, for `Drop` to put back.
+    async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.conn.negotiated.checksum();
-        send_pkt(
+        let sent = send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
-            &Packet::refuse(remote),
+            verdict,
             checksum,
         )
-        .await?;
-        self.pending.take();
-        Ok(())
+        .await;
+        if sent.as_ref().err().is_none_or(connection_gone) {
+            self.pending.take();
+        }
+        sent
     }
 }
 
