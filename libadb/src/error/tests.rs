@@ -177,6 +177,14 @@ fn sync_display_invalid_flags_gives_the_bits() {
 }
 
 #[test]
+fn sync_display_invalid_path() {
+    assert_eq!(
+        show(&SyncError::InvalidPath),
+        "sync: path contains a NUL byte"
+    );
+}
+
+#[test]
 fn error_display_io_uses_inner() {
     let e: Error<IoStub> = Error::Io(IoStub);
     assert_eq!(show(&e), "io: io-stub");
