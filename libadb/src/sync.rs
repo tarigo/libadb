@@ -17,6 +17,20 @@
 //! Each of the [`SyncFlags`] `RCV2` and `SND2` carry needs a feature of
 //! its own on top of `sendrecv_v2`.
 //!
+//! # Paths
+//!
+//! adbd keeps a path in a C string, so a NUL would end it early. `SND2`
+//! and the requests that only read would act on the file named before
+//! the NUL, with no error. `SEND` would lose the mode that follows the
+//! path: adbd fails with `missing , in ID_SEND_V1` and ends the service,
+//! unless a comma comes before the NUL, which it then takes for the one
+//! before the mode.
+//!
+//! So every call that takes a path fails with
+//! [`SyncError::InvalidPath`] on a NUL, before anything is sent and
+//! before it looks at what the device advertises. The session stays
+//! usable.
+//!
 //! # Buffer sizing
 //!
 //! [`SyncSession`] uses a caller-provided byte slice as its receive
@@ -84,6 +98,14 @@ const FLAG_FEATURES: [(SyncFlags, Feature); 4] = [
 
 /// The compression flags, of which adbd takes one at most.
 const COMPRESSION: [SyncFlags; 3] = [SyncFlags::BROTLI, SyncFlags::LZ4, SyncFlags::ZSTD];
+
+/// Refuse a path adbd would end early, as the module docs tell.
+fn check_path(path: &str) -> Result<(), SyncError> {
+    if path.contains('\0') {
+        return Err(SyncError::InvalidPath);
+    }
+    Ok(())
+}
 
 /// A sync session over an open `sync:\0` channel.
 ///
@@ -229,6 +251,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Returns zeroed fields when the path does not exist (v1 has no
     /// error code).
     pub async fn stat(&mut self, path: &str) -> Result<StatV1, Error<S::IoError>> {
+        check_path(path)?;
         self.rx.compact();
         self.write_request(SyncId::Stat, &[path.as_bytes()]).await?;
         self.read_next_id(&[SyncId::Stat]).await?;
@@ -253,6 +276,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Returns [`SyncError::RemoteErrno`] when the device reports a
     /// non-zero error code (e.g. `ENOENT`).
     pub async fn stat_v2(&mut self, path: &str) -> Result<StatV2, Error<S::IoError>> {
+        check_path(path)?;
         self.channel.session.require_feature(Feature::StatV2)?;
         self.rx.compact();
         self.write_request(SyncId::Sta2, &[path.as_bytes()]).await?;
@@ -273,6 +297,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// List a directory (v1).
     pub async fn list(&mut self, path: &str) -> Result<Vec<DirEntry>, Error<S::IoError>> {
+        check_path(path)?;
         self.rx.compact();
         self.write_request(SyncId::List, &[path.as_bytes()]).await?;
 
@@ -317,6 +342,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// Entries whose stat failed on the device have a non-zero
     /// `stat.error` field but are still included in the result.
     pub async fn list_v2(&mut self, path: &str) -> Result<Vec<DirEntryV2>, Error<S::IoError>> {
+        check_path(path)?;
         self.channel.session.require_feature(Feature::LsV2)?;
         self.rx.compact();
         self.write_request(SyncId::Lis2, &[path.as_bytes()]).await?;
@@ -349,6 +375,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `RECV` (v1) pull.
     pub async fn recv_start(&mut self, path: &str) -> Result<(), Error<S::IoError>> {
+        check_path(path)?;
         self.rx.compact();
         self.write_request(SyncId::Recv, &[path.as_bytes()]).await
     }
@@ -367,6 +394,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         path: &str,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
+        check_path(path)?;
         if flags.contains(SyncFlags::DRY_RUN) {
             return Err(SyncError::InvalidFlags(flags).into());
         }
@@ -454,6 +482,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         path: &str,
         mode: FileMode,
     ) -> Result<(), Error<S::IoError>> {
+        check_path(path)?;
         let mut mode_dec = [0u8; 10];
         let mode_str = format_u32(mode.0, &mut mode_dec);
         self.write_request(SyncId::Send, &[path.as_bytes(), b",", mode_str])
@@ -475,6 +504,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         mode: FileMode,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
+        check_path(path)?;
         self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
         // As in `recv_v2_start`, with `sync_send_v2` after the path.

@@ -8,8 +8,8 @@ use crate::error::Error;
 
 /// What a sync request fails with: what the service answered instead of
 /// what was asked, be it a `FAIL`, a reply the session did not expect or
-/// an errno in a v2 stat or listing, or flags the session did not send
-/// because adbd refuses them.
+/// an errno in a v2 stat or listing, or flags or a path the session did
+/// not send because adbd would refuse or misread them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SyncError {
@@ -25,6 +25,10 @@ pub enum SyncError {
     /// compression flag. adbd would end the service over them, so
     /// nothing was sent and the session stays usable.
     InvalidFlags(SyncFlags),
+    /// The path holds a NUL, which adbd would take for its end: see the
+    /// [module docs](crate::sync#paths). Nothing was sent and the
+    /// session stays usable.
+    InvalidPath,
 }
 
 impl fmt::Display for SyncError {
@@ -40,6 +44,7 @@ impl fmt::Display for SyncError {
             }
             Self::RemoteErrno(e) => write!(f, "sync: remote errno {e}"),
             Self::InvalidFlags(flags) => write!(f, "sync: invalid flags {:#x}", flags.bits()),
+            Self::InvalidPath => f.write_str("sync: path contains a NUL byte"),
         }
     }
 }

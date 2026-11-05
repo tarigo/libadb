@@ -267,6 +267,16 @@ fn expect_invalid_flags<T, E: core::fmt::Debug>(result: Result<T, Error<E>>, fla
     );
 }
 
+fn expect_invalid_path<T, E: core::fmt::Debug>(result: Result<T, Error<E>>) {
+    let Err(err) = result else {
+        panic!("expected Err(InvalidPath), got Ok");
+    };
+    assert!(
+        matches!(err, Error::Sync(SyncError::InvalidPath)),
+        "expected InvalidPath, got {err:?}",
+    );
+}
+
 rt_test! {
 async fn sync_stat_v1_returns_decoded_fields() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
@@ -887,6 +897,39 @@ async fn sync_flags_adbd_refuses_fail_whatever_the_device_advertises() {
                 sync.send_v2("/f", FileMode(0o100644), 0, flags, b"x").await,
                 flags,
             );
+        }
+
+        assert_eq!(sync.stat("/after").await.unwrap().size, 7);
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    }
+}
+}
+
+rt_test! {
+async fn sync_path_with_a_nul_is_refused_before_anything_else() {
+    // adbd would cut each of these at the NUL, in a request that looks
+    // fine from here. The device with no features shows that the path
+    // comes before the feature checks, and DRY_RUN on RCV2 that it comes
+    // before the flags too.
+    let mode = FileMode(0o100644);
+    for banner in [device_with(&ALL_SYNC_FEATURES), FakeDevice::new()] {
+        let (mut conn, device) =
+            session(banner, b"host::features=", expect_only_a_stat_of_after).await;
+
+        let mut buf = [0u8; 256];
+        let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+
+        for path in ["/sdcard/a\0b", "/sdcard/a\0", "\0/sdcard/a"] {
+            expect_invalid_path(sync.stat(path).await);
+            expect_invalid_path(sync.stat_v2(path).await);
+            expect_invalid_path(sync.list(path).await);
+            expect_invalid_path(sync.list_v2(path).await);
+            expect_invalid_path(sync.recv_start(path).await);
+            expect_invalid_path(sync.recv_v2_start(path, SyncFlags::NONE).await);
+            expect_invalid_path(sync.recv_v2_start(path, SyncFlags::DRY_RUN).await);
+            expect_invalid_path(sync.send_start(path, mode).await);
+            expect_invalid_path(sync.send_v2_start(path, mode, SyncFlags::NONE).await);
         }
 
         assert_eq!(sync.stat("/after").await.unwrap().size, 7);
