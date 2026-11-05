@@ -14,6 +14,9 @@
 //! | Pull file | `RECV` | `RCV2` | `sendrecv_v2` |
 //! | Push file | `SEND` | `SND2` | `sendrecv_v2` |
 //!
+//! Each of the [`SyncFlags`] `RCV2` and `SND2` carry needs a feature of
+//! its own on top of `sendrecv_v2`.
+//!
 //! # Buffer sizing
 //!
 //! [`SyncSession`] uses a caller-provided byte slice as its receive
@@ -70,6 +73,18 @@ use crate::base::session::Session;
 use crate::error::Error;
 use format::{u32_at, SyncId, DENT_V1_SIZE, DENT_V2_SIZE, STAT_V1_SIZE};
 
+/// What a device has to advertise, on top of `sendrecv_v2`, to take each
+/// flag.
+const FLAG_FEATURES: [(SyncFlags, Feature); 4] = [
+    (SyncFlags::BROTLI, Feature::SendrecvV2Brotli),
+    (SyncFlags::LZ4, Feature::SendrecvV2Lz4),
+    (SyncFlags::ZSTD, Feature::SendrecvV2Zstd),
+    (SyncFlags::DRY_RUN, Feature::SendrecvV2DryRunSend),
+];
+
+/// The compression flags, of which adbd takes one at most.
+const COMPRESSION: [SyncFlags; 3] = [SyncFlags::BROTLI, SyncFlags::LZ4, SyncFlags::ZSTD];
+
 /// A sync session over an open `sync:\0` channel.
 ///
 /// Provides stat, list, push and pull operations.  Created by [`open`].
@@ -96,6 +111,22 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             channel,
             rx: RecvBuf::new(buf),
         }
+    }
+
+    /// Fail unless the device takes a v2 transfer with `flags`. adbd
+    /// ends the service over flags it refuses, so the session has to
+    /// find out before it writes anything.
+    fn require_sendrecv_v2(&self, flags: SyncFlags) -> Result<(), Error<S::IoError>> {
+        if COMPRESSION.iter().filter(|&&c| flags.contains(c)).count() > 1 {
+            return Err(SyncError::InvalidFlags(flags).into());
+        }
+        self.channel.session.require_feature(Feature::SendrecvV2)?;
+        for (flag, feature) in FLAG_FEATURES {
+            if flags.contains(flag) {
+                self.channel.session.require_feature(feature)?;
+            }
+        }
+        Ok(())
     }
 
     fn peek_id(&self) -> [u8; 4] {
@@ -324,16 +355,22 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `RCV2` (v2) pull.
     ///
-    /// Requires the device to advertise `sendrecv_v2`, failing with
-    /// [`Error::MissingFeature`] before anything is sent otherwise.
     /// `flags` combines [`SyncFlags`]; [`SyncFlags::NONE`] pulls
-    /// uncompressed.
+    /// uncompressed. Requires the device to advertise `sendrecv_v2` and
+    /// the feature of each flag, failing with [`Error::MissingFeature`]
+    /// otherwise. adbd has no dry-run pull and takes one compression flag
+    /// at most, so [`SyncFlags::DRY_RUN`] or two compression flags fail
+    /// with [`SyncError::InvalidFlags`] whatever the device advertises.
+    /// Either way nothing is sent and the session stays usable.
     pub async fn recv_v2_start(
         &mut self,
         path: &str,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
-        self.channel.session.require_feature(Feature::SendrecvV2)?;
+        if flags.contains(SyncFlags::DRY_RUN) {
+            return Err(SyncError::InvalidFlags(flags).into());
+        }
+        self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
         // The header's length stops at the path: `sync_recv_v2` follows
         // it, and opens with the same id.
@@ -392,7 +429,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     }
 
     /// Pull a file into memory (v2 `RCV2`), with `flags` as in
-    /// [`recv_v2_start`](Self::recv_v2_start).
+    /// [`recv_v2_start`](Self::recv_v2_start): one the device does not
+    /// take fails with [`Error::MissingFeature`] or
+    /// [`SyncError::InvalidFlags`] before anything is sent.
     pub async fn recv_v2(
         &mut self,
         path: &str,
@@ -423,17 +462,20 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `SND2` (v2) push.
     ///
-    /// Requires the device to advertise `sendrecv_v2`, failing with
-    /// [`Error::MissingFeature`] before anything is sent otherwise.
     /// `mode` is as in [`send_start`](Self::send_start). `flags`
     /// combines [`SyncFlags`]; [`SyncFlags::NONE`] pushes uncompressed.
+    /// Requires the device to advertise `sendrecv_v2` and the feature of
+    /// each flag, failing with [`Error::MissingFeature`] otherwise. adbd
+    /// takes one compression flag at most, so two fail with
+    /// [`SyncError::InvalidFlags`] whatever the device advertises.
+    /// Either way nothing is sent and the session stays usable.
     pub async fn send_v2_start(
         &mut self,
         path: &str,
         mode: FileMode,
         flags: SyncFlags,
     ) -> Result<(), Error<S::IoError>> {
-        self.channel.session.require_feature(Feature::SendrecvV2)?;
+        self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
         // As in `recv_v2_start`, with `sync_send_v2` after the path.
         self.write_message(
@@ -491,7 +533,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     }
 
     /// Push a file to the device (v2 `SND2`), with `flags` as in
-    /// [`send_v2_start`](Self::send_v2_start).
+    /// [`send_v2_start`](Self::send_v2_start): one the device does not
+    /// take fails with [`Error::MissingFeature`] or
+    /// [`SyncError::InvalidFlags`] before anything is sent.
     pub async fn send_v2(
         &mut self,
         path: &str,
