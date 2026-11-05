@@ -19,33 +19,63 @@ use super::protocol::{Checksum, MESSAGE_SIZE};
 use super::slot::PendingAck;
 use crate::error::{Error, ProtocolError};
 
-/// Floor on how much to ask the transport for. A request smaller than
-/// this is padded up to it, so a header-sized read does not split a
-/// packet that would have arrived in one go.
+/// What a read asks for while the next header is incomplete, rather
+/// than the few bytes that header lacks: a stream transport hands over
+/// a whole packet, or several, in one go. USB loses nothing by it, as a
+/// header is a transfer of its own there and its short packet ends the
+/// read. Once the header is in, [`read_limit`] holds a read to the
+/// packet.
 pub(crate) const MIN_READ: usize = 4096;
 
 #[cfg(test)]
 pub(crate) use tests::ZEROED;
 
-/// Grows `buf` by `want` bytes and hands out that tail to be read into,
-/// cutting the buffer back to whatever was committed when dropped — so
-/// a failed or cancelled read leaves no placeholder bytes behind.
+/// How much the next read may ask for when `buf` starts with an
+/// unfinished packet: [`MIN_READ`] until the header is in, and from then
+/// on what the packet still lacks.
+///
+/// USB is why a read stops at the packet. A bulk IN transfer ends at a
+/// short packet or when the request is full, and adbd sends no
+/// zero-length packet, so a request that reaches past a payload filling
+/// its last USB packet stays open until the device next sends something.
+fn read_limit(buf: &[u8]) -> usize {
+    if buf.len() < MESSAGE_SIZE {
+        MIN_READ
+    } else {
+        Packet::missing(buf)
+    }
+}
+
+/// Grows `buf` by its [`read_limit`] and hands out that tail to be read
+/// into, cutting the buffer back to whatever was committed when dropped
+/// — so a failed or cancelled read leaves no placeholder bytes behind.
 pub(crate) struct Staged<'a> {
     buf: &'a mut BytesMut,
     keep: usize,
 }
 
 impl<'a> Staged<'a> {
-    pub(crate) fn new(buf: &'a mut BytesMut, want: usize) -> Self {
+    pub(crate) fn new(buf: &'a mut BytesMut) -> Self {
         let keep = buf.len();
+        let want = read_limit(buf);
         buf.resize(keep + want, 0);
         #[cfg(test)]
         tests::ZEROED.with(|zeroed| zeroed.set(zeroed.get() + want));
         Self { buf, keep }
     }
 
-    pub(crate) fn spare(&mut self) -> &mut [u8] {
+    fn spare(&mut self) -> &mut [u8] {
         &mut self.buf[self.keep..]
+    }
+
+    /// What the next read gets to fill: the stretch that is left, up to
+    /// [`read_limit`]. What was staged for a header can run past the
+    /// packet that header announces.
+    pub(crate) fn room(&mut self) -> &mut [u8] {
+        let limit = read_limit(self.committed());
+        let spare = self.spare();
+        let room = limit.min(spare.len());
+        &mut spare[..room]
     }
 
     pub(crate) fn commit(&mut self, n: usize) {
@@ -61,7 +91,8 @@ impl<'a> Staged<'a> {
     /// Whether to read into the same stretch again: the first packet is
     /// still short, and all it lacks fits in what is left. Staging anew
     /// for each read would zero the rest of a large packet every time,
-    /// and over TLS a read brings only one 16 KiB record.
+    /// and over TLS a read brings only one 16 KiB record. The next read
+    /// takes [`room`](Self::room), which may be less than is left.
     pub(crate) fn wants_more(&mut self) -> bool {
         let missing = Packet::missing(self.committed());
         missing != 0 && missing <= self.spare().len()
@@ -174,6 +205,12 @@ pub(crate) enum Received<I> {
 /// afford. Without it, `interrupt` is asked once before each read, and
 /// a read once issued runs to completion. Bytes read before the
 /// interrupt stay in `buf` either way.
+///
+/// Every read keeps to [`read_limit`], so USB gets requests it can
+/// complete. TCP keeps its header reads, which take in a whole packet
+/// or several; all it gives up is the read that finishes a split packet
+/// bringing the next one along. TLS keeps its stretch: a large packet
+/// is staged once, however many records fill it.
 pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
     t: &mut T,
     buf: &mut BytesMut,
@@ -185,11 +222,10 @@ pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
         if let Some(pkt) = Packet::decode(buf, max_payload)? {
             return Ok(Received::Packet(pkt));
         }
-        let want = Packet::missing(buf).max(MIN_READ);
-        let mut staged = Staged::new(buf, want);
+        let mut staged = Staged::new(buf);
         loop {
             let got = if race {
-                let mut read = pin!(t.read(staged.spare()));
+                let mut read = pin!(t.read(staged.room()));
                 let raced = poll_fn(|cx| {
                     if let Poll::Ready(val) = interrupt.as_mut().poll(cx) {
                         return Poll::Ready(Err(val));
@@ -207,7 +243,7 @@ pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
                 {
                     return Ok(Received::Interrupted(val));
                 }
-                t.read(staged.spare()).await
+                t.read(staged.room()).await
             };
             match got {
                 Ok(0) => return Err(Error::UnexpectedEof),
