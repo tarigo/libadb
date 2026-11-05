@@ -113,20 +113,32 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.channel.write(&hdr).await
     }
 
+    /// Write `parts` behind a header that gives their length.
     async fn write_request(
         &mut self,
         id: SyncId,
         parts: &[&[u8]],
     ) -> Result<(), Error<S::IoError>> {
         let arg_len: usize = parts.iter().map(|p| p.len()).sum();
-        let total = HEADER_SIZE + arg_len;
+        self.write_message(id, arg_len as u32, parts).await
+    }
+
+    /// Write `parts` behind a header carrying `arg`, in one write when
+    /// they fit the free part of the receive buffer.
+    async fn write_message(
+        &mut self,
+        id: SyncId,
+        arg: u32,
+        parts: &[&[u8]],
+    ) -> Result<(), Error<S::IoError>> {
+        let total = HEADER_SIZE + parts.iter().map(|p| p.len()).sum::<usize>();
 
         self.rx.compact();
         let window = self.rx.window();
 
         if total <= window.len() {
             window[..4].copy_from_slice(&id.as_bytes());
-            window[4..8].copy_from_slice(&(arg_len as u32).to_le_bytes());
+            window[4..8].copy_from_slice(&arg.to_le_bytes());
             let mut off = HEADER_SIZE;
             for p in parts {
                 window[off..off + p.len()].copy_from_slice(p);
@@ -134,7 +146,7 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             }
             self.channel.write(&window[..total]).await
         } else {
-            self.write_header(id, arg_len as u32).await?;
+            self.write_header(id, arg).await?;
             for p in parts {
                 if !p.is_empty() {
                     self.channel.write(p).await?;
@@ -323,12 +335,18 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     ) -> Result<(), Error<S::IoError>> {
         self.channel.session.require_feature(Feature::SendrecvV2)?;
         let path_bytes = path.as_bytes();
-        self.rx.compact();
-        self.write_header(SyncId::Rcv2, path_bytes.len() as u32)
-            .await?;
-        self.channel.write(path_bytes).await?;
-        self.channel.write(&flags.bits().to_le_bytes()).await?;
-        Ok(())
+        // The header's length stops at the path: `sync_recv_v2` follows
+        // it, and opens with the same id.
+        self.write_message(
+            SyncId::Rcv2,
+            path_bytes.len() as u32,
+            &[
+                path_bytes,
+                &SyncId::Rcv2.as_bytes(),
+                &flags.bits().to_le_bytes(),
+            ],
+        )
+        .await
     }
 
     /// Read the next `DATA` chunk from an in-progress recv.
@@ -417,15 +435,18 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     ) -> Result<(), Error<S::IoError>> {
         self.channel.session.require_feature(Feature::SendrecvV2)?;
         let path_bytes = path.as_bytes();
-        self.rx.compact();
-        self.write_header(SyncId::Snd2, path_bytes.len() as u32)
-            .await?;
-        self.channel.write(path_bytes).await?;
-        let mut info = [0u8; 8];
-        info[0..4].copy_from_slice(&mode.0.to_le_bytes());
-        info[4..8].copy_from_slice(&flags.bits().to_le_bytes());
-        self.channel.write(&info).await?;
-        Ok(())
+        // As in `recv_v2_start`, with `sync_send_v2` after the path.
+        self.write_message(
+            SyncId::Snd2,
+            path_bytes.len() as u32,
+            &[
+                path_bytes,
+                &SyncId::Snd2.as_bytes(),
+                &mode.0.to_le_bytes(),
+                &flags.bits().to_le_bytes(),
+            ],
+        )
+        .await
     }
 
     /// Send one or more `DATA` chunks.
