@@ -13,14 +13,14 @@
 use libadb::channel::SelectResult;
 use libadb::protocol::command::{CMD_CLSE, CMD_OKAY, CMD_WRTE};
 use libadb::shell::{v1 as shell_v1, v2 as shell_v2};
-use libadb::{cmd, exec, logcat, reverse, sync, track_app, Error};
+use libadb::{cmd, exec, logcat, reverse, sync, track_app, ConnectionConfig, Error};
 
 #[path = "rt/rt.rs"]
 mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{session, FakeDevice};
+use fake_device::{session, session_with_config, FakeDevice};
 
 #[path = "common/common.rs"]
 mod common;
@@ -68,6 +68,112 @@ async fn shell_v2_exec_runs_over_the_writer() {
     assert_eq!(out.stdout, b"hi\n");
     assert_eq!(out.exit_code, 3);
     rt::join(device).await;
+}
+}
+
+// A command may finish before its task reaches `close_stdin`: `run` has
+// taken the output and the CLSE by then. Stdin is gone, which is no
+// failure, so the output still comes back and the slot is freed as
+// usual. `marker` fixes that order: its data follows the CLSE, and `run`
+// dispatches packets in order. It also holds one of the two slots, so
+// the last open can only get the one the shell gave back. With delayed
+// ACK every OKAY leaves from the read that took the data, which puts the
+// host's packets in one order for the device to expect.
+rt_test! {
+async fn close_stdin_finds_the_channel_already_closed() {
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2,delayed_ack".to_vec()).delayed_ack(4096);
+    let config = ConnectionConfig::new().with_max_channels(2);
+    let (conn, device) = session_with_config(dev, b"host::features=shell_v2,delayed_ack", config, |mut s| async move {
+        let (marker_dev, marker_cli) = {
+            let ch = s.accept_open(b"marker:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        let mut shell = s.accept_open(b"shell,v2,raw:echo hi\0").await;
+        let (shell_dev, shell_cli) = (shell.device_id(), shell.client_id());
+        let mut reply = shell_v2_encode(SH_STDOUT, b"hi\n");
+        reply.extend_from_slice(&shell_v2_encode(SH_EXIT, &[3]));
+        shell.send_write(&reply).await;
+        shell.send_close().await;
+        s.send(CMD_WRTE, marker_dev, marker_cli, b"go").await;
+
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (marker_cli, marker_dev));
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (shell_cli, shell_dev));
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (shell_cli, shell_dev));
+        s.accept_open(b"again:\0").await;
+        s
+    })
+    .await;
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    let marker = writer.open_channel(b"marker:\0").await.unwrap();
+    let mut shell_writer = writer.clone();
+    let mut rx = [0u8; 256];
+    let mut shell = shell_v2::open(&mut shell_writer, "echo hi", &mut rx).await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = rt::within("the read on marker", writer.read_channel(marker, &mut buf)).await.unwrap();
+    assert_eq!(&buf[..n], b"go");
+
+    shell.close_stdin().await.unwrap();
+    let out = rt::within("collect", shell.collect()).await.unwrap();
+    assert_eq!(out.stdout, b"hi\n");
+    assert_eq!(out.exit_code, 3);
+
+    writer.open_channel(b"again:\0").await.unwrap();
+    rt::within("the device", rt::join(device)).await;
+}
+}
+
+// Only the device closing the channel passes: a channel `run` closed
+// because the device wrote past its receive cap still fails with that.
+rt_test! {
+async fn close_stdin_still_fails_on_a_channel_a_fault_closed() {
+    const CHUNK: usize = 4096;
+    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+    let config = ConnectionConfig::new()
+        .with_max_payload(CHUNK as u32)
+        .with_max_rx_per_channel(CHUNK);
+    let (conn, device) = session_with_config(dev, b"host::features=shell_v2", config, |mut s| async move {
+        let (marker_dev, marker_cli) = {
+            let ch = s.accept_open(b"marker:\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        let (shell_dev, shell_cli) = {
+            let ch = s.accept_open(b"shell,v2,raw:echo hi\0").await;
+            (ch.device_id(), ch.client_id())
+        };
+        for _ in 0..2 {
+            s.send(CMD_WRTE, shell_dev, shell_cli, &[0xEE; CHUNK]).await;
+        }
+        s.send(CMD_WRTE, marker_dev, marker_cli, b"go").await;
+
+        // The first chunk fills the buffer, so its OKAY waits for a read
+        // that never comes; the second does not fit, and `run` sends the
+        // CLSE for it before it even looks at `marker`'s data.
+        let (close, _) = s.expect(CMD_CLSE).await;
+        assert_eq!((close.arg0, close.arg1), (shell_cli, shell_dev));
+        let (okay, _) = s.expect(CMD_OKAY).await;
+        assert_eq!((okay.arg0, okay.arg1), (marker_cli, marker_dev));
+        s
+    })
+    .await;
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+
+    let marker = writer.open_channel(b"marker:\0").await.unwrap();
+    let mut shell_writer = writer.clone();
+    let mut rx = [0u8; 256];
+    let mut shell = shell_v2::open(&mut shell_writer, "echo hi", &mut rx).await.unwrap();
+    let mut buf = [0u8; 8];
+    let n = rt::within("the read on marker", writer.read_channel(marker, &mut buf)).await.unwrap();
+    assert_eq!(&buf[..n], b"go");
+
+    let err = shell.close_stdin().await.unwrap_err();
+    assert!(matches!(err, Error::ChannelRxOverflow), "got {err:?}");
+    rt::within("the device", rt::join(device)).await;
 }
 }
 

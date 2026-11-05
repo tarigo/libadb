@@ -177,8 +177,18 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
 
     /// Send a `CLOSE_STDIN` frame, telling the device that no further
     /// stdin will be written.
+    ///
+    /// A channel the device has already closed is not a failure: there
+    /// is no stdin left to close, and what the device wrote before
+    /// closing stays readable, so a command that finished first still
+    /// gives [`collect`](Self::collect) its output and exit code. A
+    /// channel a fault closed fails all the same, with that fault's
+    /// error, such as [`Error::ChannelRxOverflow`].
     pub async fn close_stdin(&mut self) -> Result<(), Error<S::IoError>> {
-        self.send_frame(CLOSE_STDIN, &[]).await
+        match self.send_frame(CLOSE_STDIN, &[]).await {
+            Err(Error::ChannelClosed) => Ok(()),
+            sent => sent,
+        }
     }
 
     /// Send a `WINDOW_SIZE_CHANGE` frame.
