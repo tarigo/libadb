@@ -891,6 +891,325 @@ fn writes_that_complete_leave_both_halves_working() {
     ));
 }
 
+/// What a packet owes the device outlives the call that took it in: a
+/// call dropped behind a busy writer leaves it to go out ahead of
+/// whatever comes next, in the order it fell due.
+mod debt_tests {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+    use embedded_io::ErrorKind;
+
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        abandon, cnxn, now, okay, split_two_channels_delayed_ack, split_with_channel, wrte, Mock,
+        NoAuth, SharedMock,
+    };
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+
+    use super::Writer;
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// Drop `fut` where its first poll leaves it, as a timeout would.
+    fn dropped_parked<F: Future>(fut: F) {
+        assert!(poll_once(Box::pin(fut).as_mut()).is_pending());
+    }
+
+    fn seen_by(writer: &Writer<SharedMock>) -> SharedMock {
+        now(writer.shared.write_half.lock()).clone()
+    }
+
+    /// CLSEs the halves sent, as (our end, the device's end).
+    fn closes(seen: &SharedMock) -> Vec<(u32, u32)> {
+        seen.sent()
+            .into_iter()
+            .filter(|(cmd, ..)| *cmd == Command::Close)
+            .map(|(_, arg0, arg1, _)| (arg0, arg1))
+            .collect()
+    }
+
+    /// The device's READY for an end of ours that nobody waits on any
+    /// more: an OPEN given up on before the answer.
+    fn stray_ready(local_id: u32) -> Packet {
+        Packet::new(Command::Ready, 43, local_id, Vec::new())
+    }
+
+    #[test]
+    fn an_okay_survives_a_read_dropped_behind_a_busy_writer() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&wrte(1, b"hello"));
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 16];
+        dropped_parked(reader.read_channel(ch, &mut buf));
+        drop(busy);
+        assert!(seen.acks_for(1).is_empty(), "the write half was busy");
+
+        // A read with its data in hand has no packet to wait for, and
+        // the device, with no OKAY, has no reason to send one.
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        assert_eq!(seen.acks_for(1).len(), 1);
+
+        seen.feed(&wrte(1, b"further traffic"));
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"further traffic");
+        assert_eq!(seen.acks_for(1).len(), 2);
+    }
+
+    #[test]
+    fn a_close_for_a_ready_survives_a_read_dropped_behind_a_busy_writer() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&stray_ready(7));
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 16];
+        dropped_parked(reader.read_channel(ch, &mut buf));
+        drop(busy);
+        assert!(closes(&seen).is_empty(), "the write half was busy");
+
+        seen.feed(&wrte(1, b"further traffic"));
+        now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(closes(&seen), [(7, 43)]);
+    }
+
+    /// A READY without its credit breaks channel 1, and the device still
+    /// holds an end it takes for open.
+    #[test]
+    fn a_close_for_a_fault_survives_a_call_dropped_behind_a_busy_writer() {
+        let (mut reader, _a, _b, seen) =
+            split_two_channels_delayed_ack(&[Packet::new(Command::Ready, 42, 1, Vec::new())]);
+        let shared = Arc::clone(&reader.shared);
+
+        let busy = now(shared.write_half.lock());
+        dropped_parked(reader.dispatch_one());
+        drop(busy);
+        assert!(closes(&seen).is_empty(), "the write half was busy");
+
+        seen.feed(&wrte(2, b"further traffic"));
+        now(reader.dispatch_one()).unwrap();
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// `dispatch_one` waits for a packet however long one takes, and the
+    /// device, owed an OKAY, may have no reason to send one. Read here
+    /// as the end of the mock: the debt has to be out by then.
+    #[test]
+    fn a_call_pays_before_it_waits_for_a_packet() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&stray_ready(7));
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 16];
+        dropped_parked(reader.read_channel(ch, &mut buf));
+        drop(busy);
+
+        let _ = now(reader.dispatch_one());
+        assert_eq!(closes(&seen), [(7, 43)]);
+    }
+
+    /// The opener goes after the read that took its packets, so the
+    /// CLSE falls due behind the OKAY for the same channel, and a list
+    /// paid from the wrong end would close the channel first.
+    #[test]
+    fn what_is_owed_goes_out_in_the_order_it_fell_due() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn())
+            .feed(&okay(1))
+            .feed(&Packet::new(Command::Ready, 43, 2, Vec::new()))
+            .feed(&Packet::new(Command::Write, 43, 2, b"x".to_vec()));
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        let seen = seen_by(&writer);
+        let mut open = Box::pin(writer.open_channel(b"svc:\0"));
+        assert!(poll_once(open.as_mut()).is_pending());
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 16];
+        dropped_parked(reader.read_channel(ch, &mut buf));
+        drop(open);
+        drop(busy);
+
+        now(writer.write_channel(ch, b"y")).unwrap();
+        let sent = seen.sent();
+        let tail: Vec<_> = sent[sent.len() - 3..]
+            .iter()
+            .map(|(cmd, arg0, arg1, _)| (*cmd, *arg0, *arg1))
+            .collect();
+        assert_eq!(
+            tail,
+            [
+                (Command::Ready, 2, 43),
+                (Command::Close, 2, 43),
+                (Command::Write, 1, 42)
+            ]
+        );
+    }
+
+    /// What bounds the list: nothing more comes in until it is paid, so
+    /// a call dropped over and over adds nothing, with more waiting.
+    #[test]
+    fn repeated_cancellation_cannot_grow_what_is_owed() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        for local_id in 10..14 {
+            seen.feed(&stray_ready(local_id));
+        }
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 16];
+        for _ in 0..3 {
+            dropped_parked(reader.read_channel(ch, &mut buf));
+            assert_eq!(writer.shared.lock_owed().len(), 1);
+        }
+        drop(busy);
+
+        for _ in 0..4 {
+            let _ = now(reader.dispatch_one());
+        }
+        assert_eq!(closes(&seen), [(10, 43), (11, 43), (12, 43), (13, 43)]);
+    }
+
+    /// Only the wait for the write half can be walked away from: past
+    /// that the packet is on its way out, and a drop abandons it.
+    #[test]
+    fn a_payment_dropped_mid_write_desynchronizes() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&wrte(1, b"hello"));
+        seen.stall_writes();
+
+        let mut buf = [0u8; 16];
+        abandon(reader.read_channel(ch, &mut buf));
+        assert!(writer
+            .shared
+            .desync
+            .check::<core::convert::Infallible>()
+            .is_err());
+    }
+
+    /// Nothing reaches a device that is gone, and what it sent before it
+    /// went is still to be received past the debt that cannot be paid.
+    #[test]
+    fn what_is_owed_to_a_device_that_is_gone_is_written_off() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&wrte(1, b"one"));
+        seen.feed(&stray_ready(7));
+        seen.feed(&wrte(1, b"two"));
+        seen.fail_writes(ErrorKind::BrokenPipe);
+
+        let mut buf = [0u8; 16];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"one");
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"two");
+        assert!(writer.shared.lock_owed().is_empty());
+    }
+
+    /// `run` refuses what nobody listens for ahead of every receive. The
+    /// refusal fails, which puts the request back at the head of the
+    /// queue, so going on would find it for ever, and giving up would
+    /// leave the packets behind it unread.
+    #[test]
+    fn a_refusal_to_a_device_that_is_gone_stops_nothing() {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        seen.feed(&wrte(1, b"behind it"));
+        seen.fail_writes(ErrorKind::BrokenPipe);
+
+        assert!(matches!(
+            now(reader.run()),
+            Err(crate::error::Error::UnexpectedEof)
+        ));
+        let mut buf = [0u8; 16];
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"behind it");
+    }
+
+    /// An OPEN past the cap is refused as it lands, and that refusal
+    /// failing is no reason for the call that took it in to fail: the
+    /// packets behind it are still to be read.
+    #[test]
+    fn a_refusal_on_arrival_to_a_device_that_is_gone_stops_nothing() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        now(reader.open_channel(b"shell:\0")).unwrap();
+        let seen = seen_by(&writer);
+        for id in [70, 71] {
+            let dest = alloc::format!("tcp:{id}\0");
+            seen.feed(&Packet::new(Command::Open, id, 0, dest.into_bytes()));
+        }
+        seen.fail_writes(ErrorKind::BrokenPipe);
+
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+    }
+
+    /// The same for what a cancelled refusal left past the cap.
+    #[test]
+    fn a_refusal_past_the_cap_to_a_device_that_is_gone_stops_nothing() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        let seen = seen_by(&writer);
+        for id in [70, 71] {
+            let dest = alloc::format!("tcp:{id}\0");
+            seen.feed(&Packet::new(Command::Open, id, 0, dest.into_bytes()));
+        }
+
+        // The refusal of the second, dropped waiting for the write half,
+        // leaves it past the cap.
+        now(reader.dispatch_one()).unwrap();
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(reader.dispatch_one());
+        drop(busy);
+
+        seen.feed(&wrte(1, b"behind it"));
+        seen.fail_writes(ErrorKind::BrokenPipe);
+        now(reader.dispatch_one()).unwrap();
+        let mut buf = [0u8; 16];
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"behind it");
+    }
+}
+
 mod send_queue_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;

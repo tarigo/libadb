@@ -11,6 +11,7 @@ use event_listener::{Event, EventListener};
 use std::sync::Mutex;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use super::SplitIncoming;
@@ -21,7 +22,7 @@ use crate::base::incoming::{IncomingQueue, PendingOpen};
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::Packet;
 use crate::base::slot::{ChannelFault, ChannelSlot, PendingAck};
-use crate::base::wire::{send_okay_to, send_open, send_pkt, DesyncFlag};
+use crate::base::wire::{connection_gone, send_okay_to, send_open, send_pkt, DesyncFlag};
 use crate::error::Error;
 
 #[cfg(doc)]
@@ -77,10 +78,26 @@ pub(crate) struct Shared<WH> {
     pub(super) listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(super) incoming_signal: Event,
-    /// CLSEs for channels the device accepted just as their opener gave
-    /// up: `Drop` cannot send them, so whoever takes the write half
-    /// next does.
-    owed_closes: Mutex<Vec<ChannelIds>>,
+    /// What the device is owed, oldest first: see [`Owed`].
+    ///
+    /// Bounded by nothing being received until it is empty, so one
+    /// packet at most adds to it at a time, on top of the openers given
+    /// up on, which hold a slot each until they go: no more than
+    /// [`max_channels`](crate::ConnectionConfig::max_channels) + 1.
+    owed: Mutex<VecDeque<Owed>>,
+}
+
+/// A packet the device is owed, kept here from before any wait until it
+/// is on the wire. Waiting for the write half is a cancellation point,
+/// and `Drop` cannot send anything, so whoever takes the write half next
+/// sends it, and a call that receives does so first.
+#[derive(Clone, Copy)]
+pub(super) enum Owed {
+    /// The OKAY for data that arrived.
+    Okay(PendingAck),
+    /// The CLSE for an end the device holds open: an OPEN given up on as
+    /// it answered, or a channel broken by a fault.
+    Close(ChannelIds),
 }
 
 impl<WH> Shared<WH> {
@@ -105,7 +122,7 @@ impl<WH> Shared<WH> {
             stopped: AtomicBool::new(false),
             listeners: AtomicUsize::new(0),
             incoming_signal: Event::new(),
-            owed_closes: Mutex::new(Vec::new()),
+            owed: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -123,8 +140,25 @@ impl<WH> Shared<WH> {
         self.staged.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub(super) fn lock_owed(&self) -> std::sync::MutexGuard<'_, Vec<ChannelIds>> {
-        self.owed_closes.lock().unwrap_or_else(|p| p.into_inner())
+    pub(super) fn lock_owed(&self) -> std::sync::MutexGuard<'_, VecDeque<Owed>> {
+        self.owed.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Note a packet the device is owed. The caller has awaited nothing
+    /// yet, so from here no dropped future can lose it.
+    pub(super) fn owe(&self, debt: Owed) {
+        self.lock_owed().push_back(debt);
+    }
+
+    /// Send what is owed, if anything is.
+    pub(super) async fn pay(&self) -> Result<(), Error<<WH as ErrorType>::Error>>
+    where
+        WH: Write,
+    {
+        if !self.lock_owed().is_empty() {
+            drop(self.lock_write().await?);
+        }
+        Ok(())
     }
 
     /// Reserve a free slot and send OPEN for `destination` — the start
@@ -186,14 +220,8 @@ impl<WH> Shared<WH> {
         if found {
             self.signals[idx].wake();
         }
-        let mut wh = self.lock_write().await?;
-        send_pkt(
-            &mut *wh,
-            &self.desync,
-            &Packet::close(ids),
-            self.negotiated.checksum(),
-        )
-        .await
+        self.owe(Owed::Close(ids));
+        self.pay().await
     }
 
     /// Take what `ch` has buffered into `buf` and send the OKAY it
@@ -250,24 +278,6 @@ impl<WH> Shared<WH> {
         let mut chs = self.lock_channels();
         let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
         slot.take_buffered(buf)
-    }
-
-    pub(super) async fn send_okay(
-        &self,
-        ack: PendingAck,
-    ) -> Result<(), Error<<WH as ErrorType>::Error>>
-    where
-        WH: Write,
-    {
-        let mut wh = self.lock_write().await?;
-        send_okay_to(
-            &mut *wh,
-            &self.desync,
-            ack,
-            self.negotiated.ack_mode(),
-            self.negotiated.checksum(),
-        )
-        .await
     }
 
     /// Wrap a request that never reached the queue in its owned
@@ -429,7 +439,11 @@ impl<WH> Shared<WH> {
         Ok(())
     }
 
-    /// Take the write half for one packet, once the owed CLSEs are out.
+    /// Take the write half for one packet, once what is owed is out.
+    ///
+    /// A debt leaves the list only once it is on the wire, so a call
+    /// dropped on its way there has lost nothing. Past the wait for the
+    /// write half a drop abandons a packet, which is a desync as ever.
     pub(super) async fn lock_write(
         &self,
     ) -> Result<WriteLock<'_, WH>, Error<<WH as ErrorType>::Error>>
@@ -441,17 +455,41 @@ impl<WH> Shared<WH> {
             shared: self,
         };
         loop {
-            let owed = self.lock_owed().pop();
-            let Some(ids) = owed else {
+            let owed = self.lock_owed().front().copied();
+            let Some(debt) = owed else {
                 return Ok(lock);
             };
-            send_pkt(
-                &mut *lock,
-                &self.desync,
-                &Packet::close(ids),
-                self.negotiated.checksum(),
-            )
-            .await?;
+            let paid = match debt {
+                Owed::Okay(ack) => {
+                    send_okay_to(
+                        &mut *lock,
+                        &self.desync,
+                        ack,
+                        self.negotiated.ack_mode(),
+                        self.negotiated.checksum(),
+                    )
+                    .await
+                }
+                Owed::Close(ids) => {
+                    send_pkt(
+                        &mut *lock,
+                        &self.desync,
+                        &Packet::close(ids),
+                        self.negotiated.checksum(),
+                    )
+                    .await
+                }
+            };
+            match paid {
+                Ok(()) => drop(self.lock_owed().pop_front()),
+                // Nothing reaches a device that is gone, so it is owed
+                // nothing, and what it sent is still to be received.
+                Err(e) if connection_gone(&e) => {
+                    self.lock_owed().clear();
+                    return Ok(lock);
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 }
@@ -519,7 +557,7 @@ impl<WH> Drop for SlotGuard<WH> {
         // The device accepted before the opener gave up: its end is
         // open, and the CLSE for it is owed to whoever writes next.
         if let Some(ids) = slot.ids().filter(|_| !slot.is_failed()) {
-            self.shared.lock_owed().push(ids);
+            self.shared.owe(Owed::Close(ids));
         }
     }
 }

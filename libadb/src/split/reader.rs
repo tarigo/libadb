@@ -8,7 +8,7 @@ use core::sync::atomic::Ordering;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
-use super::shared::{Shared, SlotGuard};
+use super::shared::{Owed, Shared, SlotGuard};
 use super::writer::close_channel_via;
 use super::SplitIncoming;
 use crate::base::channel::ChannelId;
@@ -20,7 +20,7 @@ use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::session::ServiceChannel;
 use crate::base::slot::ChannelFault;
-use crate::base::wire::{connection_gone, recv_pkt, send_pkt};
+use crate::base::wire::{connection_gone, recv_pkt};
 use crate::device_banner::DeviceBanner;
 use crate::error::Error;
 
@@ -135,9 +135,27 @@ where
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
-            excess.reject().await?;
+            match excess.reject().await {
+                // It is back in the queue, for nobody to refuse.
+                Err(e) if connection_gone(&e) => break,
+                refused => refused?,
+            }
         }
         Ok(())
+    }
+
+    /// The next packet off the connection, once what the last one left
+    /// owing is out. The device may be waiting for exactly that, so it
+    /// cannot wait for a packet; and nothing coming in until it is out
+    /// is what bounds the list.
+    async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
+        self.shared.pay().await?;
+        recv_pkt(
+            &mut self.read_half,
+            &mut self.recv_buf,
+            self.shared.negotiated.config.max_payload(),
+        )
+        .await
     }
 
     async fn await_open_ack(
@@ -147,12 +165,7 @@ where
     ) -> Result<ChannelId, Error<<RH as ErrorType>::Error>> {
         self.drain_overflow().await?;
         loop {
-            let pkt = recv_pkt(
-                &mut self.read_half,
-                &mut self.recv_buf,
-                self.shared.negotiated.config.max_payload(),
-            )
-            .await?;
+            let pkt = self.recv().await?;
             match pkt.command {
                 Command::Ready if pkt.arg1 == ch.local.raw() => {
                     let remote = RemoteId::from(pkt.arg0);
@@ -220,23 +233,18 @@ where
         loop {
             // Before every receive, the first included, so nothing left
             // over — from before `run` or by the last packet — waits for
-            // traffic that may never come: owed CLSEs go out, and
-            // requests nobody listens for are refused.
-            let owes = !self.shared.lock_owed().is_empty();
-            if owes {
-                drop(self.shared.lock_write().await?);
-            }
+            // traffic that may never come: requests nobody listens for
+            // are refused, and `recv` pays what is owed.
             if self.shared.listeners.load(Ordering::Acquire) == 0 {
                 while let Some(refused) = self.shared.take_incoming() {
-                    refused.reject().await?;
+                    match refused.reject().await {
+                        // It is back in the queue, for nobody to refuse.
+                        Err(e) if connection_gone(&e) => break,
+                        refused => refused?,
+                    }
                 }
             }
-            let pkt = recv_pkt(
-                &mut self.read_half,
-                &mut self.recv_buf,
-                self.shared.negotiated.config.max_payload(),
-            )
-            .await?;
+            let pkt = self.recv().await?;
             self.dispatch(pkt, OnFault::CloseChannel).await?;
         }
     }
@@ -253,7 +261,8 @@ where
     /// whose reads are not cancel-safe, as
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) reports,
     /// the future must not be dropped: run it to completion rather than
-    /// race it, or the middle of a packet can be lost.
+    /// race it, or the middle of a packet can be lost. What a call
+    /// dropped earlier left owing the device goes out first.
     ///
     /// A packet that breaks one channel alone closes that channel, as
     /// under [`run`](Self::run), and is not this call's failure: the
@@ -264,12 +273,7 @@ where
     pub async fn dispatch_one(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
         self.drain_overflow().await?;
-        let pkt = recv_pkt(
-            &mut self.read_half,
-            &mut self.recv_buf,
-            self.shared.negotiated.config.max_payload(),
-        )
-        .await?;
+        let pkt = self.recv().await?;
         self.dispatch(pkt, OnFault::CloseChannel).await
     }
 
@@ -283,10 +287,10 @@ where
     /// What the device sent stays in the channel until it can be taken,
     /// and bytes that owe an acknowledgement are taken only once that
     /// has been sent: a call dropped while it waits for the write half
-    /// has taken nothing, and the next read gets them. Dropping the call
-    /// while it waits for a packet is another matter: the wait is a
-    /// transport read, as under
-    /// [`accept_incoming`](Self::accept_incoming).
+    /// has taken nothing, and the next read gets them. What such a call
+    /// left owing the device goes out first. Dropping the call while it
+    /// waits for a packet is another matter: the wait is a transport
+    /// read, as under [`accept_incoming`](Self::accept_incoming).
     ///
     /// What arrived is handed over whatever has become of the connection
     /// since: only a read that finds nothing buffered fails with that.
@@ -301,6 +305,10 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
+        // Here too, for a read that has its data and no packet to wait
+        // for, as the device, owed an OKAY, may never send one. Failing
+        // is a desync, which comes up once nothing is left to hand over.
+        let _ = self.shared.pay().await;
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
         }
@@ -309,12 +317,7 @@ where
 
         self.drain_overflow().await?;
         loop {
-            let pkt = recv_pkt(
-                &mut self.read_half,
-                &mut self.recv_buf,
-                self.shared.negotiated.config.max_payload(),
-            )
-            .await?;
+            let pkt = self.recv().await?;
             // What the packet left for this channel goes first: what
             // failed along the way is the next call's to report.
             let dispatched = self.dispatch(pkt, OnFault::FailCall).await;
@@ -351,16 +354,12 @@ where
         &mut self,
     ) -> Result<SplitIncoming<WH>, Error<<RH as ErrorType>::Error>> {
         self.shared.desync.check()?;
+        self.shared.pay().await?;
         loop {
             if let Some(incoming) = self.shared.take_incoming() {
                 return Ok(incoming);
             }
-            let pkt = recv_pkt(
-                &mut self.read_half,
-                &mut self.recv_buf,
-                self.shared.negotiated.config.max_payload(),
-            )
-            .await?;
+            let pkt = self.recv().await?;
             self.dispatch(pkt, OnFault::FailCall).await?;
         }
     }
@@ -395,7 +394,8 @@ where
         match outcome {
             DispatchOutcome::AckWrite { idx, ack } => {
                 self.shared.signals[idx].wake();
-                self.shared.send_okay(ack).await?;
+                self.shared.owe(Owed::Okay(ack));
+                self.shared.pay().await?;
             }
             DispatchOutcome::CreditGranted { idx }
             | DispatchOutcome::SlotClosed { idx }
@@ -418,14 +418,8 @@ where
                 self.shared.withdraw_open(remote);
             }
             DispatchOutcome::StrayReady { ids } => {
-                let mut wh = self.shared.lock_write().await?;
-                send_pkt(
-                    &mut *wh,
-                    &self.shared.desync,
-                    &Packet::close(ids),
-                    self.shared.negotiated.checksum(),
-                )
-                .await?;
+                self.shared.owe(Owed::Close(ids));
+                self.shared.pay().await?;
             }
             DispatchOutcome::ChannelFault {
                 idx,
