@@ -288,10 +288,8 @@ async fn sync_stat_runs_over_the_writer() {
         body[4..8].copy_from_slice(&0o100644u32.to_le_bytes());
         body[8..12].copy_from_slice(&42u32.to_le_bytes());
         ch.send_write(&body).await;
-        let [_, quit] = ch.expect_unordered([CMD_OKAY, CMD_WRTE]).await;
+        let [_, quit, _] = ch.expect_unordered([CMD_OKAY, CMD_WRTE, CMD_CLSE]).await;
         assert_eq!(&quit[..4], b"QUIT");
-        ch.ack(quit.len() as u32).await;
-        ch.expect_close().await;
     })
     .await;
     let (reader, mut writer) = conn.split().unwrap();
@@ -302,7 +300,7 @@ async fn sync_stat_runs_over_the_writer() {
     let stat = sync.stat("/file").await.unwrap();
     assert_eq!((stat.mode, stat.size), (sync::FileMode(0o100644), 42));
     sync.quit().await.unwrap();
-    rt::join(device).await;
+    rt::within("the device", rt::join(device)).await;
 }
 }
 
