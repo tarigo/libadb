@@ -188,7 +188,7 @@ let conn = Connection::connect(
 |---------------|------------------------------|-----------------------------------|
 | `shell::v1`   | `shell:`                     | Смешанные stdout/stderr, без кода выхода |
 | `shell::v2`   | `shell,v2,…:`                | Кадры stdout/stderr/exit, PTY и изменение размера окна |
-| `exec`        | `exec:`                      | Бинарно-чистый stdout, без PTY и кода выхода |
+| `exec`        | `exec:`                      | Бинарно-чистый stdout, PTY в raw-режиме, без кода выхода |
 | `cmd`         | `abb_exec`/`abb`/`shell:cmd` | Автовыбор наиболее подходящего сервиса |
 | `abb`         | `abb_exec:`, `abb:`          | Android Binder Bridge (Android 10+) |
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Бинарные записи logcat, распарсенные |

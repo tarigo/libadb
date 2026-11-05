@@ -1,8 +1,10 @@
 //! `exec:` service — raw, binary-clean command execution.
 //!
-//! Unlike [`shell::v1`](crate::shell::v1), the `exec:` service does not
-//! allocate a PTY and does not perform CRLF conversion, so stdout is
+//! The device runs every `exec:` on a PTY in raw mode, which does not
+//! echo input and does not perform CRLF conversion, so stdout is
 //! suitable for binary payloads (e.g. `exec:cat /data/local/tmp/file`).
+//! [`shell::v1`](crate::shell::v1) gets the same mode for a command, but
+//! not for an empty `shell:`, where `exec:` stays raw.
 //! Like [`shell::v1`](crate::shell::v1), framing is absent — stdout and stderr are
 //! interleaved on the channel and no exit code is reported. For exit
 //! codes or separate streams use [`shell::v2`](crate::shell::v2) on
@@ -10,7 +12,7 @@
 //!
 //! Two destination forms:
 //!
-//! * `exec:` — start the default shell (no PTY, stdin open).
+//! * `exec:` — start the default shell (raw PTY, stdin open).
 //! * `exec:<command>` — run a single command via `sh -c`; the channel
 //!   closes when the command exits.
 //!
@@ -37,7 +39,8 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
 }
 
 /// An `exec:` session: the same frameless byte stream a `shell:`
-/// channel carries, minus the PTY. Construct via [`open`].
+/// channel carries, always over a PTY in raw mode. Construct via
+/// [`open`].
 pub type Exec<'a, S> = crate::shell::v1::Shell<'a, S>;
 
 /// Open an `exec:` channel and wrap it in an [`Exec`] session.

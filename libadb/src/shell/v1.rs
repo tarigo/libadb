@@ -3,14 +3,16 @@
 //! Unlike [`shell::v2`](crate::shell::v2), the legacy `shell:` service has
 //! no framing: the channel carries a raw byte stream with stdout and
 //! stderr interleaved, and the exit code is not reported. The device
-//! always allocates a PTY — there is no way to request a raw (non-TTY)
-//! session or to set `TERM` / window size.
+//! always allocates a PTY, in raw mode unless the command is empty;
+//! these destinations name no mode, `TERM` or window size.
 //!
 //! Two destination forms:
 //!
-//! * `shell:` — start the default shell interactively (PTY allocated).
-//! * `shell:<command>` — run a single command inside a PTY; the channel
-//!   closes when the command exits.
+//! * `shell:` — start the default shell interactively, on a PTY in its
+//!   default mode, which echoes input and turns `\n` into `\r\n`.
+//! * `shell:<command>` — run a single command via `sh -c`, on a PTY in
+//!   raw mode, which does neither; the channel closes when the command
+//!   exits.
 //!
 //! This module is zero-alloc: [`Shell`] wraps an open [`Channel`] and
 //! all destination strings and output bytes land in caller-provided
@@ -41,9 +43,10 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
 /// Unlike [`shell::v2::Shell`](crate::shell::v2::Shell), nothing frames
 /// the stream: `read` returns bytes as they arrive and `write_stdin`
 /// sends bytes as they are. There is no separate stderr stream and no
-/// exit code. Over `shell:` both directions pass the PTY the device
-/// allocates, which echoes input and turns `\n` into `\r\n`; over
-/// `exec:` they reach the command untouched.
+/// exit code. Both directions pass a PTY the device allocates. For an
+/// empty `shell:` it stays in its default mode, which echoes input and
+/// turns `\n` into `\r\n`; for `shell:<command>` and `exec:` it is in
+/// raw mode, and the bytes pass untouched.
 pub struct Shell<'a, S> {
     channel: Channel<'a, S>,
 }
@@ -98,8 +101,8 @@ impl<'a, S: Session> Shell<'a, S> {
 /// Open a legacy `shell:` channel and wrap it in a [`Shell`].
 ///
 /// Pass an empty `command` to start a default interactive shell; pass a
-/// command string to run it inside a PTY and have the channel close on
-/// exit.
+/// command string to run it via `sh -c`, on a PTY in raw mode, and have
+/// the channel close on exit.
 ///
 /// `dest_buf` is a caller-owned scratch buffer used to assemble the
 /// `shell:<command>\0` destination string. It must be at least

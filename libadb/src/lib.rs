@@ -91,7 +91,7 @@
 //!
 //! * [`shell::v1`] — legacy `shell:` (interleaved stdout/stderr, no exit code)
 //! * [`shell::v2`] — framed stdout/stderr/exit, optional PTY
-//! * [`exec`]     — binary-clean `exec:` (no PTY, no exit code)
+//! * [`exec`]     — binary-clean `exec:` (raw PTY, no exit code)
 //! * [`cmd`]      — `abb_exec` / `abb` / `shell:cmd` fallback chain
 //! * [`abb`]      — Android Binder Bridge (Android 10+)
 //! * [`logcat`]   — parsed binary logcat stream

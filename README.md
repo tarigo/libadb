@@ -181,7 +181,7 @@ dominates the cost of a channel write: skipping it made a 32 KiB
 |---------------|------------------------------|-----------------------------------|
 | `shell::v1`   | `shell:`                     | Interleaved stdout/stderr, no exit code |
 | `shell::v2`   | `shell,v2,…:`                | Framed stdout/stderr/exit, PTY + window-size |
-| `exec`        | `exec:`                      | Binary-clean stdout, no PTY, no exit code |
+| `exec`        | `exec:`                      | Binary-clean stdout, raw PTY, no exit code |
 | `cmd`         | `abb_exec`/`abb`/`shell:cmd` | Auto-selects the best available service |
 | `abb`         | `abb_exec:`, `abb:`          | Android 10+ Binder Bridge         |
 | `logcat`      | `shell,v2,raw:logcat -B …`   | Binary logcat entries, parsed     |
