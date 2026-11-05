@@ -11,6 +11,19 @@
 //! what makes interactive shell sessions usable from C without any
 //! async runtime.
 //!
+//! A write can still need a read call running. [`Reader::run`] is never
+//! started, so only a call holding the read lock takes packets off the
+//! connection, and that includes the OKAY [`Writer::write_channel`]
+//! waits for. Without delayed ACK a channel has room for one WRTE at a
+//! time, so a second write in a row waits for the OKAY to the first;
+//! with delayed ACK a write waits once the credit runs out. With no read
+//! call running it stays blocked, and socket timeouts do not reach it:
+//! it is not waiting on the socket. So a C caller keeps a thread in
+//! [`adb_read_channel`] or [`adb_shell_read_frame`], on any channel of
+//! the connection, while writing. Alternating reads and writes on one
+//! thread works only where the device answers each write: a read
+//! returns once it has data, whether or not the OKAY has come.
+//!
 //! # Feature flags
 //!
 //! TCP support is always compiled in and needs no async runtime. USB
@@ -29,7 +42,9 @@
 //! device that has never seen it without a USB cable.
 //!
 //! [`Reader`]: libadb::Reader
+//! [`Reader::run`]: libadb::Reader::run
 //! [`Writer`]: libadb::Writer
+//! [`Writer::write_channel`]: libadb::Writer::write_channel
 
 #![no_std]
 #![allow(unsafe_code)]

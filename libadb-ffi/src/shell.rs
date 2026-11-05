@@ -155,7 +155,11 @@ async fn send_frame_async(
 /// * `term`    — value for the device's `TERM` env var (e.g. `"xterm-256color"`).
 ///   Null or empty omits it. Ignored when `pty` is false.
 /// * `rows`, `cols` — if `pty` and either is non-zero, a `WINDOW_SIZE_CHANGE`
-///   frame is sent right after the channel opens.
+///   frame is sent right after the channel opens. The frame is a write like
+///   any other, header and payload in two WRTEs, so this call can need a
+///   read call running (see the [crate docs](crate)), and its caller has no
+///   shell handle yet to read on. To avoid the wait, pass 0, 0 and call
+///   [`adb_shell_set_window_size`] once a thread is reading.
 ///
 /// On success, `*out_sh` receives a handle that must be released with
 /// [`adb_shell_free`]. Call [`adb_shell_close`] beforehand to tear down the
@@ -307,6 +311,9 @@ pub unsafe extern "C" fn adb_shell_read_frame(
 /// Safe to call from several threads on one session: each frame is
 /// assembled and written under a lock, so frames arrive whole rather
 /// than interleaved with another sender's.
+///
+/// The frame header and a payload go out as two WRTEs, so one call can
+/// need a read call running: see the [crate docs](crate).
 ///
 /// # Safety
 /// `sh` must be a valid handle. `data` must be NULL or point to at least

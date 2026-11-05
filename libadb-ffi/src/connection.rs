@@ -31,7 +31,8 @@ pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 /// so that multiple C threads can share a handle safely (serialised on
 /// the read path). The Writer is cheaply cloneable and the write path
 /// only briefly locks an internal write-half mutex, so reads and writes
-/// from different threads do not block each other.
+/// from different threads do not wait on each other's locks. A write
+/// can still need a read call running: see the [crate docs](crate).
 #[allow(non_camel_case_types)]
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,

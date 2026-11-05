@@ -117,8 +117,14 @@ pub unsafe extern "C" fn adb_read_channel(
 }
 
 /// Write `buf_len` bytes from `buf` to a channel. Returns only after
-/// all bytes have been framed and handed to the transport (chunked to
-/// the negotiated `max_payload` and flow-controlled).
+/// all bytes have been framed and handed to the transport.
+///
+/// They go out as WRTEs of at most the negotiated `max_payload`, and
+/// each can first wait for the device's OKAY to the one before it, or
+/// for credit under delayed ACK. Only a read call takes that OKAY off
+/// the connection, so this call can need one running even on its own,
+/// and socket timeouts do not reach the wait: see the
+/// [crate docs](crate).
 ///
 /// Does not require the reader mutex — safe to call concurrently with
 /// [`adb_read_channel`] on another thread.
