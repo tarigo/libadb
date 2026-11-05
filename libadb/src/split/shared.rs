@@ -79,6 +79,8 @@ pub(crate) struct Shared<WH> {
     pub(super) listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(super) incoming_signal: Event,
+    /// Woken with everyone else, for a receive in flight.
+    receive_signal: Event,
     /// What the device is owed, oldest first: see [`Owed`].
     ///
     /// Bounded by nothing being received until it is empty, so one
@@ -124,6 +126,7 @@ impl<WH> Shared<WH> {
             stopped: AtomicBool::new(false),
             listeners: AtomicUsize::new(0),
             incoming_signal: Event::new(),
+            receive_signal: Event::new(),
             owed: Mutex::new(VecDeque::new()),
         }
     }
@@ -427,6 +430,31 @@ impl<WH> Shared<WH> {
             signal.wake();
         }
         self.incoming_signal.notify(usize::MAX);
+        self.receive_signal.notify(usize::MAX);
+    }
+
+    /// Resolve once a write abandoned mid-packet has left the connection
+    /// with no way on, for a receive to give up on the wait: the device
+    /// is waiting for the rest of that packet, so nothing may ever come.
+    ///
+    /// `raced` says a read is raced against this. Otherwise it is only
+    /// asked before each read, with nothing to wake, which spares the
+    /// transports that cannot be raced a listener for every read.
+    pub(super) async fn desynchronized(&self, raced: bool) {
+        let mut listener: Option<EventListener> = None;
+        loop {
+            if self.desync.check::<Infallible>().is_err() {
+                return;
+            }
+            if !raced {
+                core::future::pending::<()>().await;
+            }
+            // Register, then look once more before waiting, as reads do.
+            match listener.take() {
+                Some(waiting) => waiting.await,
+                None => listener = Some(self.receive_signal.listen()),
+            }
+        }
     }
 
     /// Fail once waiting can no longer end well: a write abandoned

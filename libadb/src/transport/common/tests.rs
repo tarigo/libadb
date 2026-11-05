@@ -68,6 +68,12 @@ impl Write for MockIo {
     }
 }
 
+impl crate::transport::ReadCancelSafety for MockIo {
+    fn read_cancel_safe(&self) -> bool {
+        true
+    }
+}
+
 impl Splittable for MockIo {
     type ReadHalf = MockIo;
     type WriteHalf = MockIo;

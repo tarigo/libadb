@@ -199,11 +199,7 @@ impl<T: Splittable> Write for TlsWriteHalf<T> {
     }
 }
 
-impl<T> ReadCancelSafety for TlsReadHalf<T>
-where
-    T: Splittable,
-    T::ReadHalf: ReadCancelSafety,
-{
+impl<T: Splittable> ReadCancelSafety for TlsReadHalf<T> {
     fn read_cancel_safe(&self) -> bool {
         self.inner.read_cancel_safe()
     }
@@ -274,11 +270,7 @@ impl<T: Splittable> Write for MaybeTlsWrite<T> {
     }
 }
 
-impl<T> ReadCancelSafety for MaybeTlsRead<T>
-where
-    T: Splittable,
-    T::ReadHalf: ReadCancelSafety,
-{
+impl<T: Splittable> ReadCancelSafety for MaybeTlsRead<T> {
     fn read_cancel_safe(&self) -> bool {
         match self {
             Self::Plain(t) => t.read_cancel_safe(),

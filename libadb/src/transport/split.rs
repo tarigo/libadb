@@ -8,6 +8,8 @@
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
+use super::ReadCancelSafety;
+
 /// Transport that can be broken into an owned read half and an owned
 /// write half sharing the same underlying endpoint.
 ///
@@ -16,8 +18,10 @@ use embedded_io_async::{Read, Write};
 /// fail at runtime (e.g. `TcpStream::try_clone`); most implementations
 /// return `Ok` unconditionally.
 pub trait Splittable: Read + Write + ErrorType {
-    /// Owned half that reads from the endpoint.
-    type ReadHalf: Read<Error = <Self as ErrorType>::Error>;
+    /// Owned half that reads from the endpoint. Whether a read of it
+    /// can be dropped is what tells a [`Reader`](crate::Reader) if it
+    /// can give up on one once the connection cannot go on.
+    type ReadHalf: Read<Error = <Self as ErrorType>::Error> + ReadCancelSafety;
     /// Owned half that writes to the endpoint.
     type WriteHalf: Write<Error = <Self as ErrorType>::Error>;
 

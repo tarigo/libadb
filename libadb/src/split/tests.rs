@@ -1948,6 +1948,141 @@ mod end_tests {
     }
 }
 
+/// A write given up on mid-packet ends the connection for good, and
+/// nothing on the read side is writing to find that out by itself.
+mod give_up_tests {
+    use alloc::boxed::Box;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    use crate::base::channel::ChannelId;
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        abandon, cnxn_with, now, okay_with_budget, wrte, Mock, MockError, NoAuth, SharedMock,
+    };
+    use crate::error::Error;
+
+    use super::{hold_back, Reader, Writer};
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// One channel with credit to write on and a transport that takes
+    /// nothing, so that writing means giving a write up.
+    fn stalled(
+        configure: impl FnOnce(&mut Mock),
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("delayed_ack"))
+            .feed(&okay_with_budget(1, 1024));
+        configure(&mut mock);
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Raw(b"host::features=delayed_ack"),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        seen.parks_when_drained();
+        seen.stall_writes();
+        (reader, writer, ch, seen)
+    }
+
+    fn desynchronized<T>(polled: Poll<Result<T, Error<MockError>>>) -> bool {
+        matches!(polled, Poll::Ready(Err(Error::Desynchronized)))
+    }
+
+    #[test]
+    fn a_write_given_up_on_ends_run() {
+        let (reader, writer, ch, _seen) = stalled(|_| {});
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        abandon(writer.write_channel(ch, b"cut short"));
+        assert!(desynchronized(poll_once(run.as_mut())));
+    }
+
+    #[test]
+    fn a_write_given_up_on_ends_a_parked_read() {
+        let (mut reader, writer, ch, _seen) = stalled(|_| {});
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(reader.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        abandon(writer.write_channel(ch, b"cut short"));
+        assert!(desynchronized(poll_once(read.as_mut())));
+    }
+
+    #[test]
+    fn a_write_given_up_on_ends_a_parked_dispatch() {
+        let (mut reader, writer, ch, _seen) = stalled(|_| {});
+        let mut dispatch = Box::pin(reader.dispatch_one());
+        assert!(poll_once(dispatch.as_mut()).is_pending());
+
+        abandon(writer.write_channel(ch, b"cut short"));
+        assert!(desynchronized(poll_once(dispatch.as_mut())));
+    }
+
+    #[test]
+    fn a_write_given_up_on_ends_a_parked_accept() {
+        let (mut reader, writer, ch, _seen) = stalled(|_| {});
+        let mut accept = Box::pin(reader.accept_incoming());
+        assert!(poll_once(accept.as_mut()).is_pending());
+
+        abandon(writer.write_channel(ch, b"cut short"));
+        assert!(desynchronized(poll_once(accept.as_mut())));
+    }
+
+    /// `run` can be left waiting on a read it may not drop, for which the
+    /// next packet is the first chance it has.
+    #[test]
+    fn a_read_that_cannot_be_dropped_ends_run_at_the_next_packet() {
+        let (reader, writer, ch, seen) = stalled(|mock| {
+            mock.loses_cancelled_reads();
+        });
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        abandon(writer.write_channel(ch, b"cut short"));
+        assert!(
+            poll_once(run.as_mut()).is_pending(),
+            "the read in flight was given up on"
+        );
+
+        seen.feed(&wrte(1, b"next"));
+        assert!(desynchronized(poll_once(run.as_mut())));
+        let mut buf = [0u8; 8];
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"next", "the packet it finished on stays");
+    }
+
+    /// A connection desynchronized in any way ends it on the way in too,
+    /// with the transport never asked for more.
+    #[test]
+    fn a_connection_already_desynchronized_ends_the_loop_of_a_read() {
+        let (mut reader, writer, ch, seen) = stalled(|_| {});
+        abandon(writer.write_channel(ch, b"cut short"));
+        seen.feed(&wrte(1, b"on the wire"));
+        hold_back(&writer, ch, b"in the slot");
+
+        let mut buf = [0u8; 16];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"in the slot");
+        let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+    }
+}
+
 /// A caller with no task for `Reader::run` asks `waits_for_credit` when
 /// to read, and takes packets with `dispatch_one`.
 mod driving_tests {

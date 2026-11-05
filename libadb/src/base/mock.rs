@@ -387,6 +387,13 @@ impl embedded_io_async::Write for SharedMock {
 }
 
 #[cfg(feature = "split")]
+impl crate::transport::ReadCancelSafety for SharedMock {
+    fn read_cancel_safe(&self) -> bool {
+        self.lock().cancel_safe
+    }
+}
+
+#[cfg(feature = "split")]
 impl crate::transport::Splittable for SharedMock {
     type ReadHalf = SharedMock;
     type WriteHalf = SharedMock;

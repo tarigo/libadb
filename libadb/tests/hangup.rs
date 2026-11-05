@@ -314,6 +314,40 @@ async fn a_reset_ends_every_waiter() {
 }
 }
 
+// `run` is what a supervisor awaits, and no packet is coming to tell it
+// the connection is finished: a device left waiting for the rest of a
+// packet sends nothing.
+rt_test! {
+async fn a_write_given_up_on_ends_run() {
+    let done = Arc::new(AtomicBool::new(false));
+    let device_done = Arc::clone(&done);
+    let device = FakeDevice::new()
+        .banner(b"device::features=delayed_ack".to_vec())
+        .delayed_ack(1 << 30);
+    let (conn, device) = session(device, b"host::features=delayed_ack", move |mut s| async move {
+        s.accept_open(b"svc:\0").await;
+        while !device_done.load(Ordering::Relaxed) {
+            rt::sleep_ms(5).await;
+        }
+    })
+    .await;
+    let (reader, writer) = conn.split().unwrap();
+    let run = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+
+    let too_much = vec![0u8; 64 * 1024 * 1024];
+    let written = rt::timeout_ms(200, writer.write_channel(ch, &too_much)).await;
+    assert!(written.is_none(), "the socket took {} bytes", too_much.len());
+
+    let ended = rt::timeout_ms(1000, rt::join(run)).await;
+    let err = ended.expect("run went on past the connection").unwrap_err();
+    assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+
+    done.store(true, Ordering::Relaxed);
+    rt::within("the device", rt::join(device)).await;
+}
+}
+
 // A write that times out on a socket the device has stopped reading
 // desynchronizes the connection, which says nothing about what it had
 // delivered by then.

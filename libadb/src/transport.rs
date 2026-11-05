@@ -66,7 +66,9 @@ pub use split::Splittable;
 /// [`Connection::select_channel`](crate::Connection::select_channel)
 /// asks before it lets `interrupt` race a read in flight: a transport
 /// that answers `false` gets the interrupt checked between reads
-/// instead, which is slower to react but never loses a byte.
+/// instead, which is slower to react but never loses a byte. So does
+/// a [`Reader`](crate::Reader) that finds the connection cannot go on,
+/// which is why a split read half has to say.
 pub trait ReadCancelSafety {
     /// `true` when a read yields while it waits and dropping it then
     /// loses nothing.

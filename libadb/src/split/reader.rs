@@ -4,6 +4,7 @@
 use alloc::sync::Arc;
 use bytes::BytesMut;
 use core::convert::Infallible;
+use core::pin::pin;
 use core::sync::atomic::Ordering;
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
@@ -20,9 +21,10 @@ use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::session::ServiceChannel;
 use crate::base::slot::ChannelFault;
-use crate::base::wire::{connection_gone, ends_connection, recv_pkt};
+use crate::base::wire::{connection_gone, ends_connection, recv_pkt_or, Received};
 use crate::device_banner::DeviceBanner;
 use crate::error::Error;
+use crate::transport::ReadCancelSafety;
 
 #[cfg(doc)]
 use super::{IncomingListener, Writer};
@@ -55,7 +57,7 @@ where
 
 impl<RH, WH> Reader<RH, WH>
 where
-    RH: Read,
+    RH: Read + ReadCancelSafety,
     WH: Write<Error = <RH as ErrorType>::Error>,
 {
     pub(crate) fn new(read_half: RH, recv_buf: BytesMut, shared: Arc<Shared<WH>>) -> Self {
@@ -152,19 +154,33 @@ where
     /// The call that sees the connection end gets the failure as it is.
     /// Nobody else is in a position to see it, so everyone waiting is
     /// told here.
+    ///
+    /// A write abandoned while this waits ends the wait: the device is
+    /// left expecting the rest of a packet, so no packet may ever come.
+    /// A read that can be dropped goes at once, and any other finishes
+    /// first, with the next packet.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
         self.shared.check_live()?;
         self.shared.pay().await?;
-        let received = recv_pkt(
+        let race = self.read_half.read_cancel_safe();
+        let received = recv_pkt_or(
             &mut self.read_half,
             &mut self.recv_buf,
             self.shared.negotiated.config.max_payload(),
+            pin!(self.shared.desynchronized(race)),
+            race,
         )
         .await;
-        if received.as_ref().err().is_some_and(ends_connection) {
-            self.shared.stop();
+        match received {
+            Ok(Received::Packet(pkt)) => Ok(pkt),
+            Ok(Received::Interrupted(())) => Err(Error::Desynchronized),
+            Err(e) => {
+                if ends_connection(&e) {
+                    self.shared.stop();
+                }
+                Err(e)
+            }
         }
-        received
     }
 
     async fn await_open_ack(
@@ -216,6 +232,15 @@ where
     /// why its `Ok` side is [`Infallible`]; the `Reader` is gone then,
     /// and waiters on the `Writer` get [`Error::Disconnected`].
     ///
+    /// A write abandoned mid-packet ends it too, with
+    /// [`Error::Desynchronized`]: the device is left waiting for the
+    /// rest of that packet, so there may never be another to read. That
+    /// is at once on a transport whose reads can be dropped. On one
+    /// whose reads cannot, as
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) reports
+    /// of USB, it is at the next packet, the best a read that has to
+    /// finish allows.
+    ///
     /// Channels the device opens toward the host (`adb reverse`) wait
     /// for an [`IncomingListener`] while one is alive, and are refused
     /// otherwise: nobody would accept them. Requests still queued when
@@ -232,11 +257,11 @@ where
     /// packets a task sends in response to that data. The protocol
     /// allows either order.
     ///
-    /// Reception is never cancelled from within, so this is also the
-    /// way to read a transport whose reads are not cancel-safe (USB)
-    /// from several tasks. Dropping the future stops reception like
-    /// any dropped read on such a transport, and is otherwise the way
-    /// to shut the connection down.
+    /// A read that is not cancel-safe (USB) is never cancelled from
+    /// within, so this is also the way to read such a transport from
+    /// several tasks. Dropping the future stops reception like any
+    /// dropped read on such a transport, and is otherwise the way to
+    /// shut the connection down.
     pub async fn run(mut self) -> Result<Infallible, Error<<RH as ErrorType>::Error>> {
         self.shared.check_live()?;
         loop {
@@ -304,7 +329,9 @@ where
     /// What arrived is handed over whatever has become of the connection
     /// since: only a read that finds nothing buffered fails with that.
     /// An acknowledgement that fails does not fail the read it belongs
-    /// to; the next call reports the connection's failure.
+    /// to; the next call reports the connection's failure. A write
+    /// abandoned mid-packet ends the wait for a packet as it ends
+    /// [`run`](Self::run).
     ///
     /// A concurrent [`Writer::close_channel`] on the same channel does
     /// not wake this call directly — see the module-level note on
@@ -474,7 +501,7 @@ where
 
 impl<RH, WH> ServiceChannel for Reader<RH, WH>
 where
-    RH: Read,
+    RH: Read + ReadCancelSafety,
     WH: Write<Error = <RH as ErrorType>::Error>,
 {
     type IoError = <RH as ErrorType>::Error;
