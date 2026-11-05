@@ -15,7 +15,10 @@
 //! * **Reader-driven.** One task keeps the `Reader` and calls
 //!   [`Reader::open_channel`] and [`Reader::read_channel`] itself;
 //!   writers send from anywhere. Packets for other channels are
-//!   buffered while it waits, but only that task can collect them.
+//!   buffered while it waits, but only that task can collect them. A
+//!   writer parked for credit moves only once something reads, so with
+//!   no read under way the task takes packets one at a time with
+//!   [`Reader::dispatch_one`]; [`Writer::waits_for_credit`] says when.
 //! * **Dispatched.** [`Reader::run`] takes the `Reader` and does
 //!   nothing but receive and dispatch packets, waking whoever waits on
 //!   the channel each one is for. Every channel operation then goes

@@ -310,6 +310,37 @@ where
         Ok(())
     }
 
+    /// Whether the writers on `ch` have nothing left to do but wait for
+    /// the device: one is parked for credit the channel does not have,
+    /// and none is still sending.
+    ///
+    /// For a caller with no task to give [`Reader::run`], which has to
+    /// decide for itself when a pending
+    /// [`write_channel`](Self::write_channel) needs packets taken off the
+    /// connection with [`Reader::dispatch_one`]. That a write is pending
+    /// says little: on USB one is through every transfer, and a read
+    /// begun then could wait for a packet that never comes, since the
+    /// device may owe nothing yet.
+    ///
+    /// A writer still sending rules it out even with another parked
+    /// behind it: its packet has to go out before the device can answer
+    /// it, so its future has to be polled, not left for a read to finish.
+    ///
+    /// A closed or freed channel answers `false`: its writers have been
+    /// woken to fail. A `true` lasts until the next packet is dispatched,
+    /// so a caller about to read asks once it alone reads the connection.
+    pub fn waits_for_credit(&self, ch: ChannelId) -> bool {
+        let mut chs = self.shared.lock_channels();
+        let Some(slot) = chs.get_mut(ch) else {
+            return false;
+        };
+        if slot.is_closed() || slot.budget().is_some() {
+            return false;
+        }
+        let queue = slot.send_queue();
+        !queue.is_empty() && !queue.is_sending()
+    }
+
     /// Send CLSE and release the channel slot. Any cloned `Writer`
     /// parked on this channel observes `ChannelClosed` and unblocks.
     ///
@@ -397,7 +428,7 @@ where
             return None;
         }
         slot.try_reserve_send(want).map(|n| {
-            slot.send_queue().advance();
+            slot.send_queue().serve();
             Ok((n, slot.budget().is_some()))
         })
     }

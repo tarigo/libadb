@@ -1,5 +1,8 @@
 //! The order concurrent writers on one channel take its credit in.
 
+#[cfg(test)]
+mod tests;
+
 use alloc::collections::BTreeSet;
 
 /// Keeps concurrent `split::Writer`s on one channel in arrival order:
@@ -17,6 +20,8 @@ pub(crate) struct SendQueue {
     /// holes adjacent to it — so cancellation churn cannot grow this
     /// past the caller's own peak of concurrent writers.
     gone: BTreeSet<u64>,
+    /// Writers served and still sending what they reserved.
+    sending: usize,
 }
 
 #[cfg_attr(not(feature = "split"), allow(dead_code))]
@@ -33,9 +38,31 @@ impl SendQueue {
         self.head
     }
 
-    /// Move the queue past the served head, skipping places whose
-    /// writer already left.
-    pub(crate) fn advance(&mut self) {
+    /// Whether no writer holds a place: each was served, or left.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+
+    /// Whether a writer [`serve`](Self::serve) let through has yet to
+    /// [`finish`](Self::finish).
+    pub(crate) fn is_sending(&self) -> bool {
+        self.sending > 0
+    }
+
+    /// Serve the head: it leaves the queue with a send to finish.
+    pub(crate) fn serve(&mut self) {
+        self.sending += 1;
+        self.advance();
+    }
+
+    /// One writer [`serve`](Self::serve) let through is done sending.
+    pub(crate) fn finish(&mut self) {
+        self.sending -= 1;
+    }
+
+    /// Move the queue past the head, skipping places whose writer
+    /// already left.
+    fn advance(&mut self) {
         self.head += 1;
         while self.gone.remove(&self.head) {
             self.head += 1;
@@ -65,29 +92,5 @@ impl SendQueue {
         } else {
             false
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::SendQueue;
-
-    #[test]
-    fn cancellation_churn_behind_a_blocked_head_does_not_accumulate() {
-        let mut queue = SendQueue::default();
-        let _head = queue.enqueue();
-
-        for _ in 0..1_000 {
-            let mid = queue.enqueue();
-            let tail = queue.enqueue();
-            // Dropped mid-queue: a hole, while `tail` still lives...
-            assert!(!queue.leave(mid));
-            // ...and the leaving tail reclaims itself and the hole.
-            assert!(!queue.leave(tail));
-        }
-
-        assert!(queue.gone.is_empty());
-        assert_eq!(queue.tail, 1);
-        assert_eq!(queue.head, 0);
     }
 }

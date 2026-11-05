@@ -241,6 +241,38 @@ where
         }
     }
 
+    /// Take one packet off the connection and act on it: wake whoever
+    /// waits on the channel it is for, or keep it for a later read.
+    ///
+    /// For a caller that keeps the `Reader` and has no task to give
+    /// [`run`](Self::run). A [`Writer::write_channel`] parked for credit
+    /// has nobody else to take the OKAY it waits for when no read is
+    /// under way; [`Writer::waits_for_credit`] says when that is.
+    ///
+    /// It waits for a packet, however long one takes. On a transport
+    /// whose reads are not cancel-safe, as
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) reports,
+    /// the future must not be dropped: run it to completion rather than
+    /// race it, or the middle of a packet can be lost.
+    ///
+    /// A packet that breaks one channel alone closes that channel, as
+    /// under [`run`](Self::run), and is not this call's failure: the
+    /// caller may have nothing to do with that channel. Unlike `run`,
+    /// this leaves a channel the device opens queued for
+    /// [`accept_incoming`](Self::accept_incoming), with or without an
+    /// [`IncomingListener`] alive.
+    pub async fn dispatch_one(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
+        self.shared.desync.check()?;
+        self.drain_overflow().await?;
+        let pkt = recv_pkt(
+            &mut self.read_half,
+            &mut self.recv_buf,
+            self.shared.negotiated.config.max_payload(),
+        )
+        .await?;
+        self.dispatch(pkt, OnFault::CloseChannel).await
+    }
+
     /// Read from channel `ch` into `buf`. Returns the number of bytes read.
     ///
     /// Returns immediately if data is already buffered; otherwise blocks

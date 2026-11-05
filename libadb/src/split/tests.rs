@@ -817,6 +817,296 @@ mod incoming_tests {
     }
 }
 
+/// A caller with no task for `Reader::run` asks `waits_for_credit` when
+/// to read, and takes packets with `dispatch_one`.
+mod driving_tests {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll, Waker};
+
+    use crate::base::channel::ChannelId;
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        clse, cnxn, now, okay, okay_with_budget, split_one_channel_delayed_ack,
+        split_two_channels_delayed_ack, split_with_channel, wrte, Mock, NoAuth, SharedMock,
+    };
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+    use crate::error::{Error, ProtocolError};
+
+    use super::{Reader, Writer};
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    fn read(reader: &mut Reader<SharedMock, SharedMock>, ch: ChannelId) -> Vec<u8> {
+        let mut buf = [0u8; 16];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        buf[..n].to_vec()
+    }
+
+    /// CLSEs the halves sent, as (our end, the device's end).
+    fn closes(seen: &SharedMock) -> Vec<(u32, u32)> {
+        seen.sent()
+            .into_iter()
+            .filter(|(cmd, ..)| *cmd == Command::Close)
+            .map(|(_, arg0, arg1, _)| (arg0, arg1))
+            .collect()
+    }
+
+    /// Classic ACK, with one write out and its OKAY queued behind it.
+    fn parked_on_okay() -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+    ) {
+        let (reader, writer, ch) = split_with_channel(None);
+        now(writer.write_channel(ch, b"first")).unwrap();
+        (reader, writer, ch)
+    }
+
+    /// A transfer the transport has not finished is no reason to read:
+    /// on USB every write is pending for that long, and nothing says a
+    /// packet will come.
+    #[test]
+    fn a_transfer_in_flight_waits_for_no_credit() {
+        // Index 0: the write of the WRTE's header hangs.
+        let (_reader, writer, ch) = split_with_channel(Some(0));
+        let mut write = Box::pin(writer.write_channel(ch, b"payload"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        assert!(!writer.waits_for_credit(ch));
+    }
+
+    #[test]
+    fn credit_in_hand_waits_for_none() {
+        let (_reader, writer, ch) = split_with_channel(None);
+        assert!(!writer.waits_for_credit(ch), "classic, nothing sent yet");
+
+        let (_reader, writer, ch, _seen) = split_one_channel_delayed_ack(64, &[]);
+        now(writer.write_channel(ch, b"some of it")).unwrap();
+        assert!(!writer.waits_for_credit(ch), "delayed ACK, budget left");
+    }
+
+    #[test]
+    fn a_parked_writer_waits_until_the_okay_is_dispatched() {
+        let (mut reader, writer, ch) = parked_on_okay();
+        assert!(
+            !writer.waits_for_credit(ch),
+            "the OKAY is owed, but no writer wants it yet"
+        );
+
+        let mut second = Box::pin(writer.write_channel(ch, b"second"));
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert!(writer.waits_for_credit(ch));
+
+        now(reader.dispatch_one()).unwrap();
+        assert!(!writer.waits_for_credit(ch));
+        assert!(poll_once(second.as_mut()).is_ready());
+    }
+
+    #[test]
+    fn a_writer_out_of_delayed_ack_credit_waits_for_more() {
+        let (mut reader, writer, ch, _seen) =
+            split_one_channel_delayed_ack(5, &[okay_with_budget(1, 100)]);
+        let mut write = Box::pin(writer.write_channel(ch, b"aaaaaaaaaa"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        assert!(writer.waits_for_credit(ch), "five bytes out, five to go");
+
+        now(reader.dispatch_one()).unwrap();
+        assert!(!writer.waits_for_credit(ch));
+        assert!(poll_once(write.as_mut()).is_ready());
+    }
+
+    /// The writer in flight needs polling to finish, and the device
+    /// cannot answer a packet it has not had, so a read here would wait
+    /// on the very write it stops. On USB the header would be out and
+    /// the payload never sent; a WRTE for another channel would have
+    /// the read's OKAY wait for a write half that same write holds.
+    #[test]
+    fn a_transfer_in_flight_holds_off_the_writer_parked_behind_it() {
+        let (_reader, writer, ch) = split_with_channel(None);
+        let busy = now(writer.shared.write_half.lock());
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        assert!(poll_once(first.as_mut()).is_pending(), "holds the credit");
+        assert!(poll_once(second.as_mut()).is_pending(), "parked for it");
+        assert!(!writer.waits_for_credit(ch));
+
+        drop(busy);
+        assert!(poll_once(first.as_mut()).is_ready());
+        assert!(
+            writer.waits_for_credit(ch),
+            "the first write is out, and only its OKAY is left to wait for"
+        );
+    }
+
+    /// A transfer given up on stops counting, or the writers left would
+    /// never be told to read.
+    #[test]
+    fn a_dropped_transfer_stops_holding_off_the_writer_behind_it() {
+        let (_reader, writer, ch, _seen) = split_one_channel_delayed_ack(5, &[]);
+        let busy = now(writer.shared.write_half.lock());
+        let mut first = Box::pin(writer.write_channel(ch, b"aaaaa"));
+        let mut second = Box::pin(writer.write_channel(ch, b"bbbbb"));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+        drop(busy);
+
+        drop(first);
+        assert!(poll_once(second.as_mut()).is_ready(), "takes the refund");
+
+        let mut third = Box::pin(writer.write_channel(ch, b"c"));
+        assert!(poll_once(third.as_mut()).is_pending());
+        assert!(writer.waits_for_credit(ch));
+    }
+
+    #[test]
+    fn a_channel_the_device_closes_waits_for_nothing() {
+        let (mut reader, writer, ch, _seen) = split_one_channel_delayed_ack(0, &[clse(1)]);
+        let mut write = Box::pin(writer.write_channel(ch, b"x"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        assert!(writer.waits_for_credit(ch));
+
+        now(reader.dispatch_one()).unwrap();
+        assert!(!writer.waits_for_credit(ch));
+        assert!(matches!(
+            poll_once(write.as_mut()),
+            Poll::Ready(Err(Error::ChannelClosed))
+        ));
+    }
+
+    #[test]
+    fn a_channel_closed_here_waits_for_nothing() {
+        let (_reader, writer, ch, _seen) = split_one_channel_delayed_ack(0, &[]);
+        let mut write = Box::pin(writer.write_channel(ch, b"x"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        assert!(writer.waits_for_credit(ch));
+
+        now(writer.close_channel(ch)).unwrap();
+        assert!(!writer.waits_for_credit(ch));
+    }
+
+    #[test]
+    fn a_dispatched_okay_reaches_the_write_parked_for_it() {
+        let (mut reader, writer, ch) = parked_on_okay();
+        let mut second = Box::pin(writer.write_channel(ch, b"second"));
+        assert!(poll_once(second.as_mut()).is_pending());
+
+        now(reader.dispatch_one()).unwrap();
+        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(()))));
+    }
+
+    /// Under delayed ACK what is buffered keeps its credit until it is
+    /// read, as if a read had been waiting for it all along.
+    #[test]
+    fn a_wrte_stays_for_a_later_read_on_its_channel() {
+        let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[wrte(2, b"for-b")]);
+        now(reader.dispatch_one()).unwrap();
+        assert!(seen.acks_for(2).is_empty(), "not read, so not acknowledged");
+
+        assert_eq!(read(&mut reader, b), b"for-b");
+        assert_eq!(seen.acks_for(2), alloc::vec![5]);
+
+        seen.feed(&wrte(1, b"for-a"));
+        assert_eq!(read(&mut reader, a), b"for-a");
+    }
+
+    /// `run` would refuse this OPEN with no listener alive. Here the
+    /// reader is kept for `accept_incoming`, and a listener is no part
+    /// of that.
+    #[test]
+    fn an_incoming_open_stays_queued_for_accept() {
+        let (mut reader, _writer, _ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.feed(&Packet::new(Command::Open, 77, 4096, b"tcp:80\0".to_vec()));
+
+        now(reader.dispatch_one()).unwrap();
+        assert!(closes(&seen).is_empty(), "the OPEN was refused");
+        let incoming = reader.try_accept_incoming().expect("the OPEN is queued");
+        assert_eq!(incoming.destination(), b"tcp:80\0");
+    }
+
+    /// A READY without its credit is about channel 1 alone, whoever
+    /// happens to be taking packets, so that call carries on.
+    #[test]
+    fn a_fault_closes_its_channel_and_nothing_else() {
+        let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[
+            Packet::new(Command::Ready, 42, 1, Vec::new()),
+            wrte(2, b"for-b"),
+        ]);
+
+        now(reader.dispatch_one()).unwrap();
+        assert_eq!(closes(&seen), [(1, 42)], "the device hears of it");
+        now(reader.dispatch_one()).unwrap();
+        assert_eq!(read(&mut reader, b), b"for-b");
+
+        let mut buf = [0u8; 8];
+        let err = now(reader.read_channel(a, &mut buf)).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_that_fails_is_the_callers_failure() {
+        let (mut reader, _writer, _ch, _seen) = split_one_channel_delayed_ack(64, &[]);
+        let err = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedEof), "got {err:?}");
+    }
+
+    #[test]
+    fn a_desynchronized_connection_reads_nothing_more() {
+        let (mut reader, writer, ch) = split_with_channel(Some(1));
+        crate::base::mock::abandon(writer.write_channel(ch, b"cut short"));
+
+        let err = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+    }
+
+    /// As in `read_channel`: what a cancelled refusal left past the cap
+    /// is refused before another packet comes in.
+    #[test]
+    fn queued_opens_past_the_cap_are_refused_first() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(2),
+        ))
+        .unwrap();
+        let (mut reader, _writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        for id in [70, 71, 72] {
+            let dest = alloc::format!("tcp:{id}\0");
+            seen.feed(&Packet::new(Command::Open, id, 0, dest.into_bytes()));
+        }
+
+        // A refusal dropped while it waits for the write half leaves
+        // its OPEN one past the cap.
+        let shared = Arc::clone(&reader.shared);
+        {
+            let busy = now(shared.write_half.lock());
+            let mut buf = [0u8; 8];
+            let mut fut = Box::pin(reader.read_channel(ch, &mut buf));
+            assert!(poll_once(fut.as_mut()).is_pending());
+            drop(fut);
+            drop(busy);
+        }
+        assert!(closes(&seen).is_empty(), "the refusal never got out");
+
+        seen.feed(&wrte(1, b"x"));
+        now(reader.dispatch_one()).unwrap();
+        assert_eq!(closes(&seen), [(0, 72)]);
+    }
+}
+
 mod backpressure_tests {
     use crate::base::mock::{now, split_two_channels_delayed_ack, wrte};
 
