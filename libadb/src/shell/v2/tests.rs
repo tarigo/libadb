@@ -67,6 +67,16 @@ fn a_destination_names_its_mode_and_command() {
 }
 
 #[test]
+fn an_empty_term_is_no_term() {
+    // `TERM=` is a different request: adbd would swap its default for
+    // an empty name.
+    assert_eq!(
+        destination(ShellMode::Pty { term: Some("") }, "ls").unwrap(),
+        "shell,v2,pty:ls\0"
+    );
+}
+
+#[test]
 fn an_empty_command_opens_a_login_shell() {
     assert_eq!(
         destination(ShellMode::Pty { term: None }, "").unwrap(),

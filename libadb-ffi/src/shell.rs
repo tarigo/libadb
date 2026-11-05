@@ -184,8 +184,6 @@ pub unsafe extern "C" fn adb_shell_open(
     } else {
         // SAFETY: non-null, and a C string per `# Safety`.
         match unsafe { CStr::from_ptr(term) }.to_str() {
-            // The C ABI has always taken an empty TERM to mean none.
-            Ok("") => None,
             Ok(s) => Some(s),
             Err(e) => return error::fail_invalid_arg(e),
         }

@@ -122,7 +122,8 @@ pub enum ShellMode<'a> {
     /// session needs, and stdout and stderr share it.
     Pty {
         /// What `TERM` is set to on the device, e.g.
-        /// `"xterm-256color"`; `None` leaves the device's default.
+        /// `"xterm-256color"`; `None` leaves the device's default, and
+        /// so does an empty name.
         ///
         /// It may not hold a `,`, a `:` or a NUL: each would end the
         /// name early and rewrite the request, so [`destination`]
@@ -161,7 +162,9 @@ pub fn destination(mode: ShellMode<'_>, command: &str) -> Result<String, Protoco
     }
     Ok(match mode {
         ShellMode::Raw => format!("shell,v2,raw:{command}\0"),
-        ShellMode::Pty { term: None } => format!("shell,v2,pty:{command}\0"),
+        ShellMode::Pty {
+            term: None | Some(""),
+        } => format!("shell,v2,pty:{command}\0"),
         ShellMode::Pty { term: Some(term) } => {
             if term.contains([',', ':', '\0']) {
                 return Err(ProtocolError::InvalidDestination);
@@ -571,8 +574,8 @@ pub async fn open<'a, 'b, S: Session>(
 /// * `command` — command to run inside the PTY. Pass an empty string
 ///   to start a login shell.
 /// * `term` — value for the `TERM` environment variable on the device
-///   (e.g. `"xterm-256color"`); `None` leaves the device's default. One
-///   holding a `,`, `:` or NUL fails with
+///   (e.g. `"xterm-256color"`); `None` or an empty name leaves the
+///   device's default. One holding a `,`, `:` or NUL fails with
 ///   [`ProtocolError::InvalidDestination`], as [`destination`] says.
 /// * `window_size` — if `Some`, a
 ///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
