@@ -97,6 +97,121 @@ async fn expect_sync_quit(ch: &mut FakeChannel<'_>) {
     ch.expect_close().await;
 }
 
+/// What the host wrote on a sync channel, read as adbd reads it:
+/// `ReadFdExactly` sees a byte stream, so the WRTEs the host cut it into
+/// do not show.
+struct DaemonStream<'c, 's> {
+    ch: &'c mut FakeChannel<'s>,
+    /// What arrived past the last read.
+    ahead: Vec<u8>,
+}
+
+impl<'c, 's> DaemonStream<'c, 's> {
+    fn new(ch: &'c mut FakeChannel<'s>) -> Self {
+        Self {
+            ch,
+            ahead: Vec::new(),
+        }
+    }
+
+    /// Acknowledge WRTEs until `n` bytes are in, and take exactly those.
+    async fn read(&mut self, n: usize) -> Vec<u8> {
+        while self.ahead.len() < n {
+            let payload = self.ch.expect_write_ack().await;
+            self.ahead.extend_from_slice(&payload);
+        }
+        let rest = self.ahead.split_off(n);
+        std::mem::replace(&mut self.ahead, rest)
+    }
+
+    /// An eight-byte id and word: a `SyncRequest`, a `sync_recv_v2`, or
+    /// the head of a `sync_data`.
+    async fn read_head(&mut self) -> ([u8; 4], u32) {
+        let head = self.read(8).await;
+        (head[..4].try_into().unwrap(), le32(&head[4..]))
+    }
+
+    /// A request as `handle_sync_command` reads it: the `SyncRequest`,
+    /// then as many bytes of name as its `path_length` says.
+    async fn read_request(&mut self) -> ([u8; 4], Vec<u8>) {
+        let (id, path_length) = self.read_head().await;
+        (id, self.read(path_length as usize).await)
+    }
+
+    /// An `RCV2` for `path`, as `do_recv_v2` reads it after the request.
+    /// Returns its flags.
+    async fn expect_rcv2(&mut self, path: &[u8]) -> u32 {
+        let (id, name) = self.read_request().await;
+        assert_eq!(&id, b"RCV2");
+        assert_eq!(name, path, "path_length must cover the path alone");
+
+        let (setup_id, flags) = self.read_head().await;
+        assert_eq!(&setup_id, b"RCV2");
+        flags
+    }
+
+    /// An `SND2` for `path`, as `do_send_v2` reads it after the request.
+    /// Returns its mode and flags.
+    async fn expect_snd2(&mut self, path: &[u8]) -> (u32, u32) {
+        let (id, name) = self.read_request().await;
+        assert_eq!(&id, b"SND2");
+        assert_eq!(name, path, "path_length must cover the path alone");
+
+        let setup = self.read(12).await;
+        assert_eq!(&setup[..4], b"SND2");
+        (le32(&setup[4..8]), le32(&setup[8..12]))
+    }
+
+    /// The rest of a push, as `handle_send_file_data` reads it: `data`
+    /// in one `DATA`, and a `DONE` carrying `mtime`.
+    async fn expect_pushed(&mut self, data: &[u8], mtime: u32) {
+        let (id, size) = self.read_head().await;
+        assert_eq!(&id, b"DATA");
+        assert_eq!(self.read(size as usize).await, data);
+
+        let (id, timestamp) = self.read_head().await;
+        assert_eq!(&id, b"DONE");
+        assert_eq!(timestamp, mtime);
+    }
+
+    /// `QUIT` with nothing behind it, then a channel close.
+    async fn expect_quit(&mut self) {
+        let (id, name) = self.read_request().await;
+        assert_eq!(&id, b"QUIT");
+        assert!(name.is_empty());
+        assert!(self.ahead.is_empty(), "bytes past QUIT: {:?}", self.ahead);
+        self.ch.expect_close().await;
+    }
+
+    /// Answer in one WRTE and take the host's OKAY for it.
+    async fn reply(&mut self, bytes: &[u8]) {
+        self.ch.send_write(bytes).await;
+        self.ch.expect_ack().await;
+    }
+
+    /// Answer a pull with `data`, in the `DATA` and `DONE` `recv_impl`
+    /// writes.
+    async fn reply_pulled(&mut self, data: &[u8]) {
+        let mut stream = sync_msg(b"DATA", data.len() as u32, data);
+        stream.extend_from_slice(&sync_header(b"DONE", 0));
+        self.reply(&stream).await;
+    }
+
+    /// Answer a `STAT` with a regular file of `size` bytes.
+    async fn reply_stat(&mut self, size: u32) {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"STAT");
+        body.extend_from_slice(&0o100644u32.to_le_bytes());
+        body.extend_from_slice(&size.to_le_bytes());
+        body.extend_from_slice(&1_700_000_000u32.to_le_bytes());
+        self.reply(&body).await;
+    }
+}
+
+fn le32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes.try_into().unwrap())
+}
+
 rt_test! {
 async fn sync_stat_v1_returns_decoded_fields() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
@@ -469,5 +584,109 @@ async fn sync_session_survives_a_list_v2() {
 
     sync.quit().await.unwrap();
     rt::join(device).await;
+}
+}
+
+/// A pull, a push and a request after them on one session, against a
+/// device that reads what adbd reads: a v2 setup missing its id leaves
+/// it waiting on a pull and reading the next message as flags on a push.
+/// `buf` is the session's buffer, which decides how the requests go out.
+async fn v2_transfers_with_a_request_after_them(buf: &mut [u8]) {
+    let (mut conn, device) = session(v2_device(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"sync:\0").await;
+        let mut adbd = DaemonStream::new(&mut ch);
+
+        assert_eq!(adbd.expect_rcv2(b"/sdcard/in").await, 0);
+        adbd.reply_pulled(b"hello").await;
+
+        let (mode, flags) = adbd.expect_snd2(b"/sdcard/out").await;
+        assert_eq!(mode, 0o100644);
+        assert_eq!(flags, 0);
+        adbd.expect_pushed(b"hi", 42).await;
+        adbd.reply(&sync_header(b"OKAY", 0)).await;
+
+        let (id, name) = adbd.read_request().await;
+        assert_eq!(&id, b"STAT");
+        assert_eq!(name, b"/sdcard/after");
+        adbd.reply_stat(7).await;
+
+        adbd.expect_quit().await;
+    })
+    .await;
+
+    rt::within("the v2 transfers", async {
+        let mut sync = sync::open(&mut conn, buf).await.unwrap();
+        let pulled = sync.recv_v2("/sdcard/in", SyncFlags::NONE).await.unwrap();
+        assert_eq!(pulled, b"hello");
+
+        sync.send_v2(
+            "/sdcard/out",
+            FileMode(0o100644),
+            42,
+            SyncFlags::NONE,
+            b"hi",
+        )
+        .await
+        .unwrap();
+
+        let st = sync.stat("/sdcard/after").await.unwrap();
+        assert_eq!(st.size, 7);
+
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    })
+    .await;
+}
+
+rt_test! {
+async fn sync_v2_transfers_send_the_setup_adbd_reads() {
+    v2_transfers_with_a_request_after_them(&mut [0u8; 256]).await;
+}
+}
+
+rt_test! {
+async fn sync_v2_setup_too_long_for_the_buffer_arrives_whole() {
+    // 24 bytes hold every reply here but neither request with its setup,
+    // so both take the way out that writes the parts one by one.
+    v2_transfers_with_a_request_after_them(&mut [0u8; 24]).await;
+}
+}
+
+rt_test! {
+async fn sync_v2_setup_goes_out_with_its_request_in_one_write() {
+    // adbd's client writes them together too: `SendRecv2` and `SendSend2`
+    // make one WriteFdExactly of the request, the path and the setup.
+    let (mut conn, device) = session(v2_device(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"sync:\0").await;
+
+        let mut pull = sync_msg(b"RCV2", 2, b"/f");
+        pull.extend_from_slice(&sync_header(b"RCV2", 0));
+        assert_eq!(ch.expect_write_ack().await, pull);
+        ch.send_write(&sync_header(b"DONE", 0)).await;
+        ch.expect_ack().await;
+
+        let mut push = sync_msg(b"SND2", 2, b"/f");
+        push.extend_from_slice(&sync_msg(b"SND2", 0o100644, &0u32.to_le_bytes()));
+        assert_eq!(ch.expect_write_ack().await, push);
+        expect_sync_req(&mut ch, b"DONE", b"").await;
+        ch.send_write(&sync_header(b"OKAY", 0)).await;
+        ch.expect_ack().await;
+
+        expect_sync_quit(&mut ch).await;
+    })
+    .await;
+
+    rt::within("the v2 transfers", async {
+        let mut buf = [0u8; 256];
+        let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+        sync.recv_v2("/f", SyncFlags::NONE).await.unwrap();
+        sync.send_v2("/f", FileMode(0o100644), 0, SyncFlags::NONE, b"")
+            .await
+            .unwrap();
+
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    })
+    .await;
 }
 }
