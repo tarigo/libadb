@@ -265,6 +265,89 @@ fn reverse_rules_flow_through_the_split_adapter() {
     unsafe { adb::adb_connection_free(conn) };
 }
 
+/// A device answering `forward` each way adbd does: a fixed port, the
+/// bare `OKAY` of a rule that already exists, and a vsock port past
+/// `i32::MAX`, which adbd's `%d` prints negative.
+fn port_reporting_adbd() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let device = std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        s.set_nodelay(true).unwrap();
+
+        let _ = recv_pkt(&mut s).unwrap(); // CNXN
+        s.write_all(&header(
+            CMD_CNXN,
+            VERSION,
+            MAX_PAYLOAD,
+            b"device::features=shell_v2",
+        ))
+        .unwrap();
+
+        let fixed = b"reverse:forward:tcp:6100;tcp:6200\0";
+        serve_service(&mut s, 720, fixed, b"OKAY00046100");
+        serve_service(&mut s, 721, fixed, b"OKAY");
+        serve_service(
+            &mut s,
+            722,
+            b"reverse:forward:vsock:0;tcp:6200\0",
+            b"OKAY000b-1294967296",
+        );
+    });
+    (addr, device)
+}
+
+#[test]
+fn reverse_forward_writes_the_reported_port_or_nothing() {
+    let (addr, device_thread) = port_reporting_adbd();
+    let uri = CString::new(format!("tcp://{addr}")).unwrap();
+    let banner = CString::new("host::features=shell_v2").unwrap();
+    let pubkey = b"unused\0";
+    let auth = adb::adb_authenticator_t {
+        public_key: pubkey.as_ptr(),
+        public_key_len: pubkey.len(),
+        sign: Some(never_signs),
+        user_data: ptr::null_mut(),
+    };
+    let mut conn = ptr::null_mut();
+    let st = unsafe {
+        adb::adb_connect_with_authenticator(uri.as_ptr(), &auth, banner.as_ptr(), &mut conn)
+    };
+    assert_eq!(st, adb::AdbStatus::Ok, "connect");
+
+    let forward = |spec: &str| {
+        let device = CString::new(spec).unwrap();
+        let host = CString::new("tcp:6200").unwrap();
+        let mut data = [0u8; 16];
+        let mut len = usize::MAX;
+        let st = unsafe {
+            adb::adb_reverse_forward(
+                conn,
+                device.as_ptr(),
+                host.as_ptr(),
+                data.as_mut_ptr(),
+                data.len(),
+                &mut len,
+            )
+        };
+        assert_eq!(st, adb::AdbStatus::Ok, "reverse_forward {spec}");
+        data[..len].to_vec()
+    };
+
+    assert_eq!(forward("tcp:6100"), b"6100", "a fixed port");
+    assert_eq!(forward("tcp:6100"), b"", "a rule that already exists");
+    assert_eq!(
+        forward("vsock:0"),
+        b"3000000000",
+        "the unsigned port, not what `%d` printed"
+    );
+
+    device_thread
+        .join()
+        .expect("the fake device saw every frame it expected");
+    unsafe { adb::adb_connection_free(conn) };
+}
+
 /// Two OPENs land before the host looks: reporting is idempotent on
 /// the staged request (800 until its verdict), and each verdict
 /// answers exactly the staged one — 800 rejected, then 801 accepted.

@@ -17,9 +17,9 @@
 //!
 //! Wire format, verified against a real adbd:
 //!
-//! * `reverse:forward:<remote>;<local>` → `OKAY` + `%04x` + data; for
-//!   `tcp:` remotes the data is the bound port in decimal (`tcp:0`
-//!   asks adbd to pick one);
+//! * `reverse:forward:<remote>;<local>` → `OKAY` + `%04x` + the port in
+//!   decimal, or a bare `OKAY` when adbd reports none: [`establish`]
+//!   says when;
 //! * `reverse:killforward:<remote>`, `reverse:killforward-all` →
 //!   bare `OKAY`;
 //! * `reverse:list-forward` → no `OKAY`, just `%04x` + lines of
@@ -95,10 +95,19 @@ pub struct ReverseRule {
 /// connection to a channel opened toward the host with `host_spec` as
 /// its destination.
 ///
-/// Returns the port the device bound for a `tcp:` device spec — the
-/// one it picked, for `tcp:0` — and `None` for any other spec, which
-/// adbd answers with no port. A reply that is not a 32-bit decimal port
-/// is [`ReverseError::UnexpectedReply`].
+/// Returns the port adbd reports. Going by adbd's sources, that depends
+/// on the spec and on whether it bound anything:
+///
+/// * a newly bound `tcp:0` reports the port adbd picked;
+/// * a fixed `tcp:<port>` reports it from Android 10 on, not on
+///   Android 9;
+/// * a `vsock:` listener reports its port;
+/// * a rule that already exists, and any other spec, answer a bare
+///   `OKAY`, which is `None`.
+///
+/// The type is 32 bits wide because vsock ports are; a `tcp:` port
+/// always fits a `u16`. A reply that is not a 32-bit decimal port is
+/// [`ReverseError::UnexpectedReply`].
 pub async fn establish<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
@@ -229,7 +238,7 @@ fn parse_status(reply: &[u8]) -> Result<Vec<u8>, ReverseError> {
 }
 
 /// The port in a successful `forward` reply: decimal digits, or nothing
-/// for a spec that binds no port.
+/// when adbd reports none; [`establish`] says when that is.
 fn parse_port(data: &[u8]) -> Result<Option<u32>, ReverseError> {
     if data.is_empty() {
         return Ok(None);
@@ -435,7 +444,7 @@ mod tests {
         assert_eq!(parse_port(b"65535"), Ok(Some(65535)));
         assert_eq!(parse_port(b"100000"), Ok(Some(100_000)), "past u16");
         assert_eq!(parse_port(b"4294967295"), Ok(Some(u32::MAX)));
-        assert_eq!(parse_port(b""), Ok(None), "a spec that binds no port");
+        assert_eq!(parse_port(b""), Ok(None), "adbd reported no port");
     }
 
     #[test]

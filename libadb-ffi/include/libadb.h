@@ -425,11 +425,15 @@ adb_status_t adb_close_channel(
  * opens a channel toward the host per connection, with host_spec as the
  * destination. Receive those channels with adb_accept_channel().
  *
- * The service reply is written to (data, data_cap, out_data_len) with
- * the same truncate-and-report-full-length convention as
- * adb_connection_features(): for a "tcp:" device_spec it is the bound
- * port in decimal ("tcp:0" lets the device choose). Either data-side
- * pointer may be NULL.
+ * The port adbd reports is written to (data, data_cap, out_data_len)
+ * in unsigned decimal, with the same truncate-and-report-full-length
+ * convention as adb_connection_features(), and *out_data_len is 0 when
+ * it reports none. A newly bound "tcp:0" reports the port adbd picked;
+ * a fixed "tcp:<port>" reports it from Android 10 on, not on Android 9;
+ * a "vsock:" listener reports its port; a rule that already exists, and
+ * any other device_spec, answer a bare OKAY and report none. A reported
+ * port is 32 bits wide because vsock ports are; a "tcp:" port always
+ * fits 16 bits. Either data-side pointer may be NULL.
  */
 adb_status_t adb_reverse_forward(
     adb_connection_t *conn,

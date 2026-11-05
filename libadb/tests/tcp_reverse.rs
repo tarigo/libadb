@@ -56,6 +56,45 @@ async fn establish_keeps_a_port_past_u16() {
 }
 
 rt_test! {
+async fn establish_returns_a_fixed_port_adbd_reports() {
+    // From Android 10 on adbd reports a port it did not pick as well.
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"reverse:forward:tcp:6100;tcp:6100\0").await;
+        ch.send_write(b"OKAY00046100").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let port = reverse::establish(&mut conn, "tcp:6100", "tcp:6100").await.unwrap();
+    assert_eq!(port, Some(6100));
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
+async fn establish_on_a_rule_that_exists_returns_none() {
+    // adbd finds the listener by name and returns before binding, so
+    // the same spec that reported a port the first time gets no port.
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"reverse:forward:tcp:6100;tcp:6200\0").await;
+        ch.send_write(b"OKAY").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let port = reverse::establish(&mut conn, "tcp:6100", "tcp:6200").await.unwrap();
+    assert_eq!(port, None);
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
 async fn establish_surfaces_the_device_failure() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"reverse:forward:garbage;tcp:1\0").await;
