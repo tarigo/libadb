@@ -15,7 +15,7 @@ use crate::base::channel::ChannelId;
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
-use crate::base::wire::send_pkt;
+use crate::base::wire::{connection_gone, send_pkt};
 use crate::error::Error;
 
 #[cfg(doc)]
@@ -53,7 +53,9 @@ where
     /// receive credit when delayed ack is on) and returns the channel.
     ///
     /// With every slot in use the request is refused with CLSE and
-    /// [`Error::NoFreeChannels`] comes back.
+    /// [`Error::NoFreeChannels`] comes back. If that CLSE fails, its
+    /// error comes back instead, with the request left as
+    /// [`reject`](Self::reject) leaves it.
     ///
     /// Dropping this future never loses the request: the reserved slot
     /// is released and the request returns to the queue. The connection
@@ -89,9 +91,7 @@ where
         };
         let Some(ch) = reserved else {
             // No slot to give: refuse, and consume the request.
-            let mut wh = shared.lock_write_half().await;
-            send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
-            self.pending.take();
+            self.refuse().await?;
             return Err(Error::NoFreeChannels);
         };
         // Armed for rollback until READY is committed.
@@ -127,6 +127,10 @@ where
     /// write lock included; after that it is marked desynchronized, as
     /// with any cancelled write.
     ///
+    /// A CLSE that fails comes back as the error, and the request
+    /// returns to the queue, unless the device is gone: nobody is left
+    /// to refuse then, and the request is consumed.
+    ///
     /// A request the device has withdrawn in the meantime is consumed
     /// silently: it no longer expects an answer.
     pub async fn reject(mut self) -> Result<(), Error<<WH as ErrorType>::Error>> {
@@ -134,15 +138,26 @@ where
             self.pending.take();
             return Ok(());
         }
+        self.refuse().await
+    }
+
+    /// Send the CLSE that refuses the request, which settles it, as does
+    /// finding the device gone: nobody is left to refuse. Any other
+    /// failure leaves the request undecided, for `Drop` to put back.
+    async fn refuse(&mut self) -> Result<(), Error<<WH as ErrorType>::Error>> {
         let remote = self.pending.as_ref().expect("undecided").remote;
-        let shared = Arc::clone(&self.shared);
-        let checksum = shared.negotiated.checksum();
-        {
-            let mut wh = shared.lock_write_half().await;
-            send_pkt(&mut *wh, &shared.desync, &Packet::refuse(remote), checksum).await?;
+        let mut wh = self.shared.lock_write_half().await;
+        let refused = send_pkt(
+            &mut *wh,
+            &self.shared.desync,
+            &Packet::refuse(remote),
+            self.shared.negotiated.checksum(),
+        )
+        .await;
+        if refused.as_ref().err().is_none_or(connection_gone) {
+            self.pending.take();
         }
-        self.pending.take();
-        Ok(())
+        refused
     }
 }
 

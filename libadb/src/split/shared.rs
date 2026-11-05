@@ -368,7 +368,9 @@ impl<WH> Shared<WH> {
     /// verdict machinery instead — [`SplitIncoming::reject`] keeps the
     /// request recoverable until CLSE is committed, and the holder's
     /// `Drop` re-queues it (one past the cap, which only new arrivals
-    /// check).
+    /// check). A device that is gone has no use for that: the refusal
+    /// fails and takes the request with it, or every OPEN it sent before
+    /// it went would land one past the cap.
     pub(super) async fn queue_or_refuse(
         self: &Arc<Self>,
         pending: PendingOpen,

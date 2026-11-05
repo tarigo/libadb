@@ -990,8 +990,9 @@ mod debt_tests {
     };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
+    use crate::error::Error;
 
-    use super::Writer;
+    use super::{Reader, SplitIncoming, Writer};
 
     fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
         fut.poll(&mut Context::from_waker(Waker::noop()))
@@ -1205,9 +1206,8 @@ mod debt_tests {
     }
 
     /// `run` refuses what nobody listens for ahead of every receive. The
-    /// refusal fails, which puts the request back at the head of the
-    /// queue, so going on would find it for ever, and giving up would
-    /// leave the packets behind it unread.
+    /// refusal fails, which takes the request with it, and giving up
+    /// there would leave the packets behind it unread.
     #[test]
     fn a_refusal_to_a_device_that_is_gone_stops_nothing() {
         let (mut reader, writer, ch) = split_with_channel(None);
@@ -1222,6 +1222,7 @@ mod debt_tests {
             now(reader.run()),
             Err(crate::error::Error::UnexpectedEof)
         ));
+        assert_eq!(writer.shared.lock_incoming().len(), 0);
         let mut buf = [0u8; 16];
         let n = now(writer.read_channel(ch, &mut buf)).unwrap();
         assert_eq!(&buf[..n], b"behind it");
@@ -1284,9 +1285,108 @@ mod debt_tests {
         seen.feed(&wrte(1, b"behind it"));
         seen.fail_writes(ErrorKind::BrokenPipe);
         now(reader.dispatch_one()).unwrap();
+        assert_eq!(writer.shared.lock_incoming().len(), 1, "back at the cap");
         let mut buf = [0u8; 16];
         let n = now(writer.read_channel(ch, &mut buf)).unwrap();
         assert_eq!(&buf[..n], b"behind it");
+    }
+
+    /// Reception carries on once the device is gone, to what it sent
+    /// before it went, and that may be more OPENs than the queue has room
+    /// for. Each refusal fails. Were it to go back, each would land one
+    /// past the cap, and hold on to its destination.
+    #[test]
+    fn opens_from_a_device_that_is_gone_stay_within_the_budget() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(2),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        let seen = seen_by(&writer);
+        let _listener = writer.listen_incoming();
+        for id in 70..76 {
+            let dest = alloc::format!("tcp:{id}\0");
+            seen.feed(&Packet::new(Command::Open, id, 0, dest.into_bytes()));
+        }
+        seen.feed(&wrte(1, b"behind them"));
+        seen.fail_writes(ErrorKind::BrokenPipe);
+
+        assert!(matches!(now(reader.run()), Err(Error::UnexpectedEof)));
+        assert_eq!(writer.shared.lock_incoming().len(), 2);
+        let mut buf = [0u8; 16];
+        let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"behind them");
+    }
+
+    /// Failures of a write, with the requests each leaves in the queue
+    /// when a verdict fails on it: none once the device is gone, and the
+    /// one it was for otherwise.
+    const FAILED_WRITES: [(ErrorKind, usize); 6] = [
+        (ErrorKind::ConnectionReset, 0),
+        (ErrorKind::ConnectionAborted, 0),
+        (ErrorKind::BrokenPipe, 0),
+        (ErrorKind::NotConnected, 0),
+        (ErrorKind::TimedOut, 1),
+        (ErrorKind::Other, 1),
+    ];
+
+    /// A request for a verdict, with every slot of its connection taken.
+    fn request_with_no_slot_left() -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        SplitIncoming<SharedMock>,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1));
+        let conn = now(Connection::connect(
+            SharedMock::new(mock),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        now(reader.open_channel(b"shell:\0")).unwrap();
+        let seen = seen_by(&writer);
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        let incoming = now(reader.accept_incoming()).unwrap();
+        (reader, writer, incoming, seen)
+    }
+
+    /// A device that is gone leaves nobody to refuse, so the request goes,
+    /// and the call still fails. Any other failure says nothing of the
+    /// kind: the request is back for another verdict.
+    #[test]
+    fn a_reject_that_fails_keeps_the_request_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (_reader, writer, incoming, seen) = request_with_no_slot_left();
+            seen.fail_writes(kind);
+
+            let err = now(incoming.reject()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(writer.shared.lock_incoming().len(), left, "{kind:?}");
+        }
+    }
+
+    /// With no slot to give, an accept is a refusal, and goes the same
+    /// way.
+    #[test]
+    fn an_accept_with_no_slot_that_fails_keeps_the_request_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (_reader, writer, incoming, seen) = request_with_no_slot_left();
+            seen.fail_writes(kind);
+
+            let err = now(incoming.accept()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(writer.shared.lock_incoming().len(), left, "{kind:?}");
+        }
     }
 }
 

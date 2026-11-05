@@ -138,8 +138,8 @@ where
         let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
             match excess.reject().await {
-                // It is back in the queue, for nobody to refuse.
-                Err(e) if connection_gone(&e) => break,
+                // What it sent before it went is still to be received.
+                Err(e) if connection_gone(&e) => {}
                 refused => refused?,
             }
         }
@@ -274,8 +274,9 @@ where
             if self.shared.listeners.load(Ordering::Acquire) == 0 {
                 while let Some(refused) = self.shared.take_incoming() {
                     match refused.reject().await {
-                        // It is back in the queue, for nobody to refuse.
-                        Err(e) if connection_gone(&e) => break,
+                        // What it sent before it went is still to be
+                        // received.
+                        Err(e) if connection_gone(&e) => {}
                         refused => refused?,
                     }
                 }
