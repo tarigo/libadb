@@ -53,6 +53,10 @@ impl ConnectionConfig {
     /// [`with_max_channels`](Self::with_max_channels).
     pub const DEFAULT_MAX_CHANNELS: usize = 32;
 
+    /// Most channels a config can ask for; see
+    /// [`with_max_channels`](Self::with_max_channels).
+    pub const MAX_CHANNELS: usize = 1 << 16;
+
     /// Device-banner properties both presets accept; see
     /// [`with_max_banner_properties`](Self::with_max_banner_properties).
     pub const DEFAULT_MAX_BANNER_PROPERTIES: usize = 64;
@@ -140,16 +144,25 @@ impl ConnectionConfig {
     }
 
     /// How many channels may be open at once, whichever side opened
-    /// them. Clamped to at least 1: with no slot, nothing could open.
+    /// them. Clamped to at least 1, because with no slot nothing could
+    /// open, and to at most [`MAX_CHANNELS`](Self::MAX_CHANNELS), because
+    /// the table is allocated whole when the connection is made, at
+    /// about a hundred bytes a slot: a size the allocator cannot serve
+    /// would be a panic or an abort at that point, not an error.
     ///
-    /// The table holds this many slots from the moment the connection
-    /// is made. With all of them taken, opening another fails with
+    /// With all slots taken, opening another fails with
     /// [`Error::NoFreeChannels`](crate::Error::NoFreeChannels), as does
     /// accepting a device-initiated one. The same number bounds the
     /// device-initiated OPENs still waiting for a verdict: past it, a
     /// new one is refused with CLSE as it arrives.
     pub const fn with_max_channels(mut self, n: usize) -> Self {
-        self.max_channels = if n == 0 { 1 } else { n };
+        self.max_channels = if n > Self::MAX_CHANNELS {
+            Self::MAX_CHANNELS
+        } else if n == 0 {
+            1
+        } else {
+            n
+        };
         self
     }
 
@@ -292,6 +305,30 @@ mod tests {
             ConnectionConfig::new().with_max_channels(5).max_channels(),
             5
         );
+    }
+
+    /// The table is allocated once the device's CNXN is in, so a size
+    /// the allocator cannot serve has to stop here: past this point it
+    /// is a panic or an abort, never an `Err`.
+    #[test]
+    fn max_channels_is_clamped_to_the_cap() {
+        let cap = ConnectionConfig::MAX_CHANNELS;
+        let clamped = |n| ConnectionConfig::new().with_max_channels(n).max_channels();
+
+        assert_eq!(clamped(usize::MAX), cap);
+        assert_eq!(clamped(cap + 1), cap);
+        assert_eq!(clamped(cap), cap);
+    }
+
+    /// Both ends of the clamp stay usable in a `const`, which is what
+    /// rules `Ord::clamp` out.
+    #[test]
+    fn max_channels_clamp_works_in_const_context() {
+        const FLOOR: ConnectionConfig = ConnectionConfig::new().with_max_channels(0);
+        const CAP: ConnectionConfig = ConnectionConfig::new().with_max_channels(usize::MAX);
+
+        assert_eq!(FLOOR.max_channels(), 1);
+        assert_eq!(CAP.max_channels(), ConnectionConfig::MAX_CHANNELS);
     }
 
     /// Unlike the channel count, the property cap may be zero: a banner
