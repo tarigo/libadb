@@ -475,8 +475,9 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
 
     /// Begin a `SEND` (v1) push.
     ///
-    /// `mode` is the mode the device gives the file, e.g.
-    /// `FileMode(0o100644)`.
+    /// `mode` is what the device creates the file from, e.g.
+    /// `FileMode(0o100644)`. adbd copies the owner's permission bits to
+    /// the group and to others, so that one lands as `0o100666`.
     pub async fn send_start(
         &mut self,
         path: &str,
