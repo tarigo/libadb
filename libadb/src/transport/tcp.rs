@@ -13,7 +13,9 @@ pub type SmolTcp = embedded_io_adapters::futures_03::FromFutures<smol::net::TcpS
 
 /// A `std::net::TcpStream` driven by blocking calls: each read and
 /// write parks the calling thread until the socket answers, so its
-/// futures never return `Pending`.
+/// futures never return `Pending`. For the same reason a read in
+/// flight cannot be interrupted; see
+/// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
 ///
 /// This is what [`Inline`](crate::transport::runtime::Inline) dials,
 /// and it suits a blocking executor such as `libadb-ffi`'s. On an
@@ -67,11 +69,13 @@ mod blocking {
         }
     }
 
-    // There is never a pending read to drop, and a socket keeps what
-    // nobody has read yet in the kernel buffer either way.
+    // Not that a dropped read would lose anything: the kernel buffer
+    // keeps what nobody has read. But a read here parks the thread in
+    // its first poll, so nothing polls an interrupt raced against it
+    // until bytes arrive, and there is never a pending read to drop.
     impl ReadCancelSafety for BlockingTcp {
         fn read_cancel_safe(&self) -> bool {
-            true
+            false
         }
     }
 

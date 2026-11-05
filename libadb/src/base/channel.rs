@@ -100,13 +100,15 @@ impl<S: Session> Channel<'_, S> {
     ///
     /// How quickly `interrupt` can win depends on the session. On a
     /// split [`Writer`](crate::Writer) it is raced against the wait for
-    /// data. On a [`Connection`](crate::Connection) over TCP it is raced against the read
-    /// itself, so a pending read is dropped the moment the interrupt is
-    /// due. A transport that would lose data that way — USB, where
-    /// cancelling a bulk transfer discards what the device already
-    /// wrote into it — has the interrupt checked between reads instead,
-    /// so it takes effect once the read in flight has finished. See
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    /// data. On a [`Connection`](crate::Connection) over an async TCP
+    /// socket it is raced against the read itself, so a pending read is
+    /// dropped the moment the interrupt is due. A transport that cannot
+    /// give a read up has the interrupt checked between reads instead:
+    /// USB, where cancelling a bulk transfer discards what the device
+    /// already wrote into it, and the blocking socket `Inline` dials,
+    /// where a read never yields. A read already blocking cannot be
+    /// interrupted, so the interrupt takes effect once it has finished.
+    /// See [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// ```ignore
     /// loop {

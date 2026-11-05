@@ -53,20 +53,23 @@ pub mod any;
 
 pub use split::Splittable;
 
-/// Whether dropping a pending read costs anything.
+/// Whether a read can be left pending and dropped at no cost.
 ///
 /// A socket read that is dropped leaves its bytes in the kernel buffer,
 /// so the next read picks them up. A USB bulk transfer is handed to the
 /// device: cancelling it discards whatever the device already wrote
 /// into it, which takes the middle out of a packet and leaves every
-/// frame boundary after it wrong.
+/// frame boundary after it wrong. And a read that blocks the thread
+/// cannot be raced at all, whatever becomes of its bytes: nothing else
+/// gets polled until it returns, and by then there is nothing to drop.
 ///
 /// [`Connection::select_channel`](crate::Connection::select_channel)
 /// asks before it lets `interrupt` race a read in flight: a transport
 /// that answers `false` gets the interrupt checked between reads
 /// instead, which is slower to react but never loses a byte.
 pub trait ReadCancelSafety {
-    /// `true` when dropping a pending read loses nothing.
+    /// `true` when a read yields while it waits and dropping it then
+    /// loses nothing.
     fn read_cancel_safe(&self) -> bool;
 }
 

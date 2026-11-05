@@ -62,10 +62,10 @@ impl<'a, S: Session> Shell<'a, S> {
     /// Read from the channel, but return early if `interrupt` resolves
     /// first.
     ///
-    /// On a transport whose reads cannot be cancelled without losing
-    /// data (USB), the interrupt is checked between reads: one already
-    /// in flight completes first and may return its data ahead of a
-    /// ready interrupt — see
+    /// On a transport whose reads cannot be safely cancelled (USB, the
+    /// blocking socket `Inline` dials), the interrupt is checked between
+    /// reads: one already in flight completes first and may return its
+    /// data ahead of a ready interrupt — see
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// After a [`SelectResult::Interrupted`] result the caller can act

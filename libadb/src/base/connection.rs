@@ -462,12 +462,15 @@ where
 
     /// Read from a channel, returning early if `interrupt` resolves first.
     ///
-    /// How early depends on the transport. Where dropping a read loses
-    /// nothing (TCP), the read is raced against the interrupt and
-    /// cancelled the moment it is due. Where it would lose data (USB),
-    /// the interrupt is checked between reads instead: a read already
-    /// in flight completes first and may return its data ahead of a
-    /// ready interrupt. See
+    /// How early depends on the transport. Where a read can be dropped
+    /// at no cost (an async TCP socket), it is raced against the
+    /// interrupt and cancelled the moment it is due. Elsewhere the
+    /// interrupt is checked between reads instead: over USB, where
+    /// dropping a read would lose data, and over the blocking socket
+    /// `Inline` dials, where a read never yields. A read already
+    /// blocking cannot be interrupted: it completes first, however long
+    /// the device takes, and may return its data ahead of a ready
+    /// interrupt. See
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// After a [`SelectResult::Interrupted`] result the caller can

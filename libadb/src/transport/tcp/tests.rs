@@ -55,8 +55,11 @@ fn wrapping_a_socket_leaves_its_options_alone() {
     );
 }
 
+/// Claiming otherwise promises a race that cannot run: the read parks
+/// the thread in its first poll, and the interrupt is not polled again
+/// until bytes arrive.
 #[test]
-fn a_read_may_be_raced_against_an_interrupt() {
+fn a_read_is_not_raced_against_an_interrupt() {
     let (host, _device) = connected();
-    assert!(BlockingTcp::new(host).read_cancel_safe());
+    assert!(!BlockingTcp::new(host).read_cancel_safe());
 }
