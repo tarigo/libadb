@@ -326,6 +326,13 @@ pub unsafe extern "C" fn adb_shell_write_stdin(
 
 /// Send a `CLOSE_STDIN` frame — no more stdin will follow.
 ///
+/// A channel the device has already closed is not a failure: there is
+/// no stdin left to close, and what the device wrote before closing
+/// stays readable, so a command that finished first still gives up its
+/// output. After [`adb_shell_close`] this is
+/// [`AdbStatus::ChannelClosed`], and on a channel a fault closed it is
+/// that fault's status.
+///
 /// # Safety
 /// `sh` must be a valid handle.
 #[unsafe(no_mangle)]
@@ -335,7 +342,14 @@ pub unsafe extern "C" fn adb_shell_close_stdin(sh: *mut adb_shell_t) -> AdbStatu
         return error::fail_invalid_arg("null handle");
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
-    unsafe { send_frame_payload(sh, FrameId::CloseStdin, &[]) }
+    let sh = unsafe { &*sh };
+    match send_frame(sh, FrameId::CloseStdin, &[]) {
+        Ok(()) => AdbStatus::Ok,
+        // `closed` goes up before `adb_shell_close` frees the slot, so
+        // a close racing this is not taken for the device's.
+        Err(Error::ChannelClosed) if !sh.closed.load(Ordering::Acquire) => AdbStatus::Ok,
+        Err(e) => error::fail_error(e),
+    }
 }
 
 /// Send a `WINDOW_SIZE_CHANGE` frame.
@@ -386,14 +400,22 @@ pub unsafe extern "C" fn adb_shell_close(sh: *mut adb_shell_t) -> AdbStatus {
 /// `sh` must be a valid handle.
 unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: FrameId, payload: &[u8]) -> AdbStatus {
     // SAFETY: a valid handle, per `# Safety`.
-    let sh = unsafe { &*sh };
+    match send_frame(unsafe { &*sh }, id, payload) {
+        Ok(()) => AdbStatus::Ok,
+        Err(e) => error::fail_error(e),
+    }
+}
+
+/// Send one frame on a session not yet closed from this end.
+fn send_frame(
+    sh: &adb_shell_t,
+    id: FrameId,
+    payload: &[u8],
+) -> Result<(), Error<FfiTransportError>> {
     if sh.closed.load(Ordering::Acquire) {
-        return AdbStatus::ChannelClosed;
+        return Err(Error::ChannelClosed);
     }
     let ch = sh.channel_id;
     let send = send_frame_async(&sh.writer, &sh.send_lock, ch, id, payload);
-    if let Err(e) = block_on::block_on_write(&sh.reader, &sh.writer, ch, send) {
-        return error::fail_error(e);
-    }
-    AdbStatus::Ok
+    block_on::block_on_write(&sh.reader, &sh.writer, ch, send)
 }

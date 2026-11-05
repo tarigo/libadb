@@ -591,7 +591,13 @@ adb_status_t adb_shell_write_stdin(
     const uint8_t *data,
     size_t         len);
 
-/* Signal that no more stdin will be sent. */
+/* Signal that no more stdin will be sent.
+ *
+ * A channel the device has already closed is not a failure: there is no
+ * stdin left to close, and what the device wrote before closing stays
+ * readable, so a command that finished first still gives up its output.
+ * After adb_shell_close() this is ADB_ERR_CHANNEL_CLOSED, and on a
+ * channel a fault closed it is that fault's status. */
 adb_status_t adb_shell_close_stdin(adb_shell_t *sh);
 
 /* Notify the device PTY of a terminal resize. */
