@@ -103,14 +103,9 @@ pub unsafe extern "C" fn adb_read_channel(
         Ok(ch) => ch,
         Err(status) => return status,
     };
-    // The reader hands back Ok(0) for a zero-length WRTE; the C
-    // contract above forbids returning it.
-    let n = loop {
-        match block_on::block_on_read(&conn.reader, &conn.writer, ch, slice) {
-            Ok(0) => {}
-            Ok(n) => break n,
-            Err(e) => return error::fail_error(e),
-        }
+    let n = match block_on::block_on_read(&conn.reader, &conn.writer, ch, slice) {
+        Ok(n) => n,
+        Err(e) => return error::fail_error(e),
     };
     // SAFETY: non-null, and writable per `# Safety`.
     unsafe { *out_read = n };

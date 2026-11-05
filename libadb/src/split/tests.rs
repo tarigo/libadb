@@ -5,7 +5,7 @@ use super::*;
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::ids::{ChannelIds, LocalId, RemoteId};
 use crate::base::mock::{
-    abandon, now, okay, split_with_channel, withdraw, Mock, NoAuth, SharedMock,
+    abandon, now, okay, split_with_channel, withdraw, wrte, Mock, NoAuth, SharedMock,
 };
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
@@ -470,6 +470,98 @@ fn a_read_dropped_waiting_for_the_ack_lock_takes_nothing() {
     drop(wh);
     let n = now(writer.read_channel(ch, &mut buf)).unwrap();
     assert_eq!(&buf[..n], b"hello");
+}
+
+/// What a reader-driven read took off the wire stays in the channel
+/// until the read can have it, so a call dropped while it waits to
+/// acknowledge leaves the next one the bytes and the OKAY.
+#[test]
+fn a_reader_dropped_waiting_for_the_ack_lock_keeps_the_packet() {
+    use core::task::{Context, Waker};
+
+    let (mut reader, writer, ch, seen) =
+        crate::base::mock::split_one_channel_delayed_ack(64, &[wrte(1, b"hello")]);
+    // Another task is mid-packet, so the read's OKAY has to wait.
+    let wh = now(writer.shared.write_half.lock());
+    let mut buf = [0u8; 8];
+    {
+        let mut read = pin!(reader.read_channel(ch, &mut buf));
+        assert!(read
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending());
+    }
+    drop(wh);
+    {
+        let chs = writer.shared.lock_channels();
+        let slot = chs.get(ch).unwrap();
+        assert_eq!(
+            (slot.buffered(), slot.unacked()),
+            (5, 5),
+            "a read dropped while waiting took the packet with it"
+        );
+    }
+    assert!(seen.acks_for(1).is_empty(), "nothing was taken yet");
+
+    let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"hello");
+    assert_eq!(seen.acks_for(1), [5]);
+}
+
+/// A zero-length WRTE delivers nothing, so a read goes on to the next
+/// packet rather than come back with a zero that means nothing either.
+#[test]
+fn a_reader_reads_past_a_zero_length_write() {
+    let (mut reader, _writer, ch, _seen) =
+        crate::base::mock::split_one_channel_delayed_ack(64, &[wrte(1, b""), wrte(1, b"after it")]);
+    let mut buf = [0u8; 16];
+    let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"after it");
+}
+
+/// Without delayed ACK the empty packet still has its OKAY coming: the
+/// device sends nothing more on the channel until it arrives.
+#[test]
+fn a_zero_length_write_is_still_acknowledged_without_delayed_ack() {
+    let (mut reader, _writer, ch) = split_with_channel(None);
+    let seen = now(reader.shared.write_half.lock()).clone();
+    seen.feed(&wrte(1, b""));
+    seen.feed(&wrte(1, b"after it"));
+
+    let mut buf = [0u8; 16];
+    let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+    assert_eq!(&buf[..n], b"after it");
+    assert_eq!(seen.acks_for(1).len(), 2);
+}
+
+/// The packet a read asks for goes through the slot whole, and the cap
+/// never drops below a packet. Read in pieces, as `deliver` served it.
+#[test]
+fn a_full_packet_fits_a_channel_with_the_smallest_receive_cap() {
+    let config = ConnectionConfig::new()
+        .with_max_payload(1024)
+        .with_max_rx_per_channel(1);
+    let mut mock = Mock::new();
+    mock.feed(&crate::base::mock::cnxn_with("delayed_ack"))
+        .feed(&crate::base::mock::okay_with_budget(1, 64))
+        .feed(&wrte(1, &[0xAB; 1024]));
+    let conn = now(Connection::connect(
+        SharedMock::new(mock),
+        NoAuth,
+        HostBanner::Raw(b"host::features=delayed_ack"),
+        config,
+    ))
+    .unwrap();
+    let (mut reader, _writer) = conn.split().unwrap();
+    let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+
+    let mut got = Vec::new();
+    while got.len() < 1024 {
+        let mut buf = [0u8; 100];
+        let n = now(reader.read_channel(ch, &mut buf)).unwrap();
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(got, [0xAB; 1024]);
 }
 
 #[test]

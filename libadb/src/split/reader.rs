@@ -276,8 +276,17 @@ where
     /// Read from channel `ch` into `buf`. Returns the number of bytes read.
     ///
     /// Returns immediately if data is already buffered; otherwise blocks
-    /// reading packets until a WRTE for `ch` arrives (dispatching packets
-    /// for other channels in the meantime).
+    /// reading packets until data for `ch` arrives (dispatching packets
+    /// for other channels in the meantime). A zero-length WRTE delivers
+    /// nothing and is read past, so `Ok(0)` only answers an empty `buf`.
+    ///
+    /// What the device sent stays in the channel until it can be taken,
+    /// and bytes that owe an acknowledgement are taken only with the
+    /// write half in hand: a call dropped while it waits for that has
+    /// taken nothing, and the next read gets them. Dropping the call
+    /// while it waits for a packet is another matter: the wait is a
+    /// transport read, as under
+    /// [`accept_incoming`](Self::accept_incoming).
     ///
     /// A concurrent [`Writer::close_channel`] on the same channel does
     /// not wake this call directly — see the module-level note on
@@ -292,7 +301,7 @@ where
             return Ok(n);
         }
 
-        let ids = self.channel_ids(ch)?;
+        self.channel_ids(ch)?;
 
         self.drain_overflow().await?;
         loop {
@@ -302,35 +311,9 @@ where
                 self.shared.negotiated.config.max_payload(),
             )
             .await?;
-            match pkt.command {
-                Command::Write if pkt.arg1 == ids.local.raw() => {
-                    let n = buf.len().min(pkt.data.len());
-                    buf[..n].copy_from_slice(&pkt.data[..n]);
-                    let ack = {
-                        let mut chs = self.shared.lock_channels();
-                        match chs.get_mut(ch) {
-                            Some(slot) => slot.deliver(&pkt.data, n)?,
-                            None => None,
-                        }
-                    };
-                    if let Some(ack) = ack {
-                        self.shared.send_okay(ack).await?;
-                    }
-                    return Ok(n);
-                }
-                Command::Close if ids.closed_by(&pkt) => {
-                    {
-                        let mut chs = self.shared.lock_channels();
-                        if let Some(slot) = chs.get_mut(ch) {
-                            slot.apply_close();
-                        }
-                    }
-                    if let Some(signal) = self.shared.signals.get(ch.slot) {
-                        signal.wake();
-                    }
-                    return Err(Error::ChannelClosed);
-                }
-                _ => self.dispatch(pkt, OnFault::FailCall).await?,
+            self.dispatch(pkt, OnFault::FailCall).await?;
+            if let Some(n) = self.shared.take_buffered(ch, buf).await? {
+                return Ok(n);
             }
         }
     }
