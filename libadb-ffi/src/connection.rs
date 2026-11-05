@@ -30,9 +30,9 @@ pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 /// Holds a split Reader + Writer pair. The Reader sits behind a mutex
 /// so that multiple C threads can share a handle safely (serialised on
 /// the read path). The Writer is cheaply cloneable and the write path
-/// only briefly locks an internal write-half mutex, so reads and writes
-/// from different threads do not wait on each other's locks. A write
-/// can still need a read call running: see the [crate docs](crate).
+/// only briefly locks an internal write-half mutex, so a read does not
+/// hold a write up. A write waiting for the device takes the Reader's
+/// mutex itself when it finds it free: see the [crate docs](crate).
 #[allow(non_camel_case_types)]
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,
@@ -304,6 +304,13 @@ fn connect_with_key(
 /// closing it — so there a timed-out read means close the connection,
 /// not read again. Until this path uses a readiness-based deadline on
 /// Windows, treat the read timeout as recoverable on Unix only.
+///
+/// A write waiting for the device reads for itself (see the
+/// [crate docs](crate)), so the timeout ends that read too: the write
+/// fails with [`AdbStatus::Io`], and what it had sent by then stays
+/// sent. While a read call on another thread holds the read lock, the
+/// timeout ends that call and the write goes on waiting until it finds
+/// the lock free.
 ///
 /// A *write* timeout is a harder stop even on Unix: firing mid-packet
 /// abandons a write the device has partially seen, so the connection

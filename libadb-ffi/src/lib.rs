@@ -5,24 +5,20 @@
 //! tokio or smol runtime is required.
 //!
 //! Under the hood a handle is a split [`Reader`] / [`Writer`] pair
-//! sharing a reference-counted state. The read-path and the write-path
-//! never take the same mutex at the same time, so a thread blocked in
-//! a long read does not prevent another thread from writing — which is
-//! what makes interactive shell sessions usable from C without any
-//! async runtime.
+//! sharing a reference-counted state. A write never waits for the
+//! [`Reader`]'s mutex, so a thread blocked in a long read does not
+//! prevent another thread from writing — which is what makes
+//! interactive shell sessions usable from C without any async runtime.
 //!
-//! A write can still need a read call running. [`Reader::run`] is never
-//! started, so only a call holding the read lock takes packets off the
+//! A write needs no read call running. [`Reader::run`] is never started,
+//! so only a call holding the read lock takes packets off the
 //! connection, and that includes the OKAY [`Writer::write_channel`]
 //! waits for. Without delayed ACK a channel has room for one WRTE at a
 //! time, so a second write in a row waits for the OKAY to the first;
-//! with delayed ACK a write waits once the credit runs out. With no read
-//! call running it stays blocked, and socket timeouts do not reach it:
-//! it is not waiting on the socket. So a C caller keeps a thread in
-//! [`adb_read_channel`] or [`adb_shell_read_frame`], on any channel of
-//! the connection, while writing. Alternating reads and writes on one
-//! thread works only where the device answers each write: a read
-//! returns once it has data, whether or not the OKAY has come.
+//! with delayed ACK a write waits once the credit runs out. While it
+//! waits for the device and no read call is running, the write reads the
+//! connection itself, holding the read lock, so a read on another thread
+//! waits its turn and data for other channels is kept for their reads.
 //!
 //! # Feature flags
 //!

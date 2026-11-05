@@ -3,10 +3,13 @@
 
 #![allow(dead_code)]
 
+use std::ffi::{c_void, CString};
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
+use std::ptr;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 pub const CMD_CNXN: u32 = 0x4e58_4e43;
 pub const CMD_OPEN: u32 = 0x4e45_504f;
@@ -191,4 +194,198 @@ pub fn fake_adbd_pushing(
     });
 
     (addr, rx, parked_rx)
+}
+
+/// Split a shell_v2 byte stream into `(id, payload)` frames.
+pub fn frames(mut stream: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    while stream.len() >= 5 {
+        let id = stream[0];
+        let len = u32::from_le_bytes([stream[1], stream[2], stream[3], stream[4]]) as usize;
+        assert!(
+            stream.len() >= 5 + len,
+            "frame claims {len} bytes with only {} left: the stream is interleaved",
+            stream.len() - 5
+        );
+        out.push((id, stream[5..5 + len].to_vec()));
+        stream = &stream[5 + len..];
+    }
+    assert!(stream.is_empty(), "{} trailing bytes", stream.len());
+    out
+}
+
+/// How long a call that is not supposed to hang gets before its test
+/// fails.
+pub const BOUND: Duration = Duration::from_secs(10);
+
+/// Run `call` on a thread of its own and wait [`BOUND`] for it, so a C
+/// call that hangs fails its test instead of hanging the run.
+pub fn within<T: Send + 'static>(what: &str, call: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(call());
+    });
+    match rx.recv_timeout(BOUND) {
+        Ok(value) => value,
+        Err(e) => panic!("{what} did not finish: {e}"),
+    }
+}
+
+/// A C handle on its way to another thread, which the C API allows.
+/// Take it apart with [`get`](Self::get): a closure naming the field
+/// would capture the bare pointer.
+pub struct Handle<T>(pub *mut T);
+
+// SAFETY: every handle this carries is one the C API lets threads share.
+unsafe impl<T> Send for Handle<T> {}
+
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Handle<T> {}
+
+impl<T> Handle<T> {
+    pub fn get(self) -> *mut T {
+        self.0
+    }
+}
+
+/// One packet from the host.
+#[derive(Debug)]
+pub struct HostPacket {
+    pub cmd: u32,
+    pub arg0: u32,
+    pub arg1: u32,
+    pub payload: Vec<u8>,
+}
+
+/// A device whose side of the conversation a test writes out, packet by
+/// packet: see [`scripted_adbd`].
+pub struct Device {
+    stream: TcpStream,
+    delayed_ack: bool,
+}
+
+impl Device {
+    /// The next packet from the host, or `None` once it hung up.
+    pub fn recv(&mut self) -> Option<HostPacket> {
+        let mut h = [0u8; 24];
+        self.stream.read_exact(&mut h).ok()?;
+        let word = |at: usize| u32::from_le_bytes([h[at], h[at + 1], h[at + 2], h[at + 3]]);
+        let mut payload = vec![0u8; word(12) as usize];
+        self.stream.read_exact(&mut payload).ok()?;
+        Some(HostPacket {
+            cmd: word(0),
+            arg0: word(4),
+            arg1: word(8),
+            payload,
+        })
+    }
+
+    /// The next packet the host sends with command `cmd`; anything
+    /// before it is passed over.
+    pub fn recv_cmd(&mut self, cmd: u32) -> HostPacket {
+        loop {
+            let pkt = self.recv().expect("the host hung up");
+            if pkt.cmd == cmd {
+                return pkt;
+            }
+        }
+    }
+
+    pub fn send(&mut self, cmd: u32, arg0: u32, arg1: u32, payload: &[u8]) {
+        self.stream
+            .write_all(&header(cmd, arg0, arg1, payload))
+            .unwrap();
+    }
+
+    /// Answer the host's next OPEN as channel `id`, granting `credit`
+    /// under delayed ACK. Returns the host's end of the channel.
+    pub fn accept_open(&mut self, id: u32, credit: u32) -> u32 {
+        let host = self.recv_cmd(CMD_OPEN).arg0;
+        self.okay(id, host, credit);
+        host
+    }
+
+    /// Acknowledge `len` bytes on channel `id`, an OKAY that carries
+    /// them as credit under delayed ACK.
+    pub fn okay(&mut self, id: u32, host: u32, len: u32) {
+        let credit = len.to_le_bytes();
+        let payload: &[u8] = if self.delayed_ack { &credit } else { &[] };
+        self.send(CMD_OKAY, id, host, payload);
+    }
+
+    /// Take WRTEs on channel `id`, acknowledging each, until `len` bytes
+    /// came.
+    pub fn take(&mut self, id: u32, host: u32, len: usize) -> Vec<u8> {
+        let mut got = Vec::new();
+        while got.len() < len {
+            let wrte = self.recv_cmd(CMD_WRTE);
+            self.okay(id, host, wrte.payload.len() as u32);
+            got.extend_from_slice(&wrte.payload);
+        }
+        got
+    }
+}
+
+/// A device on a loopback socket that advertises `features` and leaves
+/// everything after the handshake to `script`. It hangs up when the
+/// script returns, and the handle gives back what the script did.
+pub fn scripted_adbd<T: Send + 'static>(
+    features: &'static str,
+    script: impl FnOnce(&mut Device) -> T + Send + 'static,
+) -> (String, thread::JoinHandle<T>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let handle = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_nodelay(true).unwrap();
+        let mut device = Device {
+            stream,
+            delayed_ack: false,
+        };
+        let cnxn = device.recv_cmd(CMD_CNXN);
+        let wanted = b"delayed_ack";
+        device.delayed_ack = features.contains("delayed_ack")
+            && cnxn.payload.windows(wanted.len()).any(|w| w == wanted);
+        let banner = format!("device::features={features}");
+        device.send(CMD_CNXN, VERSION, MAX_PAYLOAD, banner.as_bytes());
+        script(&mut device)
+    });
+    (addr, handle)
+}
+
+/// A device that never asks for AUTH leaves this uncalled, but the
+/// handshake's API wants one.
+unsafe extern "C" fn never_signs(
+    _user_data: *mut c_void,
+    _token: *const u8,
+    _token_len: usize,
+    _out_signature: *mut u8,
+    _out_capacity: usize,
+    _out_length: *mut usize,
+) -> adb::AdbStatus {
+    adb::AdbStatus::Auth
+}
+
+/// Connect to the device at `addr`, asking for the `features` given.
+pub fn connect(addr: &str, features: &str) -> *mut adb::adb_connection_t {
+    let uri = CString::new(format!("tcp://{addr}")).unwrap();
+    let banner = CString::new(format!("host::features={features}")).unwrap();
+    let pubkey = b"unused\0";
+    let auth = adb::adb_authenticator_t {
+        public_key: pubkey.as_ptr(),
+        public_key_len: pubkey.len(),
+        sign: Some(never_signs),
+        user_data: ptr::null_mut(),
+    };
+    let mut conn = ptr::null_mut();
+    let status = unsafe {
+        adb::adb_connect_with_authenticator(uri.as_ptr(), &auth, banner.as_ptr(), &mut conn)
+    };
+    assert_eq!(status, adb::AdbStatus::Ok, "connect failed");
+    conn
 }

@@ -8,22 +8,20 @@
  * The calls that wait on the device for an answer — adb_open_channel(),
  * adb_read_channel(), adb_accept_channel(), the reverse calls,
  * adb_shell_open() and adb_shell_read_frame() — hold the connection's
- * read lock, so two of them serialise. Writes and closes never take it:
- * a thread blocked in a read does not keep another from writing. The
+ * read lock, so two of them serialise. Writes and closes never wait for
+ * it: a thread blocked in a read does not keep another from writing. The
  * metadata queries take no lock at all.
  *
- * A write, adb_write_channel() or a shell frame, can still need a read
- * call running. Nothing reads the connection in the background: only a
- * call holding the read lock takes packets off it, and that includes
- * the OKAY a write waits for. Without delayed ACK a channel has room
- * for one WRTE at a time, so a second write in a row waits for the OKAY
- * to the first; with delayed ACK a write waits once the credit runs
- * out. With no read call running it stays blocked, and socket timeouts
- * do not reach it: it is not waiting on the socket. So keep a thread in
- * adb_read_channel() or adb_shell_read_frame(), on any channel of the
- * connection, while writing. Alternating reads and writes on one thread
- * works only where the device answers each write: a read returns once
- * it has data, whether or not the OKAY has come.
+ * A write, adb_write_channel() or a shell frame, needs no read call
+ * running. Nothing reads the connection in the background: only a call
+ * holding the read lock takes packets off it, and that includes the
+ * OKAY a write waits for. Without delayed ACK a channel has room for
+ * one WRTE at a time, so a second write in a row waits for the OKAY to
+ * the first; with delayed ACK a write waits once the credit runs out.
+ * While it waits for the device and no read call is running, the write
+ * reads the connection itself, holding the read lock, so a read on
+ * another thread waits its turn and data for other channels is kept for
+ * their reads.
  *
  * On error, functions return a non-zero adb_status_t and set a
  * thread-local error string retrievable via adb_last_error().
@@ -275,7 +273,12 @@ adb_status_t adb_pair(
  * where this one stopped. This recoverable-read guarantee holds on
  * Unix; on Windows a receive that expires under SO_RCVTIMEO leaves the
  * connection indeterminate (Winsock advises closing it), so there a
- * timed-out read means close, not read again. A write timeout is a
+ * timed-out read means close, not read again. A write waiting for the
+ * device reads for itself (see the top of this file), so the timeout
+ * ends that read too: the write fails with ADB_ERR_IO, and what it had
+ * sent by then stays sent. While a read call on another thread holds
+ * the read lock, the timeout ends that call and the write goes on
+ * waiting until it finds the lock free. A write timeout is a
  * harder stop even on Unix: firing mid-packet abandons a write the
  * device has partially seen, so the connection is marked
  * desynchronized and every later channel operation fails with
@@ -402,9 +405,9 @@ adb_status_t adb_read_channel(
  * to the transport. They go out as WRTEs of at most
  * adb_connection_max_payload() bytes, and each can first wait for the
  * device's OKAY to the one before it, or for credit under delayed ACK.
- * Only a read call takes that OKAY off the connection, so this call can
- * need one running even on its own, and socket timeouts do not reach
- * the wait: see the top of this file.
+ * No read call has to be running for that: with none, this call reads
+ * the connection itself, and can then fail as a read does, with part of
+ * buf already sent. See the top of this file.
  */
 adb_status_t adb_write_channel(
     adb_connection_t *conn,
@@ -532,12 +535,8 @@ typedef struct adb_shell adb_shell_t;
  *   with ADB_ERR_PROTOCOL before anything is sent, as a NUL in
  *   `command` is.
  * `rows`, `cols` — if `pty` and at least one is non-zero, an initial
- *   WINDOW_SIZE_CHANGE frame is sent right after the channel opens.
- *   The frame is a write like any other, header and payload in two
- *   WRTEs, so this call can need a read call running (see the top of
- *   this file), and its caller has no shell handle yet to read on. To
- *   avoid the wait, pass 0, 0 and call adb_shell_set_window_size() once
- *   a thread is reading.
+ *   WINDOW_SIZE_CHANGE frame is sent right after the channel opens, a
+ *   write like any other (see the top of this file).
  *
  * `conn` must remain alive for as long as any shell handle opened
  * against it. Release the handle with adb_shell_free() (call
@@ -582,8 +581,11 @@ adb_status_t adb_shell_read_frame(
  * Safe to call from several threads on one session: each frame is
  * written whole, never interleaved with another sender's.
  *
- * The frame header and a payload go out as two WRTEs, so one call can
- * need a read call running: see the top of this file. */
+ * The frame header and a payload go out as two WRTEs, and the second
+ * can wait for the device: see the top of this file. A failure can
+ * leave the header out and the payload not, and the device then takes
+ * whatever comes next for that payload. After one the session's frame
+ * stream cannot be trusted: close it. */
 adb_status_t adb_shell_write_stdin(
     adb_shell_t   *sh,
     const uint8_t *data,
