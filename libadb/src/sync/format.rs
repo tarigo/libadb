@@ -180,7 +180,14 @@ pub struct DirEntryV2 {
 }
 
 /// Compression and behaviour flags for `SND2` and `RCV2`, combined
-/// with `|`.
+/// with `|`, with at most one compression flag among them.
+///
+/// Each flag needs the feature it names on top of `sendrecv_v2`. adbd
+/// ends the sync service over flags it refuses, so the session checks
+/// before it sends anything: a flag the device does not advertise fails
+/// with [`Error::MissingFeature`](crate::error::Error::MissingFeature),
+/// and what no device takes with
+/// [`SyncError::InvalidFlags`](super::SyncError::InvalidFlags).
 ///
 /// libadb neither compresses nor decompresses: with a compression flag
 /// set, the `DATA` chunks pushed and pulled are the compressed stream.
@@ -210,6 +217,11 @@ impl SyncFlags {
     /// The flags as the request carries them.
     pub const fn bits(self) -> u32 {
         self.0
+    }
+
+    /// Whether all of `flags` are set.
+    pub(crate) const fn contains(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
     }
 }
 

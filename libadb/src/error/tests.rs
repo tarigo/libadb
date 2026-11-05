@@ -2,6 +2,7 @@ use super::{AuthError, DecodeError, Error, ProtocolError, SyncError};
 use crate::base::protocol::features::Feature;
 use crate::base::protocol::Command;
 use crate::logcat::LogcatError;
+use crate::sync::SyncFlags;
 use alloc::format;
 use alloc::vec;
 use core::fmt;
@@ -164,6 +165,15 @@ fn sync_display_unexpected_id_non_utf8_falls_back_to_question_marks() {
 #[test]
 fn sync_display_remote_errno() {
     assert_eq!(show(&SyncError::RemoteErrno(2)), "sync: remote errno 2");
+}
+
+#[test]
+fn sync_display_invalid_flags_gives_the_bits() {
+    let flags = SyncFlags::BROTLI | SyncFlags::DRY_RUN;
+    assert_eq!(
+        show(&SyncError::InvalidFlags(flags)),
+        "sync: invalid flags 0x80000001"
+    );
 }
 
 #[test]

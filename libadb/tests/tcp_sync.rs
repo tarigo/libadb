@@ -9,7 +9,7 @@ mod rt;
 
 #[path = "fake_device/fake_device.rs"]
 mod fake_device;
-use fake_device::{session, FakeChannel, FakeDevice};
+use fake_device::{session, FakeChannel, FakeDevice, FakeSession};
 
 #[path = "common/common.rs"]
 mod common;
@@ -43,10 +43,40 @@ fn encode_stat_v2_rest(mode: u32, uid: u32, gid: u32, size: u64, mtime: i64) -> 
     b
 }
 
-/// A device that advertises every v2 sync feature.
+/// A device that advertises the v2 requests, and none of the flags
+/// `RCV2` and `SND2` can carry.
 fn v2_device() -> FakeDevice {
     FakeDevice::new().banner(b"device::features=stat_v2,ls_v2,sendrecv_v2".to_vec())
 }
+
+/// A device that advertises `features` and nothing else.
+fn device_with(features: &[Feature]) -> FakeDevice {
+    let names: Vec<_> = features.iter().map(Feature::wire_name).collect();
+    FakeDevice::new().banner(format!("device::features={}", names.join(",")).into_bytes())
+}
+
+/// Every sync feature there is.
+const ALL_SYNC_FEATURES: [Feature; 7] = [
+    Feature::StatV2,
+    Feature::LsV2,
+    Feature::SendrecvV2,
+    Feature::SendrecvV2Brotli,
+    Feature::SendrecvV2Lz4,
+    Feature::SendrecvV2Zstd,
+    Feature::SendrecvV2DryRunSend,
+];
+
+/// Each flag, the feature it needs, and its value in adbd's `SyncFlag`.
+const FLAGS: [(SyncFlags, Feature, u32); 4] = [
+    (SyncFlags::BROTLI, Feature::SendrecvV2Brotli, 1),
+    (SyncFlags::LZ4, Feature::SendrecvV2Lz4, 2),
+    (SyncFlags::ZSTD, Feature::SendrecvV2Zstd, 4),
+    (
+        SyncFlags::DRY_RUN,
+        Feature::SendrecvV2DryRunSend,
+        0x8000_0000,
+    ),
+];
 
 /// Expect a sync request WRTE with the given 4-byte id and path payload.
 /// adbd terminates a LIST with a full `dent_v1` whose id is DONE, not a
@@ -210,6 +240,31 @@ impl<'c, 's> DaemonStream<'c, 's> {
 
 fn le32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().unwrap())
+}
+
+/// The device of a host whose calls are all refused before they reach
+/// the wire: the first thing it reads is the `STAT` for `/after` the host
+/// makes to prove the session still works, and then `QUIT`.
+async fn expect_only_a_stat_of_after(mut s: FakeSession) {
+    let mut ch = s.accept_open(b"sync:\0").await;
+    let mut adbd = DaemonStream::new(&mut ch);
+
+    let (id, name) = adbd.read_request().await;
+    assert_eq!(&id, b"STAT");
+    assert_eq!(name, b"/after");
+    adbd.reply_stat(7).await;
+
+    adbd.expect_quit().await;
+}
+
+fn expect_invalid_flags<T, E: core::fmt::Debug>(result: Result<T, Error<E>>, flags: SyncFlags) {
+    let Err(err) = result else {
+        panic!("expected Err(InvalidFlags({flags:?})), got Ok");
+    };
+    assert!(
+        matches!(err, Error::Sync(SyncError::InvalidFlags(f)) if f == flags),
+        "expected InvalidFlags({flags:?}), got {err:?}",
+    );
 }
 
 rt_test! {
@@ -688,5 +743,155 @@ async fn sync_v2_setup_goes_out_with_its_request_in_one_write() {
         rt::join(device).await;
     })
     .await;
+}
+}
+
+rt_test! {
+async fn sync_flag_needs_its_own_feature_before_anything_is_sent() {
+    for (flag, feature, _) in FLAGS {
+        // Everything else is advertised, so the one feature left out is
+        // the only thing that can stop the request.
+        let others: Vec<_> = ALL_SYNC_FEATURES
+            .into_iter()
+            .filter(|f| *f != feature)
+            .collect();
+        let (mut conn, device) = session(
+            device_with(&others),
+            b"host::features=",
+            expect_only_a_stat_of_after,
+        )
+        .await;
+
+        let mut buf = [0u8; 256];
+        let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+        if flag != SyncFlags::DRY_RUN {
+            expect_missing_feature(sync.recv_v2("/f", flag).await, feature);
+        }
+        expect_missing_feature(
+            sync.send_v2("/f", FileMode(0o100644), 0, flag, b"x").await,
+            feature,
+        );
+
+        assert_eq!(sync.stat("/after").await.unwrap().size, 7);
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    }
+}
+}
+
+rt_test! {
+async fn sync_flag_reaches_the_setup_of_a_device_that_takes_it() {
+    for (flag, feature, bits) in FLAGS {
+        // adbd has no dry-run pull.
+        let pulls = flag != SyncFlags::DRY_RUN;
+        let (mut conn, device) = session(
+            device_with(&[Feature::SendrecvV2, feature]),
+            b"host::features=",
+            move |mut s| async move {
+                let mut ch = s.accept_open(b"sync:\0").await;
+                let mut adbd = DaemonStream::new(&mut ch);
+
+                if pulls {
+                    assert_eq!(adbd.expect_rcv2(b"/f").await, bits);
+                    adbd.reply_pulled(b"x").await;
+                }
+
+                let (mode, flags) = adbd.expect_snd2(b"/f").await;
+                assert_eq!(mode, 0o100644);
+                assert_eq!(flags, bits);
+                adbd.expect_pushed(b"x", 0).await;
+                adbd.reply(&sync_header(b"OKAY", 0)).await;
+
+                adbd.expect_quit().await;
+            },
+        )
+        .await;
+
+        rt::within("the flagged transfers", async {
+            let mut buf = [0u8; 256];
+            let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+            if pulls {
+                assert_eq!(sync.recv_v2("/f", flag).await.unwrap(), b"x");
+            }
+            sync.send_v2("/f", FileMode(0o100644), 0, flag, b"x")
+                .await
+                .unwrap();
+
+            sync.quit().await.unwrap();
+            rt::join(device).await;
+        })
+        .await;
+    }
+}
+}
+
+rt_test! {
+async fn sync_dry_run_goes_with_a_compression_flag_on_a_push() {
+    // Refusing a dry run on a pull must not spill over to the push, where
+    // `do_send_v2` reads the two flags apart.
+    let (mut conn, device) = session(
+        device_with(&ALL_SYNC_FEATURES),
+        b"host::features=",
+        |mut s| async move {
+            let mut ch = s.accept_open(b"sync:\0").await;
+            let mut adbd = DaemonStream::new(&mut ch);
+
+            let (_, flags) = adbd.expect_snd2(b"/f").await;
+            assert_eq!(flags, 0x8000_0004);
+            adbd.expect_pushed(b"x", 0).await;
+            adbd.reply(&sync_header(b"OKAY", 0)).await;
+
+            adbd.expect_quit().await;
+        },
+    )
+    .await;
+
+    rt::within("the dry run", async {
+        let mut buf = [0u8; 256];
+        let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+        let flags = SyncFlags::ZSTD | SyncFlags::DRY_RUN;
+        sync.send_v2("/f", FileMode(0o100644), 0, flags, b"x")
+            .await
+            .unwrap();
+
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    })
+    .await;
+}
+}
+
+rt_test! {
+async fn sync_flags_adbd_refuses_fail_whatever_the_device_advertises() {
+    // A missing feature would read as a device that could do better, and
+    // no device can: `do_recv_v2` has no dry run, and `do_send_v2` and
+    // `do_recv_v2` both take one compression flag.
+    for banner in [device_with(&ALL_SYNC_FEATURES), FakeDevice::new()] {
+        let (mut conn, device) =
+            session(banner, b"host::features=", expect_only_a_stat_of_after).await;
+
+        let mut buf = [0u8; 256];
+        let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+
+        for flags in [SyncFlags::DRY_RUN, SyncFlags::DRY_RUN | SyncFlags::LZ4] {
+            expect_invalid_flags(sync.recv_v2("/f", flags).await, flags);
+        }
+        for flags in [
+            SyncFlags::BROTLI | SyncFlags::LZ4,
+            SyncFlags::BROTLI | SyncFlags::ZSTD,
+            SyncFlags::LZ4 | SyncFlags::ZSTD,
+            SyncFlags::BROTLI | SyncFlags::LZ4 | SyncFlags::ZSTD,
+        ] {
+            expect_invalid_flags(sync.recv_v2("/f", flags).await, flags);
+            expect_invalid_flags(
+                sync.send_v2("/f", FileMode(0o100644), 0, flags, b"x").await,
+                flags,
+            );
+        }
+
+        assert_eq!(sync.stat("/after").await.unwrap().size, 7);
+        sync.quit().await.unwrap();
+        rt::join(device).await;
+    }
 }
 }
