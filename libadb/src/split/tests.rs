@@ -983,10 +983,11 @@ mod debt_tests {
     use core::task::{Context, Poll, Waker};
     use embedded_io::ErrorKind;
 
+    use crate::base::channel::ChannelId;
     use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
     use crate::base::mock::{
         abandon, cnxn, now, okay, split_two_channels_delayed_ack, split_with_channel, wrte, Mock,
-        NoAuth, SharedMock,
+        NoAuth, SharedMock, FAILED_WRITES,
     };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
@@ -1324,18 +1325,6 @@ mod debt_tests {
         assert_eq!(&buf[..n], b"behind them");
     }
 
-    /// Failures of a write, with the requests each leaves in the queue
-    /// when a verdict fails on it: none once the device is gone, and the
-    /// one it was for otherwise.
-    const FAILED_WRITES: [(ErrorKind, usize); 6] = [
-        (ErrorKind::ConnectionReset, 0),
-        (ErrorKind::ConnectionAborted, 0),
-        (ErrorKind::BrokenPipe, 0),
-        (ErrorKind::NotConnected, 0),
-        (ErrorKind::TimedOut, 1),
-        (ErrorKind::Other, 1),
-    ];
-
     /// A request for a verdict, with every slot of its connection taken.
     fn request_with_no_slot_left() -> (
         Reader<SharedMock, SharedMock>,
@@ -1385,6 +1374,79 @@ mod debt_tests {
 
             let err = now(incoming.accept()).unwrap_err();
             assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(writer.shared.lock_incoming().len(), left, "{kind:?}");
+        }
+    }
+
+    /// A request queued for a verdict, with a slot free to take it in and
+    /// a packet behind it still to be received.
+    fn request_with_a_packet_behind_it() -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let (mut reader, writer, ch) = split_with_channel(None);
+        let seen = seen_by(&writer);
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        seen.feed(&wrte(1, b"behind it"));
+        (reader, writer, ch, seen)
+    }
+
+    /// A READY that finds the device gone leaves nobody to take the
+    /// channel, so the request goes, and a listener that carries on waits
+    /// for the end of the connection like anyone else, rather than be
+    /// handed the same request for ever. Any other failure leaves the
+    /// request in the queue, behind the desync it raised.
+    #[test]
+    fn an_accept_that_fails_keeps_the_request_from_a_listener_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (reader, writer, _ch, seen) = request_with_a_packet_behind_it();
+            let listener = writer.listen_incoming();
+            let incoming = now(listener.accept()).unwrap();
+            seen.fail_writes(kind);
+
+            let err = now(incoming.accept()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(writer.shared.lock_channels().in_use(), 1, "{kind:?}");
+
+            let mut next = Box::pin(listener.accept());
+            if left == 0 {
+                assert!(poll_once(next.as_mut()).is_pending(), "{kind:?}");
+                assert!(matches!(now(reader.run()), Err(Error::UnexpectedEof)));
+                assert!(matches!(now(next), Err(Error::Disconnected)), "{kind:?}");
+            } else {
+                assert!(matches!(now(next), Err(Error::Desynchronized)), "{kind:?}");
+            }
+            assert_eq!(writer.shared.lock_incoming().len(), left, "{kind:?}");
+        }
+    }
+
+    /// The same for a reader, which only gets to what the device sent
+    /// before it went, and to the end of that, with the request out of
+    /// the way.
+    #[test]
+    fn an_accept_that_fails_keeps_the_request_from_a_reader_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (mut reader, writer, ch, seen) = request_with_a_packet_behind_it();
+            let incoming = now(reader.accept_incoming()).unwrap();
+            seen.fail_writes(kind);
+
+            let err = now(incoming.accept()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(writer.shared.lock_channels().in_use(), 1, "{kind:?}");
+
+            let next = now(reader.accept_incoming()).map(|_| ()).unwrap_err();
+            if left == 0 {
+                assert!(matches!(next, Error::UnexpectedEof), "{kind:?}: {next:?}");
+                let mut buf = [0u8; 16];
+                let n = now(writer.read_channel(ch, &mut buf)).unwrap();
+                assert_eq!(&buf[..n], b"behind it", "{kind:?}");
+            } else {
+                assert!(matches!(next, Error::Desynchronized), "{kind:?}: {next:?}");
+            }
             assert_eq!(writer.shared.lock_incoming().len(), left, "{kind:?}");
         }
     }

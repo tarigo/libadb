@@ -53,9 +53,13 @@ where
     /// receive credit when delayed ack is on) and returns the channel.
     ///
     /// With every slot in use the request is refused with CLSE and
-    /// [`Error::NoFreeChannels`] comes back. If that CLSE fails, its
-    /// error comes back instead, with the request left as
-    /// [`reject`](Self::reject) leaves it.
+    /// [`Error::NoFreeChannels`] comes back.
+    ///
+    /// A READY or CLSE that fails comes back as the error, with the slot
+    /// released and the request back in the queue, unless the device is
+    /// gone: nobody is left to answer then, so the request is consumed,
+    /// and the next [`IncomingListener::accept`] or
+    /// [`Reader::accept_incoming`] goes on to whatever comes after it.
     ///
     /// Dropping this future never loses the request: the reserved slot
     /// is released and the request returns to the queue. The connection
@@ -72,7 +76,6 @@ where
         let pending = self.pending.as_ref().expect("undecided");
         let (remote, credit) = (pending.remote, pending.credit);
         let shared = Arc::clone(&self.shared);
-        let checksum = shared.negotiated.checksum();
 
         let reserved = {
             let mut chs = shared.lock_channels();
@@ -91,7 +94,7 @@ where
         };
         let Some(ch) = reserved else {
             // No slot to give: refuse, and consume the request.
-            self.refuse().await?;
+            self.answer(&Packet::refuse(remote)).await?;
             return Err(Error::NoFreeChannels);
         };
         // Armed for rollback until READY is committed.
@@ -101,20 +104,16 @@ where
             Some(credit) => credit.to_le_bytes().to_vec(),
             None => Vec::new(),
         };
-        {
-            let mut wh = shared.lock_write_half().await;
-            send_pkt(
-                &mut *wh,
-                &shared.desync,
-                &Packet::new(Command::Ready, ch.local.raw(), remote.raw(), payload),
-                checksum,
-            )
-            .await?;
-        }
+        self.answer(&Packet::new(
+            Command::Ready,
+            ch.local.raw(),
+            remote.raw(),
+            payload,
+        ))
+        .await?;
 
-        // READY is out: the slot is committed and the request consumed.
+        // READY is out: the slot is committed.
         self.reserved = None;
-        self.pending.take();
         Ok(ch)
     }
 
@@ -138,26 +137,26 @@ where
             self.pending.take();
             return Ok(());
         }
-        self.refuse().await
+        let remote = self.pending.as_ref().expect("undecided").remote;
+        self.answer(&Packet::refuse(remote)).await
     }
 
-    /// Send the CLSE that refuses the request, which settles it, as does
-    /// finding the device gone: nobody is left to refuse. Any other
-    /// failure leaves the request undecided, for `Drop` to put back.
-    async fn refuse(&mut self) -> Result<(), Error<<WH as ErrorType>::Error>> {
-        let remote = self.pending.as_ref().expect("undecided").remote;
+    /// Send `verdict`, which settles the request, as does finding the
+    /// device gone: nobody is left to answer. Any other failure leaves
+    /// the request undecided, for `Drop` to put back.
+    async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<WH as ErrorType>::Error>> {
         let mut wh = self.shared.lock_write_half().await;
-        let refused = send_pkt(
+        let sent = send_pkt(
             &mut *wh,
             &self.shared.desync,
-            &Packet::refuse(remote),
+            verdict,
             self.shared.negotiated.checksum(),
         )
         .await;
-        if refused.as_ref().err().is_none_or(connection_gone) {
+        if sent.as_ref().err().is_none_or(connection_gone) {
             self.pending.take();
         }
-        refused
+        sent
     }
 }
 

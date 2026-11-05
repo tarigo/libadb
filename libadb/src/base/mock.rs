@@ -33,6 +33,18 @@ impl embedded_io::Error for MockError {
     }
 }
 
+/// Failures of a write, with the requests each leaves in the queue when
+/// a verdict fails on it: none once the device is gone, and the one it
+/// was for otherwise.
+pub(crate) const FAILED_WRITES: [(ErrorKind, usize); 6] = [
+    (ErrorKind::ConnectionReset, 0),
+    (ErrorKind::ConnectionAborted, 0),
+    (ErrorKind::BrokenPipe, 0),
+    (ErrorKind::NotConnected, 0),
+    (ErrorKind::TimedOut, 1),
+    (ErrorKind::Other, 1),
+];
+
 /// A transport whose every operation completes at once, except for one
 /// write that never does.
 pub(crate) struct Mock {

@@ -9,7 +9,7 @@ use crate::base::channel::ChannelId;
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
-use crate::base::wire::send_pkt;
+use crate::base::wire::{connection_gone, send_pkt};
 use crate::error::Error;
 
 /// A device-initiated channel awaiting a verdict.
@@ -46,6 +46,12 @@ where
     /// With every slot in use the request is refused with CLSE and
     /// [`Error::NoFreeChannels`] comes back.
     ///
+    /// A READY that fails comes back as the error, with the slot released
+    /// and the request back in the queue, unless the device is gone:
+    /// nobody is left to answer then, so the request is consumed, and the
+    /// next [`accept_incoming`](Connection::accept_incoming) goes on to
+    /// whatever comes after it.
+    ///
     /// Dropping this future never loses the request: the reserved slot
     /// is released and the request returns to the queue. The connection
     /// itself survives only a drop that lands before the READY write is
@@ -76,17 +82,21 @@ where
             Some(credit) => credit.to_le_bytes().to_vec(),
             None => alloc::vec::Vec::new(),
         };
-        send_pkt(
+        let ready = send_pkt(
             &mut self.conn.transport,
             &self.conn.desync,
             &Packet::new(Command::Ready, ch.local.raw(), remote.raw(), payload),
             checksum,
         )
-        .await?;
+        .await;
+        // Any other failure leaves the request for `Drop` to put back.
+        if ready.as_ref().err().is_none_or(connection_gone) {
+            self.pending.take();
+        }
+        ready?;
 
-        // READY is out: the slot is committed and the request consumed.
+        // READY is out: the slot is committed.
         self.reserved = None;
-        self.pending.take();
         Ok(ch)
     }
 

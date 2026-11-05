@@ -440,7 +440,7 @@ fn reading_past_the_watermark_releases_the_held_ack() {
 
 mod incoming {
     use super::*;
-    use crate::base::mock::{cnxn_with, now, withdraw, wrte, Mock, NoAuth};
+    use crate::base::mock::{cnxn_with, now, withdraw, wrte, Mock, NoAuth, FAILED_WRITES};
 
     fn connected(host: &'static [u8], device: &str) -> Connection<Mock> {
         let mut mock = Mock::new();
@@ -606,6 +606,37 @@ mod incoming {
         // The request came back too: it is acceptable again.
         let again = conn.try_accept_incoming().expect("request lost on cancel");
         assert_eq!(again.destination(), b"tcp:6\0");
+    }
+
+    /// A READY that finds the device gone leaves nobody to take the
+    /// channel, so the request goes, and a caller that carries on gets to
+    /// what the device sent before it went, and to the end of that,
+    /// rather than be handed the same request for ever. Any other failure
+    /// leaves the request in the queue, behind the desync it raised.
+    #[test]
+    fn an_accept_that_fails_keeps_the_request_unless_the_device_is_gone() {
+        for (kind, left) in FAILED_WRITES {
+            let (mut conn, ch) = connected_with_channel(None);
+            conn.transport.feed(&open_pkt(77, 0, b"tcp:80\0"));
+            conn.transport.feed(&wrte(1, b"behind it"));
+            conn.transport.fail_writes(kind);
+
+            let incoming = now(conn.accept_incoming()).unwrap();
+            let err = now(incoming.accept()).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "{kind:?}: got {err:?}");
+            assert_eq!(conn.table.in_use(), 1, "{kind:?}");
+
+            let next = now(conn.accept_incoming()).map(|_| ()).unwrap_err();
+            if left == 0 {
+                assert!(matches!(next, Error::UnexpectedEof), "{kind:?}: {next:?}");
+                let mut buf = [0u8; 16];
+                let n = now(conn.read_channel(ch, &mut buf)).unwrap();
+                assert_eq!(&buf[..n], b"behind it", "{kind:?}");
+            } else {
+                assert!(matches!(next, Error::Desynchronized), "{kind:?}: {next:?}");
+            }
+            assert_eq!(conn.incoming.len(), left, "{kind:?}");
+        }
     }
 
     #[test]
