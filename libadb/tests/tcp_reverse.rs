@@ -36,6 +36,26 @@ async fn establish_returns_the_bound_port() {
 }
 
 rt_test! {
+async fn establish_keeps_a_port_past_u16() {
+    // A vsock port is 32 bits wide. The listener is up on the device by
+    // the time this reply arrives, so refusing it would strand the rule.
+    let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
+        let mut ch = s.accept_open(b"reverse:forward:vsock:100000;tcp:6200\0").await;
+        ch.send_write(b"OKAY0006100000").await;
+        ch.expect_ack().await;
+        ch.send_close().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let port = reverse::establish(&mut conn, "vsock:100000", "tcp:6200").await.unwrap();
+    assert_eq!(port, Some(100_000));
+
+    rt::join(device).await;
+}
+}
+
+rt_test! {
 async fn establish_surfaces_the_device_failure() {
     let (mut conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
         let mut ch = s.accept_open(b"reverse:forward:garbage;tcp:1\0").await;

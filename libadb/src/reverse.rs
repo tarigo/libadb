@@ -97,13 +97,13 @@ pub struct ReverseRule {
 ///
 /// Returns the port the device bound for a `tcp:` device spec — the
 /// one it picked, for `tcp:0` — and `None` for any other spec, which
-/// adbd answers with no port. A port that is not a decimal `u16` is
-/// [`ReverseError::UnexpectedReply`].
+/// adbd answers with no port. A reply that is not a 32-bit decimal port
+/// is [`ReverseError::UnexpectedReply`].
 pub async fn establish<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
     host_spec: &str,
-) -> Result<Option<u16>, Error<C::IoError>> {
+) -> Result<Option<u32>, Error<C::IoError>> {
     check_specs(&[device_spec, host_spec])?;
     let mut dest = Vec::with_capacity(18 + device_spec.len() + host_spec.len());
     dest.extend_from_slice(b"reverse:forward:");
@@ -230,18 +230,27 @@ fn parse_status(reply: &[u8]) -> Result<Vec<u8>, ReverseError> {
 
 /// The port in a successful `forward` reply: decimal digits, or nothing
 /// for a spec that binds no port.
-fn parse_port(data: &[u8]) -> Result<Option<u16>, ReverseError> {
+fn parse_port(data: &[u8]) -> Result<Option<u32>, ReverseError> {
     if data.is_empty() {
         return Ok(None);
     }
-    // Byte-wise first, as in `hex4_block`: `u16::from_str` would also
-    // take a leading `+`.
-    if !data.iter().all(u8::is_ascii_digit) {
+    // adbd holds a vsock port, an unsigned 32 bits, in an `int` and
+    // prints it with `%d`, so a port past `i32::MAX` arrives negative.
+    let digits = data.strip_prefix(b"-").unwrap_or(data);
+    // Byte-wise first, as in `hex4_block`: `from_str` would also take a
+    // leading `+`.
+    if !digits.iter().all(u8::is_ascii_digit) {
         return Err(ReverseError::UnexpectedReply);
     }
     core::str::from_utf8(data)
         .ok()
-        .and_then(|digits| digits.parse().ok())
+        .and_then(|text| {
+            if text.starts_with('-') {
+                text.parse::<i32>().ok().map(|port| port as u32)
+            } else {
+                text.parse().ok()
+            }
+        })
         .map(Some)
         .ok_or(ReverseError::UnexpectedReply)
 }
@@ -424,12 +433,33 @@ mod tests {
     fn a_bound_port_parses_as_decimal() {
         assert_eq!(parse_port(b"6100"), Ok(Some(6100)));
         assert_eq!(parse_port(b"65535"), Ok(Some(65535)));
+        assert_eq!(parse_port(b"100000"), Ok(Some(100_000)), "past u16");
+        assert_eq!(parse_port(b"4294967295"), Ok(Some(u32::MAX)));
         assert_eq!(parse_port(b""), Ok(None), "a spec that binds no port");
     }
 
     #[test]
+    fn a_negative_port_is_one_past_i32_max() {
+        // What adbd's `%d` prints for a port held in an `int`.
+        assert_eq!(parse_port(b"-1294967296"), Ok(Some(3_000_000_000)));
+        assert_eq!(parse_port(b"-2147483648"), Ok(Some(1 << 31)), "the first");
+        assert_eq!(parse_port(b"-1"), Ok(Some(u32::MAX)), "the last");
+    }
+
+    #[test]
     fn a_port_that_is_not_one_is_an_unexpected_reply() {
-        for data in [&b"65536"[..], b"+80", b"-1", b"61 00", b"port", b"\xff"] {
+        for data in [
+            &b"+5"[..],
+            b"-",
+            b"-+5",
+            b"--5",
+            b"x",
+            b"4294967296",
+            b"-2147483649",
+            b"61 00",
+            b"port",
+            b"\xff",
+        ] {
             assert_eq!(
                 parse_port(data),
                 Err(ReverseError::UnexpectedReply),
