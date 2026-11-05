@@ -278,16 +278,17 @@ adb_status_t adb_pair(
  * ends that read too: the write fails with ADB_ERR_IO, and what it had
  * sent by then stays sent. While a read call on another thread holds
  * the read lock, the timeout ends that call and the write goes on
- * waiting until it finds the lock free. A write timeout is a
- * harder stop even on Unix: firing mid-packet abandons a write the
- * device has partially seen, so the connection is marked
- * desynchronized and every later channel operation fails with
- * ADB_ERR_DESYNCHRONIZED (metadata queries and this setter still
- * answer). Both hold on a TLS (wireless-debugging) connection too: the
- * timeouts sit on the socket underneath, a timed-out read leaves the
- * session and the partial packet intact, and a timed-out write is the
- * same abandoned packet. Prefer the read timeout for a recoverable
- * bound. */
+ * waiting until it finds the lock free. A signal handled during a wait
+ * does not fail the call: it goes on waiting, and the timeout starts
+ * over. A write timeout is a harder stop even on Unix: firing
+ * mid-packet abandons a write the device has partially seen, so the
+ * connection is marked desynchronized and every later channel
+ * operation fails with ADB_ERR_DESYNCHRONIZED (metadata queries and
+ * this setter still answer). Both hold on a TLS (wireless-debugging)
+ * connection too: the timeouts sit on the socket underneath, a
+ * timed-out read leaves the session and the partial packet intact, and
+ * a timed-out write is the same abandoned packet. Prefer the read
+ * timeout for a recoverable bound. */
 adb_status_t adb_connection_set_io_timeout_ms(
     adb_connection_t *conn,
     uint32_t          read_ms,
