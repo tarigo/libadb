@@ -17,6 +17,10 @@ pub type SmolTcp = embedded_io_adapters::futures_03::FromFutures<smol::net::TcpS
 /// flight cannot be interrupted; see
 /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
 ///
+/// A signal that lands during a read or write does not end it: the call
+/// is made again, which also starts any socket timeout over. A timeout
+/// that fires is reported as it is.
+///
 /// This is what [`Inline`](crate::transport::runtime::Inline) dials,
 /// and it suits a blocking executor such as `libadb-ffi`'s. On an
 /// async runtime it would stall the executor thread; use that
@@ -35,6 +39,18 @@ mod blocking {
 
     use super::BlockingTcp;
     use crate::transport::{ReadCancelSafety, Splittable};
+
+    /// Make `call` again for as long as a signal cuts it short. A
+    /// handler with `SA_RESTART` does not spare us this: a socket that
+    /// has a timeout is left out of it, so the call fails all the same.
+    pub(super) fn past_signals<T>(mut call: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+        loop {
+            match call() {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                done => return done,
+            }
+        }
+    }
 
     impl BlockingTcp {
         /// Wrap a connected socket as it is, options included: unlike
@@ -55,13 +71,13 @@ mod blocking {
 
     impl embedded_io_async::Read for BlockingTcp {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, io::Error> {
-            io::Read::read(&mut self.0, buf)
+            past_signals(|| io::Read::read(&mut self.0, buf))
         }
     }
 
     impl embedded_io_async::Write for BlockingTcp {
         async fn write(&mut self, buf: &[u8]) -> Result<usize, io::Error> {
-            io::Write::write(&mut self.0, buf)
+            past_signals(|| io::Write::write(&mut self.0, buf))
         }
 
         async fn flush(&mut self) -> Result<(), io::Error> {

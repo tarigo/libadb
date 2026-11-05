@@ -312,6 +312,9 @@ fn connect_with_key(
 /// timeout ends that call and the write goes on waiting until it finds
 /// the lock free.
 ///
+/// A signal handled during a wait does not fail the call: it goes on
+/// waiting, and the timeout starts over.
+///
 /// A *write* timeout is a harder stop even on Unix: firing mid-packet
 /// abandons a write the device has partially seen, so the connection
 /// is marked desynchronized and every later channel operation fails
