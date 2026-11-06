@@ -240,12 +240,9 @@ fn install(path: &Path, bytes: &[u8], private: bool) -> Result<(), StoreError> {
 }
 
 /// Write `bytes` to a fresh file beside `path` and return its name, so
-/// a reader never meets a half-written key.
-///
-/// The name is unique per call, not per process: two threads writing
-/// the same key file would otherwise share one temporary and one of
-/// them would go on writing into the file the other had already
-/// published.
+/// a reader never meets a half-written key. The name is unique per
+/// call, not per process, or two threads writing the same key file
+/// would share one temporary.
 fn write_temp(path: &Path, bytes: &[u8], private: bool) -> Result<PathBuf, StoreError> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
 

@@ -32,20 +32,14 @@ impl<'b> RecvBuf<'b> {
         self.buf.len()
     }
 
-    /// The first `n` bytes not consumed yet, left in place.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer than `n` are buffered: fill first.
+    /// The first `n` bytes not consumed yet, left in place. Panics if
+    /// fewer than `n` are buffered: fill first.
     pub fn peek(&self, n: usize) -> &[u8] {
         &self.buf[self.head..self.tail][..n]
     }
 
     /// Consume the first `n` bytes not consumed yet and return them.
     /// They stay valid until the next call that reads into the buffer.
-    ///
-    /// # Panics
-    ///
     /// Panics if fewer than `n` are buffered.
     pub fn take(&mut self, n: usize) -> &[u8] {
         let start = self.head;
@@ -53,11 +47,8 @@ impl<'b> RecvBuf<'b> {
         &self.buf[start..self.head]
     }
 
-    /// Consume the first `n` bytes not consumed yet.
-    ///
-    /// # Panics
-    ///
-    /// Panics if fewer than `n` are buffered.
+    /// Consume the first `n` bytes not consumed yet. Panics if fewer
+    /// than `n` are buffered.
     pub fn advance(&mut self, n: usize) {
         self.take(n);
     }
