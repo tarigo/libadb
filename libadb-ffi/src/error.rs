@@ -14,15 +14,34 @@ use crate::transport::FfiConnectError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdbStatus {
+    /// Success.
     Ok = 0,
+    /// An argument the call cannot take, such as a null pointer, a zero
+    /// `buf_len` for a read, or a channel id that names no slot of the
+    /// connection.
     InvalidArg = 1,
+    /// The URI does not parse, or names a transport the call does not
+    /// take, as `usb://` for `adb_pair`.
     InvalidUri = 2,
+    /// The transport the URI names could not be opened, as when nothing
+    /// answers at the address.
     Connect = 3,
+    /// An I/O error, such as a connection that broke or a read that
+    /// timed out.
     Io = 4,
+    /// Authentication failed or the key cannot be used: the device does
+    /// not trust it, the sign callback failed, or the key does not parse.
     Auth = 5,
+    /// What came in breaks the protocol, or a request cannot be sent as
+    /// given, such as a NUL in a shell command.
     Protocol = 6,
+    /// The channel is closed, by either end, or its id is stale.
     ChannelClosed = 7,
+    /// Every channel slot of the connection is in use.
     NoFreeChannels = 8,
+    /// A write was abandoned mid-packet, by a write timeout for one, so
+    /// every later channel operation fails with this; reads first hand
+    /// over what had already arrived.
     Desynchronized = 9,
     /// The device's reverse rule service refused the request; the
     /// device's own message is in [`adb_last_error`].
@@ -44,6 +63,8 @@ pub enum AdbStatus {
     /// already arrived. A read timeout never leads here. Open a new
     /// connection.
     Disconnected = 13,
+    /// A failure no other status describes, such as a key no
+    /// certificate can be built for.
     Internal = 255,
 }
 

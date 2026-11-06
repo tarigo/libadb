@@ -1,3 +1,6 @@
+//! [`DeviceBanner`], the device's `CNXN` banner parsed: its state,
+//! serial, properties and features.
+
 #[cfg(test)]
 mod tests;
 

@@ -1,3 +1,6 @@
+//! [`Channel`], one stream opened over a session, and the
+//! [`ChannelId`] and [`SelectResult`] the calls on several channels use.
+
 use alloc::vec::Vec;
 use core::future::Future;
 

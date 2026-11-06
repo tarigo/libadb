@@ -18,7 +18,9 @@ use crate::transport::Splittable;
 /// which pair it wants. Use [`NoUsb`] for `U` at a call site that wants
 /// no USB at all.
 pub enum Transport<T, U> {
+    /// A TCP transport.
     Tcp(T),
+    /// A USB transport.
     Usb(U),
 }
 
@@ -115,9 +117,13 @@ impl embedded_io::Error for NoUsbError {
     }
 }
 
+/// Error type of [`Transport`]: the error of the TCP or USB transport
+/// inside it.
 #[derive(Debug)]
 pub enum TransportError<E, U> {
+    /// The TCP transport's error.
     Tcp(E),
+    /// The USB transport's error.
     Usb(U),
 }
 

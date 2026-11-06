@@ -29,8 +29,11 @@ pub type AnyTransportError<R, U = NoUsb> =
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ConnectError<E> {
+    /// The URI does not parse.
     Uri(uri::UriError),
+    /// Dialling the `tcp://` address failed.
     Tcp(std::io::Error),
+    /// The USB backend failed to open a device for the `usb://` URI.
     Usb(E),
     /// The runtime's blocking pool failed to deliver the USB connect
     /// result — typically cancelled or panicked during shutdown.
