@@ -23,9 +23,8 @@ where
 {
     pub(super) conn: &'c mut Connection<T>,
     pub(super) pending: Option<PendingOpen>,
-    /// A slot reserved by `accept` before READY is on the wire. If the
-    /// future is cancelled or errors before that, `Drop` frees it —
-    /// otherwise a cancelled accept would occupy it forever.
+    /// A slot reserved by `accept` before READY is on the wire. `Drop`
+    /// frees it if the future is dropped or fails before that.
     pub(super) reserved: Option<ChannelId>,
 }
 
@@ -47,17 +46,15 @@ where
     /// [`Error::NoFreeChannels`] comes back.
     ///
     /// A READY or CLSE that fails comes back as the error, with the slot
-    /// released and the request back in the queue, unless the device is
-    /// gone: nobody is left to answer then, so the request is consumed,
-    /// and the next [`accept_incoming`](Connection::accept_incoming) goes
-    /// on to whatever comes after it.
+    /// released and the request back in the queue. If the device is gone
+    /// the request is consumed instead, and the next
+    /// [`accept_incoming`](Connection::accept_incoming) goes on to
+    /// whatever comes after it.
     ///
     /// Dropping this future never loses the request: the reserved slot
-    /// is released and the request returns to the queue. The connection
-    /// itself survives only a drop that lands before the READY write is
-    /// first polled — from that poll on, a drop abandons a packet
-    /// mid-write and the connection is marked desynchronized, as with
-    /// any cancelled write.
+    /// is released and the request returns to the queue. A drop after
+    /// the READY's write was first polled still desynchronizes the
+    /// connection: see [`Error::Desynchronized`].
     pub async fn accept(mut self) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
         let (remote, credit) = (pending.remote, pending.credit);
@@ -90,24 +87,23 @@ where
     /// Refuse the channel: answers CLSE and frees nothing, since
     /// nothing was allocated.
     ///
-    /// Dropping this future never loses the request — it returns to the
-    /// queue. The connection itself survives only a drop that lands
-    /// before the CLSE write is first polled; after that it is marked
-    /// desynchronized, as with any cancelled write.
-    ///
     /// A CLSE that fails comes back as the error, with the request back
-    /// in the queue, unless the device is gone: nobody is left to answer
-    /// then, so the request is consumed, and the next
+    /// in the queue. If the device is gone the request is consumed
+    /// instead, and the next
     /// [`accept_incoming`](Connection::accept_incoming) goes on to
     /// whatever comes after it.
+    ///
+    /// Dropping this future never loses the request: it returns to the
+    /// queue. A drop after the CLSE's write was first polled still
+    /// desynchronizes the connection: see [`Error::Desynchronized`].
     pub async fn reject(mut self) -> Result<(), Error<<T as ErrorType>::Error>> {
         let remote = self.pending.as_ref().expect("undecided").remote;
         self.answer(&Packet::refuse(remote)).await
     }
 
-    /// Send `verdict`, which settles the request, as does finding the
-    /// device gone: nobody is left to answer. Any other failure leaves
-    /// the request undecided, for `Drop` to put back.
+    /// Send `verdict`. That settles the request, as does finding the
+    /// device gone, since it needs no answer then. Any other failure
+    /// leaves the request undecided, for `Drop` to put back.
     async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.conn.negotiated.checksum();
         let sent = send_pkt(

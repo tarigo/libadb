@@ -100,15 +100,9 @@ impl<S: Session> Channel<'_, S> {
     ///
     /// How quickly `interrupt` can win depends on the session. On a
     /// split [`Writer`](crate::Writer) it is raced against the wait for
-    /// data. On a [`Connection`](crate::Connection) over an async TCP
-    /// socket it is raced against the read itself, so a pending read is
-    /// dropped the moment the interrupt is due. A transport that cannot
-    /// give a read up has the interrupt checked between reads instead:
-    /// USB, where cancelling a bulk transfer discards what the device
-    /// already wrote into it, and the blocking socket `Inline` dials,
-    /// where a read never yields. A read already blocking cannot be
-    /// interrupted, so the interrupt takes effect once it has finished.
-    /// See [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    /// data. On a [`Connection`](crate::Connection) it depends on the
+    /// transport: see
+    /// [`Connection::select_channel`](crate::Connection::select_channel).
     ///
     /// ```ignore
     /// loop {
@@ -159,21 +153,16 @@ pub(crate) trait ReadToEnd: Sized {
     /// Read until the device closes the channel, filling `buf` from its
     /// start, then close the channel. Returns the number of bytes read.
     ///
-    /// The close is sent on every way out — the device closing, `buf`
-    /// filling up, any other error — since the device's CLSE only marks
-    /// the slot closed and nothing else frees it later ([`Channel`] has
-    /// no `Drop`): a slot left open stays taken until the connection
-    /// runs out of them with [`Error::NoFreeChannels`]. It is
-    /// best-effort, its own result dropped in favour of what the reads
-    /// came to.
+    /// The close goes out, best-effort, on every way out, because
+    /// nothing else frees the slot ([`Channel`] has no `Drop`) and a slot
+    /// left taken ends in [`Error::NoFreeChannels`]. What the reads came
+    /// to outranks its result.
     ///
-    /// Output that fills `buf` exactly still counts as read in full:
-    /// once `buf` is full, one more read, into a scratch byte, tells
+    /// Once `buf` is full, one more read into a scratch byte tells
     /// whether the device has more. The device closing the channel then
-    /// returns `buf.len()`. Data means the output is longer than `buf`:
-    /// [`Error::ReceiveBufferFull`], with what was read left in `buf` and
-    /// the scratch byte lost along with the rest of the output. Any other
-    /// error that read meets is returned as it is.
+    /// returns `buf.len()`; data fails with
+    /// [`Error::ReceiveBufferFull`], with what was read left in `buf`
+    /// and the scratch byte lost; any other error is returned as it is.
     async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>> {
         let mut tail = 0;
         let mut scratch = [0u8; 1];

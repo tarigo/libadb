@@ -138,15 +138,9 @@ pub(crate) fn ends_connection<E: embedded_io::Error>(e: &Error<E>) -> bool {
     }
 }
 
-/// Tracks whether a packet was left half-written.
-///
-/// A packet goes out as a header write followed by a payload write. Drop
-/// the future in between — a cancelled `write_channel`, a `select!` that
-/// lost the race — and the device is left waiting for a payload it will
-/// take from whatever we send next. Nothing on this side can put the
-/// framing back, so the flag is one-way: once raised, every operation on
-/// the connection fails with [`Error::Desynchronized`], reads once they
-/// have handed over what had already arrived.
+/// Tracks whether a packet was left half-written. One-way, as nothing
+/// on this side can put the framing back: see
+/// [`Error::Desynchronized`].
 pub(crate) struct DesyncFlag(AtomicBool);
 
 impl DesyncFlag {
@@ -240,11 +234,9 @@ pub(crate) enum Received<I> {
 /// a read once issued runs to completion. Bytes read before the
 /// interrupt stay in `buf` either way.
 ///
-/// Every read keeps to [`read_limit`], so USB gets requests it can
-/// complete. TCP keeps its header reads, which take in a whole packet
-/// or several; all it gives up is the read that finishes a split packet
-/// bringing the next one along. TLS keeps its stretch: a large packet
-/// is staged once, however many records fill it.
+/// Every read keeps to [`read_limit`]. TCP keeps its header reads, which
+/// take in a whole packet or several, and TLS still stages a large
+/// packet once, however many records fill it.
 pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
     t: &mut T,
     buf: &mut BytesMut,

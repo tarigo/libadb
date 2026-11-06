@@ -233,7 +233,7 @@ where
     /// the connection answers its READY with CLSE, so the device's end
     /// does not stay open; the same goes for an `Err` returned before
     /// the answer. Dropping it mid-packet is worse: see
-    /// [`write_channel`](Self::write_channel).
+    /// [`Error::Desynchronized`].
     pub async fn open_channel(
         &mut self,
         destination: &[u8],
@@ -318,12 +318,14 @@ where
     /// channel nobody reads stops the device writing to it rather than
     /// growing without bound.
     ///
-    /// What arrived is handed over whatever has become of the
-    /// connection: an acknowledgement that fails does not fail the read
-    /// it belongs to, and the next call reports the failure. On a
-    /// desynchronized connection a read hands over what is buffered and
-    /// then fails with [`Error::Desynchronized`]. Should the device be
-    /// gone it goes on to what it sent before it went.
+    /// However the connection fails, a read hands over what is buffered
+    /// first, and only then fails with [`Error::Desynchronized`] if a
+    /// write was abandoned. An OKAY that fails does not fail the read it
+    /// belongs to: the next call reports the failure. If the device is
+    /// gone, a read goes on to receive what it had sent.
+    ///
+    /// Dropped while it waits for a packet, it drops a transport read:
+    /// see [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
     ///
     /// [`ConnectionConfig::rx_watermark`]: crate::ConnectionConfig::rx_watermark
     pub async fn read_channel(
@@ -351,18 +353,10 @@ where
     /// for a socket it no longer has without a word. That goes by the
     /// CLSE having come in, so a write can still cross one on the wire.
     ///
-    /// **Not cancellation-safe.** A packet goes out as a header write
-    /// followed by a payload write, and dropping the future between
-    /// them leaves the device reading whatever we send next as the rest
-    /// of that packet. The connection is marked desynchronized instead:
-    /// every later operation on it fails with
-    /// [`Error::Desynchronized`], reads once they have handed over what
-    /// had already arrived.
-    ///
-    /// The mark goes up from the moment the header write is first
-    /// polled, not only between the two writes — a transport that took
-    /// bytes before returning `Pending` looks no different from one
-    /// that took none.
+    /// **Not cancellation-safe.** Dropping the future once a packet's
+    /// write was first polled desynchronizes the connection: every later
+    /// operation on it fails with [`Error::Desynchronized`], reads once
+    /// they have handed over what had already arrived.
     pub async fn write_channel(
         &mut self,
         ch: ChannelId,
@@ -412,17 +406,12 @@ where
     /// undecided puts the request back at the head of the queue and
     /// loses nothing.
     ///
-    /// Dropping the future while it still *waits* for a packet is
-    /// another matter: the wait is a transport read, so cancelling it
-    /// inherits the transport's
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) — where
-    /// reads are not cancel-safe (USB), an abandoned in-flight read can
-    /// lose packet bytes, exactly as with a cancelled
-    /// [`read_channel`](Self::read_channel).
-    ///
     /// Pending requests are bounded by
     /// [`ConnectionConfig::max_channels`]: past that, new OPENs are
     /// refused with CLSE on arrival.
+    ///
+    /// Dropped while it waits for a packet, it drops a transport read,
+    /// as [`read_channel`](Self::read_channel) does.
     pub async fn accept_incoming(
         &mut self,
     ) -> Result<Incoming<'_, T>, Error<<T as ErrorType>::Error>> {
@@ -461,8 +450,8 @@ where
     /// The slot comes back however the CLSE fares, and a CLSE that fails
     /// comes back as the error. Nothing sends it again. With the device
     /// gone nothing needs to; any other failure desynchronizes the
-    /// connection, as a packet not sent whole does, and leaves the device
-    /// holding its end of the channel with no way left to reach it.
+    /// connection and leaves the device holding its end of the channel,
+    /// with no way left to reach it.
     ///
     /// A connection already desynchronized fails with
     /// [`Error::Desynchronized`] and frees nothing: no call that wants a
@@ -548,9 +537,9 @@ where
                 Received::Interrupted(val) => return Ok(SelectResult::Interrupted(val)),
             };
             match pkt.command {
-                // Straight to the caller, but only whole: the part of a
-                // packet left in the slot would read on as if nothing
-                // came before it, were the call dropped during the OKAY.
+                // Straight to the caller, but only whole: if the call
+                // were dropped during the OKAY, what stayed in the slot
+                // would read as if no bytes came before it.
                 Command::Write if pkt.arg1 == ids.local.raw() && pkt.data.len() <= buf.len() => {
                     let n = pkt.data.len();
                     buf[..n].copy_from_slice(&pkt.data);
@@ -581,13 +570,10 @@ where
         }
     }
 
-    /// Take what `ch` has buffered into `buf`: `Ok(None)` while an open
-    /// channel has nothing buffered.
-    ///
-    /// Only once nothing is left does a read fail with what became of
-    /// the connection. The OKAY goes first, so that a call dropped in
-    /// the middle of it leaves the bytes readable, and whatever becomes
-    /// of it, the bytes are the read's: the next call reports a failure.
+    /// Take what `ch` has buffered into `buf`, sending the OKAY it owes
+    /// first: `Ok(None)` while an open channel has nothing buffered. The
+    /// OKAY goes first so that a call dropped during it leaves the bytes
+    /// readable. A failed OKAY is the next call's to report.
     async fn take_buffered(
         &mut self,
         ch: ChannelId,
@@ -615,9 +601,8 @@ where
         send_okay_to(&mut self.transport, &self.desync, ack, mode, checksum).await
     }
 
-    /// Act on `pkt`, whatever became of what it had to answer the device
-    /// with: once the device is gone there is nobody to answer, and what
-    /// it sent before it went is still to be received.
+    /// Act on `pkt`, ignoring a failed answer if the device is gone:
+    /// there is nobody to answer, and what it sent can still be received.
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         match self.act_on(pkt).await {
             Err(e) if connection_gone(&e) => Ok(()),

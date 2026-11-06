@@ -15,10 +15,9 @@ pub(crate) struct SendQueue {
     /// The place the next writer gets.
     tail: u64,
     /// Places whose writer left the queue unserved; skipped when the
-    /// head reaches them. Bounded: a hole is only recorded below a
-    /// place still occupied — a leaving tail reclaims itself and any
-    /// holes adjacent to it — so cancellation churn cannot grow this
-    /// past the caller's own peak of concurrent writers.
+    /// head reaches them. A hole is only recorded below a place still
+    /// occupied, so cancellation churn cannot grow this past the
+    /// caller's own peak of concurrent writers.
     gone: BTreeSet<u64>,
     /// Writers served and still sending what they reserved.
     sending: usize,
@@ -70,12 +69,9 @@ impl SendQueue {
     }
 
     /// Leave the queue from `place` without being served. Returns
-    /// whether the head moved — the caller then wakes the next writer.
-    ///
-    /// A leaving tail hands its place straight back — together with any
-    /// holes that end up at the tail with it — so a caller that keeps
-    /// queueing and dropping writes behind a blocked head reuses one
-    /// place instead of growing the hole set.
+    /// whether the head moved, and the caller then wakes the next
+    /// writer. A leaving tail hands its place straight back, with any
+    /// holes that end up at the tail with it.
     pub(crate) fn leave(&mut self, place: u64) -> bool {
         if place == self.head {
             self.advance();

@@ -134,12 +134,13 @@ impl Packet {
         (MESSAGE_SIZE + data_length).saturating_sub(buf.len())
     }
 
-    /// `checksum` decides whether `data_check` carries the payload sum
-    /// or stays zero — see [`Checksum`].
     /// Serialize into one contiguous buffer. Test-only: on the wire a
     /// packet must go out as a separate header write and payload write
     /// (see [`send_pkt`](crate::base::wire::send_pkt)), which is what
     /// adbd's exact-size header read requires.
+    ///
+    /// `checksum` decides whether `data_check` carries the payload sum
+    /// or stays zero: see [`Checksum`].
     #[cfg(test)]
     pub fn encode(&self, dst: &mut BytesMut, checksum: Checksum) -> Result<(), ProtocolError> {
         let message = self.to_message(checksum)?;

@@ -126,7 +126,9 @@ impl ConnectionConfig {
     }
 
     /// Hard cap on bytes buffered for a single channel that nobody is
-    /// currently reading.
+    /// currently reading. The effective cap is never below
+    /// [`max_payload`](Self::max_payload), so one legal packet always
+    /// fits.
     ///
     /// Backpressure normally keeps a channel well under this: see
     /// [`rx_watermark`](Self::rx_watermark). Hitting the cap means the
@@ -136,15 +138,12 @@ impl ConnectionConfig {
     /// not fit and fails the call that observed it with
     /// [`Error::ChannelRxOverflow`](crate::Error::ChannelRxOverflow).
     /// That packet is never acknowledged, so the device stalls on this
-    /// channel — it waits for an OKAY that will not come, or never gets
-    /// the credit back under delayed ACK. Other channels and the
-    /// connection stay usable, but this channel's byte stream now has a
-    /// gap. The error surfaces on whichever call is driving the
-    /// connection, which may be a read on a different channel. On a
-    /// split connection driven by [`Reader::run`](crate::Reader::run)
-    /// it lands on this channel instead, which `run` closes. The
-    /// effective cap is never below [`max_payload`](Self::max_payload),
-    /// so one legal packet always fits.
+    /// channel, whose byte stream now has a gap; other channels and the
+    /// connection stay usable. The error surfaces on whichever call is
+    /// driving the connection, which may be a read on a different
+    /// channel. On a split connection driven by
+    /// [`Reader::run`](crate::Reader::run) it lands on this channel
+    /// instead, which `run` closes.
     pub const fn with_max_rx_per_channel(mut self, bytes: usize) -> Self {
         self.max_rx_per_channel = bytes;
         self

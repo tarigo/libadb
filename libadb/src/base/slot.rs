@@ -91,7 +91,7 @@ pub(crate) struct ChannelSlot {
     unacked: usize,
     /// How much of `rx_buf`, from its head, has its OKAY settled and is
     /// yet to be taken. That OKAY lets the device send as much again,
-    /// which can land first, so these bytes are as good as gone for
+    /// which can land first, so these bytes no longer count against
     /// what it may send; and what lands behind them owes an OKAY of its
     /// own, so a take stops here.
     settled: usize,
@@ -191,17 +191,17 @@ impl ChannelSlot {
 
     /// Take an inbound WRTE and say whether to acknowledge it now.
     ///
-    /// Acknowledging is what re-opens the sender's window, so doing it
-    /// on arrival means the device may keep writing to a channel the
-    /// application never reads — the buffer then grows without bound.
+    /// Acknowledging re-opens the sender's window, so doing it on
+    /// arrival lets the device keep writing to a channel the application
+    /// never reads, and the buffer grows without bound.
     ///
-    /// With delayed-ack the answer is always "later": credit is returned
+    /// With delayed ACK the answer is always "later": credit is returned
     /// as the application consumes bytes, and the budget we advertised
-    /// bounds what can pile up meanwhile. Without it the window is a
-    /// single packet, so waiting for the read on every packet would turn
-    /// the channel into a ping-pong; the acknowledgement goes out at
-    /// once while little is buffered, and is held back once the
-    /// watermark's worth of bytes is waiting to be read.
+    /// bounds what can pile up. Without it the window is a single
+    /// packet, so waiting for the read on every packet would turn the
+    /// channel into a ping-pong: the OKAY goes out at once while little
+    /// is buffered, and is held back once the watermark's worth of bytes
+    /// is waiting to be read.
     pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, RxOverflow> {
         self.push_rx(payload)?;
         self.unacked = self.unacked.saturating_add(payload.len());
@@ -257,28 +257,23 @@ impl ChannelSlot {
     }
 
     /// Whether [`take_buffered`](Self::take_buffered) has bytes to hand
+    /// out. Nothing is taken before the device has named its end: what
+    /// it wrote ahead of the READY to our OPEN stays buffered, counted
+    /// as unacknowledged, until that READY gives its OKAY somewhere to
+    /// go. A channel closed before it ever opened has nothing to hand
     /// out.
-    ///
-    /// Nothing is taken before the device has named its end: what it
-    /// wrote ahead of the READY to our OPEN stays buffered, and counted
-    /// as unacknowledged, until that READY gives the OKAY for it
-    /// somewhere to go. A channel closed before it ever opened has
-    /// nothing to hand out.
     pub fn has_data(&self) -> bool {
         self.remote.is_some() && !self.rx_buf.is_empty()
     }
 
-    /// Settle what taking up to `want` buffered bytes owes the device:
-    /// the bytes leave the count of what it has had no OKAY for, and
-    /// the OKAY comes back to send. `None` with nothing to settle, or
+    /// Settle what taking up to `want` buffered bytes owes the device,
+    /// and return the OKAY to send. `None` with nothing to settle, or
     /// with bytes still settled, which go first.
     ///
     /// The bytes themselves stay until
-    /// [`take_buffered`](Self::take_buffered). A read goes through the
-    /// two in this order, the OKAY between them, so that a call dropped
-    /// in the middle of that write has taken nothing: its connection is
-    /// desynchronized, and what it left stays readable, with no gap in
-    /// it.
+    /// [`take_buffered`](Self::take_buffered). The OKAY goes between the
+    /// two, so a call dropped during that write has taken nothing, and
+    /// what it left stays readable with no gap in it.
     pub fn settle_take(&mut self, want: usize) -> Option<PendingAck> {
         let ids = self.ids().filter(|_| self.settled == 0)?;
         let n = want.min(self.rx_buf.len());

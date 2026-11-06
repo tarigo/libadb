@@ -50,8 +50,8 @@ pub enum Error<E> {
     /// A channel buffered more unread data than
     /// [`ConnectionConfig::max_rx_per_channel`] allows.
     ///
-    /// The last line of defence, not the usual brake: unread data now
-    /// holds back acknowledgements, so a device that respects flow
+    /// The last line of defence, not the usual brake: unread data holds
+    /// back acknowledgements, so a device that respects flow
     /// control stops on its own well before this. Reaching it means the
     /// peer kept writing without its window being re-opened. The
     /// connection is left intact but the offending packet was dropped
@@ -71,31 +71,30 @@ pub enum Error<E> {
     /// A packet may have been left half-written, so the byte stream can
     /// no longer be trusted to line up with what the device expects.
     ///
-    /// Raised by every later operation on the connection, except that
-    /// a read first hands over what had already arrived for its
-    /// channel: an abandoned write says nothing about bytes the device
-    /// delivered. A packet reaches the wire as a header write followed
-    /// by a payload write; dropping that future in between leaves the
-    /// device reading the next bytes we send as the rest of the
-    /// abandoned packet.
+    /// A packet reaches the wire as a header write followed by a payload
+    /// write. Dropping that future in between leaves the device reading
+    /// the next bytes we send as the rest of the abandoned packet.
+    /// The mark goes up from the moment the header write is first
+    /// polled, and it is deliberately conservative: it also covers a
+    /// write that was dropped or failed before any byte was
+    /// acknowledged, because a transport that took bytes and then
+    /// returned `Pending` or an error is indistinguishable from one that
+    /// took none. Nothing can recover the framing from this side: close
+    /// the connection and open a new one.
     ///
-    /// A split connection that had already ended stays
+    /// Every later operation on the connection fails with this, except
+    /// that a read first hands over what had already arrived for its
+    /// channel: an abandoned write says nothing about bytes the device
+    /// delivered. A split connection that had already ended stays
     /// [`Disconnected`](Self::Disconnected) for the calls waiting on the
     /// device, as when a read gives up on an acknowledgement at the end:
     /// only a write or a close can still meet this then.
-    ///
-    /// The judgement is deliberately conservative: it also covers a
-    /// write that was polled and then dropped or failed before any byte
-    /// was acknowledged, because a transport that took bytes and then
-    /// returned `Pending` or an error is indistinguishable from one
-    /// that took none. Nothing can recover the framing from this side —
-    /// close the connection and open a new one.
     ///
     /// A write that failed because the device is gone is not such a
     /// write: the transport said connection reset or aborted, broken
     /// pipe or not connected, so there is no stream left to fall out of
     /// step with. The write fails with [`Error::Io`], and reads go on
-    /// to what the device sent before it went.
+    /// to receive what the device had sent.
     Desynchronized,
     /// A split connection has ended, so nothing more will arrive from
     /// the device: its `Reader::run` ended, the `Reader` was dropped, or
