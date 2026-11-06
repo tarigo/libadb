@@ -56,13 +56,10 @@ pub(super) fn harvest(conn: &mut ClientConnection, out: &mut BytesMut) {
     }
 }
 
-/// Hand rustls the ciphertext in `rx`; returns how much it took.
-///
-/// rustls buffers incomplete records itself, so it takes all of `rx`
-/// unless the plaintext fills up first, and the callers drain that
-/// before they come here. It takes none only once a `close_notify`
-/// has arrived, which the callers hear of from `take_plaintext`
-/// first: their arms for zero are a safeguard.
+/// Hand rustls the ciphertext in `rx`; returns how much it took. That
+/// is none only once a `close_notify` has arrived, which the callers
+/// hear of from `take_plaintext` first, so their arms for zero are a
+/// safeguard.
 ///
 /// Nothing here writes. A KeyUpdate from the peer may ask for ours,
 /// but rustls keeps the answer until our next record goes out, which

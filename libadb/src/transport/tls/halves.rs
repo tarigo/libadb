@@ -153,16 +153,7 @@ impl<T: Splittable> TlsWriteHalf<T> {
         }
     }
 
-    /// Send `close_notify` and push it out.
-    ///
-    /// Not required — a device is content with a plain FIN — and
-    /// not done on drop, because dropping cannot await. Without it a
-    /// peer cannot tell a connection we closed from one cut short.
-    ///
-    /// It leaves the transport underneath open, and a write after it
-    /// fails with [`TlsError::Closed`]. On a session that has already
-    /// failed it sends the alert for that failure instead, if the
-    /// socket takes it, and returns the failure.
+    /// Send `close_notify` and push it out: see [`MaybeTls::shutdown`].
     pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
         // Up front: a shutdown dropped part way may already have
         // queued the `close_notify`, and nothing may follow it.

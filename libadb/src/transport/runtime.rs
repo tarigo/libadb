@@ -1,11 +1,10 @@
 //! The async runtime as a type parameter rather than a feature.
 //!
 //! TCP needs a runtime to dial a socket, and the blocking USB backends
-//! need somewhere to park a synchronous call. Both used to be picked by
-//! `cfg`, which made `tokio` and `smol` mutually exclusive: two crates
-//! in one dependency tree could not ask for different ones. They are
-//! now chosen per call site through [`Runtime`], so enabling both
-//! features compiles and each caller says which one it means.
+//! need somewhere to park a synchronous call. Both are chosen per call
+//! site through [`Runtime`], so enabling both `tokio` and `smol`
+//! compiles, and two crates in one dependency tree can ask for
+//! different ones.
 //!
 //! [`Inline`] covers builds with no runtime at all: it dials TCP and
 //! runs blocking work on the calling thread.
@@ -19,12 +18,12 @@ use crate::transport::Splittable;
 ///
 /// Implemented by [`Inline`], which needs no runtime, and by the
 /// zero-sized markers `Tokio` and `Smol`, each behind its own feature.
-/// Plain code spans rather than links on purpose: a doc build with
-/// only one runtime enabled cannot resolve the other.
 ///
 /// Every method returns `impl Future + Send` rather than being an
 /// `async fn`, so generic callers keep the `Send` bound they need to
 /// spawn the resulting future.
+// `Tokio` and `Smol` are plain code spans on purpose: a doc build with
+// only one runtime enabled cannot resolve a link to the other.
 pub trait Runtime {
     /// TCP transport this runtime produces.
     type Tcp: Splittable + Send + 'static;

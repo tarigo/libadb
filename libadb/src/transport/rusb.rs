@@ -37,11 +37,9 @@ const PACKET_SIZE_MASK: u16 = 0x07ff;
 
 /// USB transport wrapping a `rusb::DeviceHandle` with bulk endpoints.
 ///
-/// Cheap to clone — the handle is held behind `Arc` and the internal
-/// staging buffer is reset to empty in the clone. Cloning shares the
-/// same libusb handle and endpoints, which makes it safe to use one
-/// clone for reading and another for writing concurrently (see
-/// [`Splittable`](crate::Splittable)).
+/// Cheap to clone: the handle is held behind `Arc`, and the internal
+/// staging buffer is reset to empty in the clone. One clone can read
+/// while another writes (see [`Splittable`](crate::Splittable)).
 ///
 /// [`write`](Self::write) follows a transfer that fills its last USB
 /// packet with a zero-length one. adbd reads in 16 KiB requests, and
@@ -51,17 +49,13 @@ const PACKET_SIZE_MASK: u16 = 0x07ff;
 /// # Cancellation
 ///
 /// Dropping a read or write future does **not** cancel the in-flight
-/// USB transfer — libusb has no async cancel — so a partial bulk write
-/// may still complete on the device. Subsequent calls on the same
+/// USB transfer: libusb has no async cancel, so a partial bulk write
+/// may still complete on the device, and later calls on the same
 /// transport may then observe wire-framing corruption. Avoid
 /// cancelling read/write futures; use the connection-level
-/// timeout/error paths to terminate transfers cleanly. A cancelled
-/// write marks the connection desynchronized
-/// ([`Error::Desynchronized`](crate::Error::Desynchronized)), and
-/// reads report themselves as unsafe to cancel through
-/// [`ReadCancelSafety`](crate::transport::ReadCancelSafety), so
-/// [`select_channel`](crate::Connection::select_channel) checks its
-/// interrupt between reads rather than racing it against one.
+/// timeout/error paths to terminate transfers cleanly. See also
+/// [`Error::Desynchronized`](crate::Error::Desynchronized) and
+/// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
 pub struct UsbTransport<R> {
     handle: Arc<rusb::DeviceHandle<Context>>,
     endpoints: BulkEndpoints,

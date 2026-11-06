@@ -17,16 +17,12 @@ use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 /// exercise those rules without a USB bus.
 ///
 /// The lookups grow costlier down the list, and `scan` stops at the
-/// first one that rules a device out. The IDs come with enumeration,
-/// and a device whose IDs could not be read reaches `scan` as an `Err`
-/// instead. The interfaces come from the configuration descriptor,
-/// which libusb may fail to read. The serial number is a string
-/// descriptor libusb can only read through an open handle, so
-/// [`serial`](Self::serial) takes `&mut self`: it may open the device,
-/// fail doing so, and keep the handle for `scan`'s `open` step. `scan`
-/// asks for it last, and only under [`UsbSelector::Serial`], so no
-/// other selector opens a device it will not use. A backend that has
-/// the serial from enumeration, as `nusb` does, just hands it over.
+/// first one that rules a device out. The serial number comes last, and
+/// only under [`UsbSelector::Serial`], so no other selector opens a
+/// device it will not use: libusb can only read that string descriptor
+/// through an open handle, so [`serial`](Self::serial) takes `&mut self`,
+/// may open the device, fail doing so, and keep the handle for `scan`'s
+/// `open` step.
 pub(super) trait Enumerated {
     /// The backend's connect error, which a failed lookup reports.
     type Error: ScanError;

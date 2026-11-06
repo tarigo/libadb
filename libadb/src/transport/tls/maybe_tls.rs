@@ -35,18 +35,16 @@ pub(super) enum State<T: Read + Write> {
 ///
 /// # Cancellation
 ///
-/// Reads lose nothing when dropped, as far as the transport
-/// underneath allows; see
-/// [`ReadCancelSafety`]. Nor do
-/// writes: over TLS, `write` seals what it takes into a queue and
-/// returns without waiting again, so a write dropped part way has
-/// committed nothing it did not report. The queue is what waits on
-/// the socket. It goes out on `flush`, or with a later write once it
-/// has grown to 64 KiB, as with any buffered writer; call `flush`
-/// when a message is done. A dropped `flush` leaves the rest queued
-/// for the next one. After a split nothing else sends it: the read
-/// half never writes, so a reader waiting on the reply waits until
-/// the write half writes or flushes again.
+/// Reads lose nothing when dropped, as far as the transport underneath
+/// allows: see [`ReadCancelSafety`]. Nor do writes: over TLS, `write`
+/// seals what it takes into a queue and returns without waiting again,
+/// so a write dropped part way has committed nothing it did not report.
+/// The queue goes out on `flush`, or with a later write once it has
+/// grown to 64 KiB, as with any buffered writer; call `flush` when a
+/// message is done. A dropped `flush` leaves the rest queued for the
+/// next one. After a split the read half never writes, so a reader
+/// waiting on the reply waits until the write half writes or flushes
+/// again.
 ///
 /// [`start_tls`](StartTls::start_tls) is the exception: it is not
 /// cancel-safe.
@@ -102,12 +100,14 @@ impl<T: Read + Write> MaybeTls<T> {
 
     /// Send `close_notify`, if there is a session to close.
     ///
-    /// Not required — a device is content with a plain FIN — and
-    /// not done on drop, because dropping cannot await. It leaves
-    /// the transport underneath open; a write to the session after it
-    /// fails with [`TlsError::Closed`]. On a session that has already
-    /// failed it sends the alert for that failure instead, if the
-    /// socket takes it, and returns the failure.
+    /// Not required, as a device is content with a plain FIN, and not
+    /// done on drop, because dropping cannot await. Without it a peer
+    /// cannot tell a connection we closed from one cut short.
+    ///
+    /// It leaves the transport underneath open; a write to the session
+    /// after it fails with [`TlsError::Closed`]. On a session that has
+    /// already failed it sends the alert for that failure instead, if
+    /// the socket takes it, and returns the failure.
     pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
         match &mut self.state {
             State::Tls(s) => s.shutdown().await,

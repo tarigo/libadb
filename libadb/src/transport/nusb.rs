@@ -7,12 +7,9 @@
 //!
 //! Dropping a read future cancels the bulk transfer, and whatever the
 //! device already wrote into it is discarded rather than kept for the
-//! next read — enough to take the middle out of a packet. The transport
+//! next read, which can take the middle out of a packet. The transport
 //! says so through
-//! [`ReadCancelSafety`](crate::transport::ReadCancelSafety), and
-//! [`select_channel`](crate::Connection::select_channel) responds by
-//! checking its interrupt between reads instead of racing it against
-//! one.
+//! [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,10 +21,8 @@ use crate::transport::usb::{ends_on_packet_boundary, scan, speaks_adb, Enumerate
 
 /// USB transport wrapping `nusb::Interface` with bulk endpoints.
 ///
-/// Cheap to clone — `Interface` is Arc-backed internally. Cloning
-/// shares the same device handle and endpoints, which makes it safe
-/// to use one clone for reading and another for writing concurrently
-/// (see [`Splittable`](crate::Splittable)).
+/// Cheap to clone: `Interface` is Arc-backed internally. One clone can
+/// read while another writes (see [`Splittable`](crate::Splittable)).
 ///
 /// [`write`](Self::write) follows a transfer that fills its last USB
 /// packet with a zero-length one. adbd reads in 16 KiB requests, and
