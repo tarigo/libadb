@@ -91,6 +91,28 @@ fn connect_error_implements_std_error_trait() {
 }
 
 #[test]
+fn a_connect_error_gives_what_it_wraps_as_its_source() {
+    use std::error::Error as _;
+
+    let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+    let tcp: ConnectError<NoBackend> = ConnectError::Tcp(refused);
+    let source = tcp.source().expect("the dial's error");
+    let kind = source.downcast_ref::<io::Error>().map(io::Error::kind);
+    assert_eq!(kind, Some(io::ErrorKind::ConnectionRefused));
+
+    let uri: ConnectError<NoBackend> = ConnectError::Uri(UriError::InvalidHost);
+    let source = uri.source().and_then(|e| e.downcast_ref::<UriError>());
+    assert_eq!(source, Some(&UriError::InvalidHost));
+
+    let usb = ConnectError::Usb(NoBackend);
+    assert!(usb.source().is_some_and(|e| e.is::<NoBackend>()));
+
+    assert!(ConnectError::<NoBackend>::UsbBlockingTaskFailed
+        .source()
+        .is_none());
+}
+
+#[test]
 fn connect_missing_scheme_returns_uri_error() {
     let err = unwrap_err(block_on(connect::<TestRuntime, NoBackendChosen>(
         "127.0.0.1:5555",
