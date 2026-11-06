@@ -127,18 +127,17 @@ where
         self.await_open_ack(ch, &mut guard).await
     }
 
-    /// Refuse queued OPENs past the cap — what a cancelled overflow
-    /// refusal left behind — before taking any new packet in. The
-    /// intake loops that can run with a full queue start here, so
-    /// repeated cancellation cannot grow the queue beyond one past the
-    /// cap: nothing new is read until the leftover is answered.
-    /// (`accept_incoming` needs no barrier — it only reads with the
-    /// queue empty.)
+    /// Refuse queued OPENs past the cap, which a dropped refusal left
+    /// behind, before taking any new packet in. The intake loops that
+    /// can run with a full queue start here, so repeated cancellation
+    /// cannot grow the queue beyond one past the cap. (`accept_incoming`
+    /// needs no barrier: it only reads with the queue empty.)
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
             match excess.reject().await {
-                // What it sent before it went is still to be received.
+                // The device is gone, but what it sent can still be
+                // received.
                 Err(e) if connection_gone(&e) => {}
                 refused => refused?,
             }
@@ -146,19 +145,16 @@ where
         Ok(())
     }
 
-    /// The next packet off the connection, once what the last one left
-    /// owing is out. The device may be waiting for exactly that, so it
-    /// cannot wait for a packet; and nothing coming in until it is out
+    /// The next packet off the connection, once what is owed is out: the
+    /// device may be waiting for that, and receiving nothing until then
     /// is what bounds the list.
     ///
-    /// The call that sees the connection end gets the failure as it is.
-    /// Nobody else is in a position to see it, so everyone waiting is
-    /// told here.
+    /// The call that sees the connection end gets the failure as it is,
+    /// and everyone waiting is told here, since nobody else can see it.
     ///
-    /// A write abandoned while this waits ends the wait, and something
-    /// falling due sees to that before it goes on: the device may send
-    /// nothing until then. A read that can be dropped goes at once, and
-    /// any other finishes first, with the next packet.
+    /// A write abandoned or a debt falling due ends the wait for a
+    /// packet, as the device may send nothing until that is seen to: at
+    /// once if the read can be dropped, otherwise with the next packet.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
         loop {
             self.shared.check_live()?;
@@ -274,8 +270,8 @@ where
             if self.shared.listeners.load(Ordering::Acquire) == 0 {
                 while let Some(refused) = self.shared.take_incoming() {
                     match refused.reject().await {
-                        // What it sent before it went is still to be
-                        // received.
+                        // The device is gone, but what it sent can still
+                        // be received.
                         Err(e) if connection_gone(&e) => {}
                         refused => refused?,
                     }
@@ -349,9 +345,9 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
-        // Here too, for a read that has its data and no packet to wait
-        // for, as the device, owed an OKAY, may never send one. Failing
-        // is a desync, which comes up once nothing is left to hand over.
+        // Here too: a read that has its data waits for no packet, and
+        // the device, owed an OKAY, may never send one. A failure here is
+        // a desync, reported once nothing is left to hand over.
         let _ = self.shared.pay().await;
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
@@ -414,9 +410,8 @@ where
         self.shared.take_incoming()
     }
 
-    /// Act on `pkt`, whatever became of what it had to answer the device
-    /// with: once the device is gone there is nobody to answer, and what
-    /// it sent before it went is still to be received.
+    /// Act on `pkt`, ignoring a failed answer if the device is gone:
+    /// there is nobody to answer, and what it sent can still be received.
     async fn dispatch(
         &mut self,
         pkt: Packet,

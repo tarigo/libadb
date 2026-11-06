@@ -32,9 +32,8 @@ where
 {
     pub(super) shared: Arc<Shared<WH>>,
     pub(super) pending: Option<PendingOpen>,
-    /// A slot reserved by `accept` before READY is on the wire. If the
-    /// future is cancelled or errors before that, `Drop` frees it —
-    /// otherwise a cancelled accept would occupy it forever.
+    /// A slot reserved by `accept` before READY is on the wire. `Drop`
+    /// frees it if the future is dropped or fails before that.
     pub(super) reserved: Option<ChannelId>,
     /// Set by the reader when the device withdraws this OPEN (a CLSE
     /// naming no local id) while the request is staged here.
@@ -80,11 +79,9 @@ where
 
         let reserved = {
             let mut chs = shared.lock_channels();
-            // Checked under the channels lock, where withdrawals are
-            // classified and handled: the flag is either already set
-            // here, or the withdrawal arrives after the slot below
-            // exists and closes it like a remote CLSE — there is no
-            // in-between where it finds neither.
+            // Under the channels lock, where withdrawals are handled: the
+            // flag is set by now, or the withdrawal comes after the slot
+            // below exists and closes it like a remote CLSE.
             if self.cancelled.load(Ordering::Relaxed) {
                 self.pending.take();
                 return Err(Error::ChannelClosed);
@@ -142,9 +139,9 @@ where
         self.answer(&Packet::refuse(remote)).await
     }
 
-    /// Send `verdict`, which settles the request, as does finding the
-    /// device gone: nobody is left to answer. Any other failure leaves
-    /// the request undecided, for `Drop` to put back.
+    /// Send `verdict`. That settles the request, as does finding the
+    /// device gone, since it needs no answer then. Any other failure
+    /// leaves the request undecided, for `Drop` to put back.
     async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<WH as ErrorType>::Error>> {
         let mut wh = self.shared.lock_write_half().await;
         let sent = send_pkt(
