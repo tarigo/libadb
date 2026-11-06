@@ -229,8 +229,7 @@ fn unreadable_interfaces_fail_only_a_named_device() {
     assert_eq!(pick(devices(), selector), Err(Fail::Interfaces));
 }
 
-/// A device its interfaces rule out never reaches `open`: whatever a
-/// backend finds wrong with an ADB interface there, as rusb finds
+/// Whatever a backend finds wrong with an ADB interface, as rusb finds
 /// missing bulk endpoints, turns the device down before it is opened
 /// and claimed.
 #[test]

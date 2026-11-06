@@ -95,7 +95,8 @@ fn a_call_is_made_again_for_a_signal_and_for_nothing_else() {
     }
 }
 
-/// On a thread of its own, as a timeout retried would never end the read.
+/// On a thread of its own, because a retried timeout would never end the
+/// read.
 #[test]
 fn a_timeout_still_ends_a_read() {
     let (host, _device) = connected();

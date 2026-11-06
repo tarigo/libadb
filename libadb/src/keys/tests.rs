@@ -962,9 +962,8 @@ mod cert {
 
     #[test]
     fn signing_the_certificate_draws_on_the_generator() {
-        // The signature is deterministic, so blinding leaves no trace in
-        // the output. What it leaves is a consumed stretch of the RNG:
-        // losing that means the private-key operation went out unmasked.
+        // As with `signing_draws_on_the_blinding_generator`, only the
+        // RNG shows that blinding ran.
         let key = AdbKey::from_pkcs8_pem(TEST_KEY_PEM, &mut test_rng(), test_name()).unwrap();
         let mut rng = test_rng();
         let before = rng.get_word_pos();
