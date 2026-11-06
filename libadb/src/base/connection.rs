@@ -346,6 +346,11 @@ where
     /// currently-granted send budget, waiting for flow-control
     /// acknowledgements between chunks.
     ///
+    /// A channel the device closed fails with [`Error::ChannelClosed`],
+    /// credit or no credit, and sends nothing more: adbd drops a WRTE
+    /// for a socket it no longer has without a word. That goes by the
+    /// CLSE having come in, so a write can still cross one on the wire.
+    ///
     /// **Not cancellation-safe.** A packet goes out as a header write
     /// followed by a payload write, and dropping the future between
     /// them leaves the device reading whatever we send next as the rest
@@ -646,11 +651,11 @@ where
         loop {
             {
                 let slot = self.slot_mut(ch)?;
-                if slot.budget().is_some() {
-                    return Ok(());
-                }
                 if slot.is_closed() {
                     return Err(Error::ChannelClosed);
+                }
+                if slot.budget().is_some() {
+                    return Ok(());
                 }
             }
 

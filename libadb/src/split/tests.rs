@@ -3181,3 +3181,49 @@ mod slot_tests {
         assert_eq!(in_use(&writer), 0);
     }
 }
+
+/// What a write to a channel the device closed comes to on a `Writer`.
+mod closed_channel_tests {
+    use crate::base::channel::Channel;
+    use crate::base::mock::{clse, now, split_one_channel_delayed_ack, sync_fail, wrte};
+    use crate::base::protocol::command::Command;
+    use crate::error::{Error, SyncError};
+    use crate::sync::{FileMode, SyncSession};
+
+    #[test]
+    fn a_write_to_a_channel_the_device_closed_fails_and_sends_nothing() {
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(4096, &[clse(1)]);
+        now(reader.dispatch_one()).unwrap();
+        let err = now(writer.write_channel(ch, b"nobody reads this")).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+        assert!(!seen.sent().iter().any(|(cmd, ..)| *cmd == Command::Write));
+    }
+
+    /// As `handle_send_file` goes: the `FAIL`, and nothing closed until
+    /// the host's `DONE`.
+    #[test]
+    fn a_failed_push_gets_the_devices_text() {
+        const TEXT: &[u8] = b"couldn't create file: Read-only file system";
+        let fail = sync_fail(TEXT);
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(4096, &[wrte(1, &fail)]);
+        now(reader.dispatch_one()).unwrap();
+
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut buf = [0u8; 256];
+        let mut sync = SyncSession::new(channel, &mut buf);
+        let err = now(sync.send("/x", FileMode(0o644), 0, b"data")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Sync(SyncError::Failed(text)) if text == TEXT),
+            "got {err:?}"
+        );
+
+        seen.feed(&clse(1));
+        now(reader.dispatch_one()).unwrap();
+        now(sync.quit()).unwrap();
+        assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    }
+}

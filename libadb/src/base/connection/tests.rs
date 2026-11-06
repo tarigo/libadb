@@ -7,9 +7,9 @@ use core::task::Poll;
 
 use super::*;
 use crate::base::mock::{
-    abandon, clse, cnxn, connected_for_select, connected_with_channel, now, stls,
-    two_channels_classic, two_channels_delayed_ack, wrte, Mock, MockError, NoAuth, Signs,
-    Withholds,
+    abandon, clse, cnxn, connected_for_select, connected_with_channel, now, okay, okay_with_budget,
+    stls, sync_fail, two_channels_classic, two_channels_delayed_ack, wrte, Mock, MockError, NoAuth,
+    Signs, Withholds,
 };
 use crate::base::protocol::command::{Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
 use crate::base::protocol::Packet;
@@ -1106,5 +1106,180 @@ mod slot_tests {
             let err = now(session.quit()).unwrap_err();
             assert_failed_with(&err, kind, conn.table.in_use(), left);
         }
+    }
+}
+
+/// What a write to a channel the device closed comes to, on the calls
+/// that make one.
+mod closed_channel_tests {
+    use super::*;
+    use crate::base::channel::Channel;
+    use crate::base::mock::{one_slot, shell_frame};
+    use crate::error::SyncError;
+    use crate::shell::v2::{FrameId, Shell};
+    use crate::sync::{FileMode, SyncFlags, SyncSession};
+
+    /// The WRTEs that went out on `ch`.
+    fn writes_on(conn: &Connection<Mock>, ch: ChannelId) -> usize {
+        conn.transport
+            .sent()
+            .iter()
+            .filter(|(cmd, local, ..)| *cmd == Command::Write && *local == ch.local_id())
+            .count()
+    }
+
+    /// The CLSE comes in on a read of the other channel, which leaves
+    /// the closed one with credit, or with the OKAY for its last write.
+    fn assert_refused(conn: &mut Connection<Mock>, a: ChannelId, b: ChannelId) {
+        let mut buf = [0u8; 8];
+        now(conn.read_channel(a, &mut buf)).unwrap();
+
+        let err = now(conn.write_channel(b, b"nobody reads this")).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+        assert_eq!(writes_on(conn, b), 0);
+    }
+
+    #[test]
+    fn a_write_to_a_channel_the_device_closed_fails_and_sends_nothing() {
+        let pushes = [clse(2), wrte(1, b"x")];
+        let (mut conn, a, b) = two_channels_delayed_ack(4096, &pushes);
+        assert_refused(&mut conn, a, b);
+
+        let (mut conn, a, b) = two_channels_classic(ConnectionConfig::new(), &pushes);
+        assert_refused(&mut conn, a, b);
+    }
+
+    /// What the device wrote before it closed the channel outlasts the
+    /// write that finds it closed.
+    #[test]
+    fn a_closed_channel_refuses_stdin_and_keeps_what_the_command_wrote() {
+        let stdout = shell_frame(FrameId::Stdout, b"out");
+        let exit = shell_frame(FrameId::Exit, &[3]);
+        let mut conn = one_slot("shell_v2", &[]);
+        let mut rx = [0u8; 64];
+        let channel = now(conn.open(b"shell,v2,raw:x\0")).unwrap();
+        let ch = channel.id;
+        now(channel.session.dispatch(wrte(1, &stdout))).unwrap();
+        now(channel.session.dispatch(wrte(1, &exit))).unwrap();
+        now(channel.session.dispatch(clse(1))).unwrap();
+
+        let mut shell = Shell::new(channel, &mut rx);
+        let err = now(shell.write_stdin(b"late")).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+        now(shell.close_stdin()).unwrap();
+        let output = now(shell.collect()).unwrap();
+        assert_eq!(
+            (output.stdout.as_slice(), output.exit_code),
+            (&b"out"[..], 3)
+        );
+        assert_eq!(writes_on(&conn, ch), 0);
+    }
+
+    const TEXT: &[u8] = b"couldn't create file: Read-only file system";
+
+    fn assert_it_is_the_devices_text(err: Error<MockError>) {
+        assert!(
+            matches!(&err, Error::Sync(SyncError::Failed(text)) if text == TEXT),
+            "got {err:?}"
+        );
+    }
+
+    /// Push `data` over `channel` to a device that fails the push, and
+    /// quit: a device that has closed the channel by then is no failure.
+    fn assert_push_fails_with_the_devices_text(
+        channel: Channel<'_, Connection<Mock>>,
+        data: &[u8],
+    ) {
+        let mut buf = [0u8; 256];
+        let mut session = SyncSession::new(channel, &mut buf);
+        let err = now(session.send("/x", FileMode(0o644), 0, data)).unwrap_err();
+        assert_it_is_the_devices_text(err);
+        now(session.quit()).unwrap();
+    }
+
+    /// As `handle_send_file` goes: the `FAIL`, nothing closed until the
+    /// host's `DONE`, and every packet up to that acknowledged.
+    #[test]
+    fn a_failed_push_gets_the_devices_text_without_delayed_ack() {
+        let fail = sync_fail(TEXT);
+        let mut conn = one_slot("", &[okay(1), wrte(1, &fail), okay(1), okay(1), clse(1)]);
+        let channel = now(conn.open(b"sync:\0")).unwrap();
+        assert_push_fails_with_the_devices_text(channel, b"data");
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    #[test]
+    fn a_failed_v2_push_gets_the_devices_text() {
+        let fail = sync_fail(TEXT);
+        let then = [okay(1), wrte(1, &fail), okay(1), okay(1), clse(1)];
+        let mut conn = one_slot("sendrecv_v2", &then);
+        let channel = now(conn.open(b"sync:\0")).unwrap();
+        let mut buf = [0u8; 256];
+        let mut session = SyncSession::new(channel, &mut buf);
+        let push = session.send_v2("/x", FileMode(0o644), 0, SyncFlags::NONE, b"data");
+        assert_it_is_the_devices_text(now(push).unwrap_err());
+        now(session.quit()).unwrap();
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    #[test]
+    fn a_failed_push_gets_the_devices_text_with_delayed_ack() {
+        let fail = sync_fail(TEXT);
+        let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, &fail), clse(1)]);
+        let channel = Channel {
+            session: &mut conn,
+            id: a,
+        };
+        assert_push_fails_with_the_devices_text(channel, b"data");
+        assert_eq!(conn.table.in_use(), 1);
+    }
+
+    /// Out of credit part way, the write itself takes the `FAIL` in on
+    /// its way to the OKAY it waits for.
+    #[test]
+    fn a_failed_push_gets_the_devices_text_when_a_write_waits_for_credit() {
+        let fail = sync_fail(TEXT);
+        let credit = okay_with_budget(1, 4096);
+        // `SEND` with its path, and two bytes of the `DATA` behind it.
+        let (mut conn, a, _) = two_channels_delayed_ack(16, &[wrte(1, &fail), credit, clse(1)]);
+        let channel = Channel {
+            session: &mut conn,
+            id: a,
+        };
+        assert_push_fails_with_the_devices_text(channel, b"data");
+        assert_eq!(conn.table.in_use(), 1);
+    }
+
+    /// With credit left the write itself would go out, and `quit` needs
+    /// nothing from a channel the device has closed but its slot.
+    #[test]
+    fn quit_on_a_channel_the_device_closed_sends_nothing_with_credit_left() {
+        let fail = sync_fail(TEXT);
+        let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, &fail), clse(1)]);
+        let channel = Channel {
+            session: &mut conn,
+            id: a,
+        };
+        let mut buf = [0u8; 256];
+        let mut session = SyncSession::new(channel, &mut buf);
+        assert_it_is_the_devices_text(now(session.recv("/x")).unwrap_err());
+        let err = now(session.stat("/y")).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+
+        now(session.quit()).unwrap();
+        assert_eq!(writes_on(&conn, a), 2, "the `RECV` and the `STAT`");
+        assert_eq!(conn.table.in_use(), 1, "the other channel's");
+    }
+
+    /// As `handle_send_link` goes on a `symlink` that fails: no waiting
+    /// for `DONE`, so the CLSE is behind the `FAIL` already. Nothing has
+    /// read that far by the time `DONE` goes out, to nobody.
+    #[test]
+    fn a_failed_link_push_gets_the_devices_text_with_the_channel_closed_behind_it() {
+        let fail = sync_fail(TEXT);
+        let mut conn = one_slot("", &[okay(1), okay(1), wrte(1, &fail), clse(1)]);
+        let channel = now(conn.open(b"sync:\0")).unwrap();
+        assert_push_fails_with_the_devices_text(channel, b"target");
+        assert_eq!(conn.table.in_use(), 0);
     }
 }

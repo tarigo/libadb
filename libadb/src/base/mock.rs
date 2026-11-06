@@ -729,6 +729,14 @@ pub(crate) fn shell_frame(id: FrameId, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// A sync `FAIL` as the device writes it.
+pub(crate) fn sync_fail(text: &[u8]) -> Vec<u8> {
+    let mut fail = b"FAIL".to_vec();
+    fail.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    fail.extend_from_slice(text);
+    fail
+}
+
 /// A connection with one open channel and one WRTE waiting to be read,
 /// with the transport configured after the handshake so that its
 /// slowness only affects the read under test.

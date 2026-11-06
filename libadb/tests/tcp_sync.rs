@@ -1,6 +1,7 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
 use libadb::error::SyncError;
+use libadb::protocol::command::{CMD_CLSE, CMD_WRTE};
 use libadb::sync::{self, FileMode, SyncFlags};
 use libadb::{Error, Feature};
 
@@ -511,6 +512,87 @@ async fn sync_fail_response_surfaces_device_message() {
 
     sync.quit().await.unwrap();
     rt::join(device).await;
+}
+}
+
+/// A device that fails a push as `handle_send_file` does: the `FAIL` as
+/// soon as it knows, then on reading what the host sends, for as long
+/// as that takes it to reach `DONE`, and only then the end of the
+/// service. From there on a WRTE reaches nobody.
+async fn fail_the_push(mut s: FakeSession, id: &[u8; 4], text: &[u8]) {
+    let mut ch = s.accept_open(b"sync:\0").await;
+    let send = ch.expect_write_ack().await;
+    assert_eq!(&send[..4], id);
+    ch.send_write(&sync_msg(b"FAIL", text.len() as u32, text))
+        .await;
+
+    let mut read = Vec::new();
+    while !read.windows(4).any(|id| id == b"DONE") {
+        let (header, payload) = ch.recv_any().await;
+        if header.command == CMD_WRTE {
+            ch.ack(payload.len() as u32).await;
+            read.extend_from_slice(&payload);
+        }
+    }
+    ch.send_close().await;
+
+    while ch.recv_any().await.0.command != CMD_CLSE {}
+}
+
+/// The text has to reach the host however its writes fall around the
+/// `FAIL`, and the session end with a `quit` that may find the device
+/// gone from the channel.
+async fn a_failed_push_gets_the_devices_text(device: FakeDevice, banner: &'static [u8], v2: bool) {
+    const TEXT: &[u8] = b"couldn't create file: Read-only file system";
+    let id = if v2 { b"SND2" } else { b"SEND" };
+    let (mut conn, device) = session(device, banner, move |s| fail_the_push(s, id, TEXT)).await;
+
+    let mut buf = [0u8; 256];
+    let mut sync = sync::open(&mut conn, &mut buf).await.unwrap();
+    let data = vec![0x5a; 4 * 1024];
+    let mode = FileMode(0o644);
+    let pushed = if v2 {
+        sync.send_v2("/x", mode, 0, SyncFlags::NONE, &data).await
+    } else {
+        sync.send("/x", mode, 0, &data).await
+    };
+    let err = pushed.unwrap_err();
+    let Error::Sync(SyncError::Failed(text)) = err else {
+        panic!("expected Sync(Failed), got {err:?}");
+    };
+    assert_eq!(text, TEXT);
+
+    sync.quit().await.unwrap();
+    rt::within("the device", rt::join(device)).await;
+}
+
+rt_test! {
+async fn sync_failed_push_gets_the_devices_text_without_delayed_ack() {
+    a_failed_push_gets_the_devices_text(FakeDevice::new(), b"host::features=", false).await;
+}
+}
+
+rt_test! {
+async fn sync_failed_push_gets_the_devices_text_with_delayed_ack() {
+    let device = FakeDevice::new()
+        .banner(b"device::features=delayed_ack".to_vec())
+        .delayed_ack(1024);
+    a_failed_push_gets_the_devices_text(device, b"host::features=delayed_ack", false).await;
+}
+}
+
+rt_test! {
+async fn sync_failed_v2_push_gets_the_devices_text_without_delayed_ack() {
+    a_failed_push_gets_the_devices_text(v2_device(), b"host::features=", true).await;
+}
+}
+
+rt_test! {
+async fn sync_failed_v2_push_gets_the_devices_text_with_delayed_ack() {
+    let device = FakeDevice::new()
+        .banner(b"device::features=sendrecv_v2,delayed_ack".to_vec())
+        .delayed_ack(1024);
+    a_failed_push_gets_the_devices_text(device, b"host::features=delayed_ack", true).await;
 }
 }
 
