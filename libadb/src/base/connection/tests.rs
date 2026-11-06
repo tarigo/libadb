@@ -1,4 +1,6 @@
-//! What a dropped write leaves behind on the wire.
+//! Tests of a `Connection`: what dropped writes and reads leave behind,
+//! acknowledgements, channels the device opens, the handshake, and what
+//! happens to a channel's slot.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -52,8 +54,8 @@ fn a_desynchronized_connection_refuses_every_operation() {
     ));
 }
 
-/// What had arrived for a channel by the time a write was given up on
-/// is the device's to have delivered: reads get it, and then the error.
+/// Bytes that arrived before the write was abandoned were delivered all
+/// the same: reads get them, and then the error.
 #[test]
 fn a_desync_leaves_what_arrived_readable() {
     let (mut conn, a, b) = two_channels_delayed_ack(
@@ -63,7 +65,7 @@ fn a_desync_leaves_what_arrived_readable() {
     let mut buf = [0u8; 32];
     now(conn.read_channel(a, &mut buf)).unwrap();
 
-    // The header goes, and the payload is what hangs.
+    // Every write hangs from here on, starting with this one's header.
     conn.transport_mut().stall_writes();
     abandon(conn.write_channel(a, b"payload-that-never-made-it"));
     assert!(matches!(
@@ -82,8 +84,8 @@ fn a_desync_leaves_what_arrived_readable() {
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
 }
 
-/// The failure of an OKAY is the connection's, whether the bytes it is
-/// for sat in the slot or came straight off the wire.
+/// A failed OKAY is a failure of the connection, whether its bytes sat
+/// in the slot or came straight off the wire.
 #[test]
 fn a_failed_okay_costs_a_read_nothing() {
     use embedded_io::ErrorKind;
@@ -117,7 +119,7 @@ fn a_failed_okay_costs_a_read_nothing() {
 }
 
 /// A write that fails because the device is gone leaves no stream to
-/// fall out of step with: the read goes on to what it sent before going.
+/// fall out of step with, so reads go on to what it sent before that.
 #[test]
 fn an_okay_to_a_device_that_is_gone_stops_no_read() {
     use embedded_io::ErrorKind;
@@ -136,8 +138,8 @@ fn an_okay_to_a_device_that_is_gone_stops_no_read() {
     ));
 }
 
-/// Without delayed ACK a packet is acknowledged as it lands, and that
-/// stops neither the read it is for nor the packets behind it.
+/// Without delayed ACK a packet is acknowledged on arrival, and a
+/// failed OKAY stops neither the read nor the packets behind it.
 #[test]
 fn a_failed_okay_for_another_channel_stops_no_read_of_what_is_left() {
     use embedded_io::ErrorKind;
@@ -168,7 +170,7 @@ fn read_to_the_end(conn: &mut Connection<Mock>, ch: ChannelId) -> (Vec<u8>, Erro
 }
 
 /// A read dropped during its OKAY has taken nothing from the slot, so
-/// the next reads come back with all of it, not past a gap.
+/// the next reads return all of it.
 #[test]
 fn a_read_dropped_writing_its_okay_leaves_no_gap() {
     let (mut conn, a, b) = two_channels_delayed_ack(4096, &[wrte(2, b"for-b"), wrte(1, b"x")]);
@@ -197,9 +199,9 @@ fn a_read_dropped_writing_the_okay_of_a_packet_it_split_leaves_no_gap() {
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
 }
 
-/// One that fits went straight to the dropped call, and there is
-/// nothing left to read past: the next read says so, rather than go
-/// back to the wire with the packet missing.
+/// A packet that fits went straight to the dropped call, so nothing is
+/// left in the slot. The next read fails, rather than go back to the
+/// wire with the packet missing.
 #[test]
 fn a_read_dropped_writing_the_okay_of_a_whole_packet_fails_the_next() {
     let (mut conn, a, _) = two_channels_delayed_ack(4096, &[wrte(1, b"for-a"), wrte(1, b"more")]);
@@ -611,11 +613,12 @@ mod incoming {
         assert_eq!(again.destination(), b"tcp:6\0");
     }
 
-    /// A device that is gone leaves nobody to answer, so a verdict that
-    /// finds that consumes the request, and a caller that carries on gets
-    /// to the packet behind it and the end of the stream, rather than be
+    /// With the device gone nobody needs an answer, so the failed
+    /// verdict consumes the request. A caller that carries on reaches
+    /// the packet behind it and the end of the stream, instead of being
     /// handed the same request for ever. Any other failure leaves the
-    /// request in the queue, behind the desync it raised.
+    /// request in the queue, but the next call fails with the desync it
+    /// raised.
     fn assert_next_call_after_failing_on(
         kind: ErrorKind,
         left: usize,
@@ -645,7 +648,8 @@ mod incoming {
         (conn, ch)
     }
 
-    /// A READY, whose slot goes back whatever becomes of the request.
+    /// The verdict is a READY, and its slot is released whatever
+    /// becomes of the request.
     #[test]
     fn an_accept_that_fails_keeps_the_request_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -660,8 +664,7 @@ mod incoming {
         }
     }
 
-    /// With no slot to give, an accept is a refusal, and goes the same
-    /// way.
+    /// With no slot free an accept is a refusal, and behaves the same.
     #[test]
     fn an_accept_with_no_slot_that_fails_keeps_the_request_unless_the_device_is_gone() {
         let queued = [open_pkt(77, 0, b"tcp:80\0"), wrte(1, b"behind it")];
@@ -678,7 +681,7 @@ mod incoming {
         }
     }
 
-    /// A refusal the caller asked for goes the same way again.
+    /// A refusal the caller asked for behaves the same.
     #[test]
     fn a_reject_that_fails_keeps_the_request_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -761,8 +764,7 @@ fn a_device_that_answers_the_handshake_with_stls_says_it_wants_tls() {
     );
 }
 
-/// The banner's property cap is the config's: one property past it
-/// fails the handshake, and exactly as many connect.
+/// One property past the cap fails; exactly as many connect.
 #[test]
 fn the_banner_property_cap_comes_from_the_config() {
     let banner = b"device::ro.product.name=a;ro.product.model=b;features=shell_v2";
@@ -957,7 +959,7 @@ fn a_handshake_packet_after_the_handshake_is_dropped_and_the_session_goes_on() {
     assert_eq!(&buf[..n], b"after");
 }
 
-/// Nothing frees a slot but a close, a `Channel` having no `Drop`, so
+/// A `Channel` has no `Drop`, so only a close frees a slot, and
 /// whatever opened a channel has to close it on every way out.
 mod slot_tests {
     use super::*;
@@ -970,10 +972,10 @@ mod slot_tests {
     /// takes a header and a payload.
     const FIRST_WRITE: usize = 4;
 
-    /// What is left of a slot after `err`, the failure of the first
-    /// write on the channel: nothing, unless that desynchronized the
-    /// connection, on which no close gets anywhere and no later call
-    /// gets as far as wanting the slot.
+    /// Check the slot after `err`, the failure of the first write on
+    /// the channel: it is free, unless that failure desynchronized the
+    /// connection. No close gets through then, and no later call gets
+    /// far enough to want the slot.
     fn assert_failed_with(err: &Error<MockError>, kind: ErrorKind, in_use: usize, left: usize) {
         assert!(
             matches!(err, Error::Io(e) if embedded_io::Error::kind(e) == kind),
@@ -1021,9 +1023,9 @@ mod slot_tests {
         assert_eq!(conn.table.in_use(), 0);
     }
 
-    /// The command finished and said so: what comes after that has no
-    /// bearing on its output. The frames land ahead of the read, for
-    /// their OKAYs to get out before the writes start failing.
+    /// The command finished, so what comes after has no bearing on its
+    /// output. The frames are dispatched before the writes start
+    /// failing, so that their OKAYs get out.
     #[test]
     fn collect_keeps_a_finished_commands_output_when_its_close_fails() {
         for (kind, _) in FAILED_WRITES {
@@ -1083,8 +1085,8 @@ mod slot_tests {
         }
     }
 
-    /// With the device's CLSE in, and its OKAY for our last write never
-    /// coming, `QUIT` has nowhere to go.
+    /// With the device's CLSE received and its OKAY for our last write
+    /// never coming, `QUIT` has nowhere to go.
     #[test]
     fn quit_on_a_channel_the_device_closed_is_no_failure() {
         let mut conn = one_slot("", &[clse(1)]);
@@ -1140,8 +1142,8 @@ mod slot_tests {
     }
 
     /// Nothing reaches the device after a failure that leaves half a
-    /// packet behind it, however many channels are left to close: the
-    /// close that failed is the last one that gets anywhere.
+    /// packet behind, so the close that failed is the last to get
+    /// anywhere, however many channels are left.
     #[test]
     fn a_close_that_desynchronizes_leaves_the_rest_to_fail_with_that() {
         let (mut conn, a, b) = two_channels_delayed_ack(4096, &[]);
@@ -1154,8 +1156,7 @@ mod slot_tests {
     }
 }
 
-/// What a write to a channel the device closed comes to, on the calls
-/// that make one.
+/// What each call that writes does on a channel the device closed.
 mod closed_channel_tests {
     use super::*;
     use crate::base::channel::Channel;
@@ -1173,8 +1174,8 @@ mod closed_channel_tests {
             .count()
     }
 
-    /// The CLSE comes in on a read of the other channel, which leaves
-    /// the closed one with credit, or with the OKAY for its last write.
+    /// The CLSE arrives during a read of the other channel, so the
+    /// closed channel still has credit, or the OKAY for its last write.
     fn assert_refused(conn: &mut Connection<Mock>, a: ChannelId, b: ChannelId) {
         let mut buf = [0u8; 8];
         now(conn.read_channel(a, &mut buf)).unwrap();
@@ -1194,8 +1195,6 @@ mod closed_channel_tests {
         assert_refused(&mut conn, a, b);
     }
 
-    /// What the device wrote before it closed the channel outlasts the
-    /// write that finds it closed.
     #[test]
     fn a_closed_channel_refuses_stdin_and_keeps_what_the_command_wrote() {
         let stdout = shell_frame(FrameId::Stdout, b"out");
@@ -1242,8 +1241,9 @@ mod closed_channel_tests {
         now(session.quit()).unwrap();
     }
 
-    /// As `handle_send_file` goes: the `FAIL`, nothing closed until the
-    /// host's `DONE`, and every packet up to that acknowledged.
+    /// This follows `handle_send_file`: the `FAIL` comes first, nothing
+    /// is closed until the host's `DONE`, and every packet up to that
+    /// is acknowledged.
     #[test]
     fn a_failed_push_gets_the_devices_text_without_delayed_ack() {
         let fail = sync_fail(TEXT);
@@ -1279,8 +1279,8 @@ mod closed_channel_tests {
         assert_eq!(conn.table.in_use(), 1);
     }
 
-    /// Out of credit part way, the write itself takes the `FAIL` in on
-    /// its way to the OKAY it waits for.
+    /// Out of credit part way, the write itself receives the `FAIL`
+    /// while it waits for an OKAY.
     #[test]
     fn a_failed_push_gets_the_devices_text_when_a_write_waits_for_credit() {
         let fail = sync_fail(TEXT);
@@ -1295,8 +1295,8 @@ mod closed_channel_tests {
         assert_eq!(conn.table.in_use(), 1);
     }
 
-    /// With credit left the write itself would go out, and `quit` needs
-    /// nothing from a channel the device has closed but its slot.
+    /// With credit left the `QUIT` itself would go out, but all `quit`
+    /// needs from a channel the device has closed is its slot.
     #[test]
     fn quit_on_a_channel_the_device_closed_sends_nothing_with_credit_left() {
         let fail = sync_fail(TEXT);
@@ -1316,9 +1316,10 @@ mod closed_channel_tests {
         assert_eq!(conn.table.in_use(), 1, "the other channel's");
     }
 
-    /// As `handle_send_link` goes on a `symlink` that fails: no waiting
-    /// for `DONE`, so the CLSE is behind the `FAIL` already. Nothing has
-    /// read that far by the time `DONE` goes out, to nobody.
+    /// This follows `handle_send_link` on a `symlink` that fails: it
+    /// does not wait for `DONE`, so the CLSE is already behind the
+    /// `FAIL`. Nothing has read that far when `DONE` goes out, and
+    /// nothing on the device reads it.
     #[test]
     fn a_failed_link_push_gets_the_devices_text_with_the_channel_closed_behind_it() {
         let fail = sync_fail(TEXT);

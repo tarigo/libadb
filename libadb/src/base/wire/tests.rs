@@ -304,9 +304,9 @@ fn a_header_read_takes_in_all_a_stream_has_ready() {
     assert_eq!(t.reads, 1);
 }
 
-/// The one thing a stream gives up to a read that stops at the packet:
-/// finishing a split packet no longer brings the next one along, which
-/// then takes a read of its own.
+/// The cost of a read that stops at the packet: finishing a split
+/// packet no longer brings the next one along, so that one takes a read
+/// of its own.
 #[test]
 fn finishing_a_split_packet_costs_a_stream_one_read() {
     let mut wire = wire_packet(100);
@@ -322,9 +322,9 @@ fn finishing_a_split_packet_costs_a_stream_one_read() {
     assert_eq!(t.reads, 4);
 }
 
-/// A read resumed in mid-packet stages what the packet lacks, by the
-/// rule the read itself goes by, rather than zero a stretch it will not
-/// fill.
+/// A read resumed in mid-packet stages only what the packet lacks, the
+/// limit the read itself keeps to, rather than zero a stretch it will
+/// not fill.
 #[test]
 fn the_rest_of_a_packet_is_staged_to_its_length() {
     let wire = wire_packet(100);
@@ -450,8 +450,8 @@ impl Write for BulkIn {
     }
 }
 
-/// What `fut` comes to at its first poll, or `None` if it parks: on a
-/// [`BulkIn`] that means waiting for a transfer that is not coming.
+/// What `fut` returns at its first poll, or `None` if it parks, which
+/// on a [`BulkIn`] means waiting for a transfer that is not coming.
 fn poll_once<F: Future>(fut: F) -> Option<F::Output> {
     let mut fut = pin!(fut);
     let mut cx = Context::from_waker(Waker::noop());
@@ -536,8 +536,8 @@ fn no_read_asks_past_the_packet_once_its_header_is_in() {
     }
 }
 
-/// A short packet can end a transfer in mid-payload. The request after
-/// it goes by what is left, whether it reads into what the header read
+/// A short packet can end a transfer in mid-payload. The next request
+/// asks for what is left, whether it reads into what the header read
 /// staged or into a stretch of its own.
 #[test]
 fn a_payload_that_comes_in_pieces_is_asked_for_by_what_is_left() {

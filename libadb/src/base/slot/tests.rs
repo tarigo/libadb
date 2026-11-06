@@ -24,9 +24,9 @@ fn accept(slot: &mut ChannelSlot) {
         .unwrap();
 }
 
-/// Data the device wrote ahead of its READY cannot be read until the
-/// READY names the end its OKAY goes to; the first read after it takes
-/// the data and acknowledges all of it, leaving nothing owed.
+/// Until the READY names the device's end an OKAY has nowhere to go, so
+/// the data stays buffered. The first read after it takes the data and
+/// acknowledges all of it.
 #[test]
 fn a_write_before_the_ready_is_read_and_acknowledged_only_after_it() {
     for ack in [AckMode::Delayed, AckMode::Classic] {
@@ -70,8 +70,7 @@ fn a_write_before_a_refusal_is_never_handed_out() {
     ));
 }
 
-/// Settling hands the OKAY over and leaves the bytes where they are, so
-/// a read dropped while that OKAY is written has taken nothing.
+/// A read dropped while this OKAY is written has taken nothing.
 #[test]
 fn settling_a_take_leaves_the_bytes_in_the_buffer() {
     let mut slot = opening(AckMode::Delayed);
@@ -118,8 +117,8 @@ fn a_settled_take_is_gone_as_far_as_the_watermark_goes() {
     ));
 }
 
-/// What landed behind the bytes settled has an OKAY of its own to come:
-/// taken along with them, it would leave the count with none sent.
+/// Bytes that landed behind the settled ones owe their own OKAY. Taken
+/// along with them, they would stay counted with no OKAY sent.
 #[test]
 fn a_take_stops_at_what_was_settled() {
     let mut slot = opening(AckMode::Delayed);
@@ -139,9 +138,9 @@ fn a_take_stops_at_what_was_settled() {
     assert_eq!((slot.buffered(), slot.unacked()), (0, 0));
 }
 
-/// Two reads of one channel: the second finds bytes whose OKAY the first
-/// is writing. They owe nothing more, and go to whichever read gets
-/// there first, in order, and only they do.
+/// Two reads of one channel: the second finds bytes whose OKAY the
+/// first is writing. They owe nothing more, so whichever read comes
+/// first takes them, in order, and nothing behind them.
 #[test]
 fn settled_bytes_owe_a_second_read_nothing() {
     let mut slot = opening(AckMode::Delayed);
@@ -160,7 +159,7 @@ fn settled_bytes_owe_a_second_read_nothing() {
 }
 
 /// adbd has dropped the socket by the time its CLSE arrives, so what it
-/// sent before that is read for nothing but the bytes.
+/// sent before that is read without an OKAY.
 #[test]
 fn a_channel_the_device_closed_owes_no_okay() {
     for ack in [AckMode::Delayed, AckMode::Classic] {

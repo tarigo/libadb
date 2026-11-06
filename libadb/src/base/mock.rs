@@ -46,8 +46,8 @@ pub(crate) const FAILED_WRITES: [(ErrorKind, usize); 6] = [
     (ErrorKind::Other, 1),
 ];
 
-/// A transport whose every operation completes at once, except for one
-/// write that never does.
+/// A transport whose every operation completes at once, unless a test
+/// asks it to stall, fail or park.
 pub(crate) struct Mock {
     inbound: VecDeque<u8>,
     writes: Vec<Vec<u8>>,
@@ -60,8 +60,6 @@ pub(crate) struct Mock {
     stall_close_to: Option<u32>,
     /// What the next read fails with, ahead of anything queued.
     read_failure: Option<ErrorKind>,
-    /// Have a read with nothing to hand back wait for more, rather than
-    /// report the end of the stream.
     parks_when_drained: bool,
     /// The read waiting for more, to wake once there is some.
     parked_read: Option<Waker>,
@@ -123,9 +121,9 @@ impl Mock {
     }
 
     /// Stall the write of a CLSE to the device's end `remote`, and let
-    /// everything else through: no socket does this, but it tells a
-    /// call that writes that packet from one that does not, which a
-    /// transport stalled for good cannot.
+    /// everything else through. No socket does this, but it tells a
+    /// call that writes that CLSE from one that does not, which
+    /// stalling every write cannot.
     #[cfg(feature = "split")]
     pub(crate) fn stall_closes_to(&mut self, remote: u32) -> &mut Self {
         self.stall_close_to = Some(remote);
@@ -329,46 +327,34 @@ impl SharedMock {
         self.lock().feed(pkt);
     }
 
-    /// Fail every write from now on with `kind`.
     pub(crate) fn fail_writes(&self, kind: ErrorKind) {
         self.lock().fail_writes(kind);
     }
 
-    /// Queue `bytes` as they are, for what [`feed`](Self::feed) would not
-    /// encode.
     pub(crate) fn feed_bytes(&self, bytes: &[u8]) {
         self.lock().feed_bytes(bytes);
     }
 
-    /// Fail the next read with `kind`, ahead of anything queued.
     pub(crate) fn fail_next_read(&self, kind: ErrorKind) {
         self.lock().fail_next_read(kind);
     }
 
-    /// Have a read with nothing to hand back wait for more, rather than
-    /// report the end of the stream.
     pub(crate) fn parks_when_drained(&self) {
         self.lock().parks_when_drained();
     }
 
-    /// End the stream, for a read waiting for more.
     pub(crate) fn hang_up(&self) {
         self.lock().hang_up();
     }
 
-    /// Stall every write from now on.
     pub(crate) fn stall_writes(&self) {
         self.lock().stall_writes();
     }
 
-    /// Park the next `n` writes once each before they go through, so
-    /// that something can happen with one in flight.
     pub(crate) fn slow_writes(&self, n: usize) {
         self.lock().slow_writes(n);
     }
 
-    /// Stall the write of a CLSE to the device's end `remote`, and let
-    /// everything else through.
     pub(crate) fn stall_closes_to(&self, remote: u32) {
         self.lock().stall_closes_to(remote);
     }
