@@ -68,9 +68,7 @@ pub async fn exec<S: Session>(
     }
 
     let channel = shell_v2::open_argv(session, PROGRAM, args, rx).await?;
-    let mut shell = Shell::new(channel, rx);
-    shell.close_stdin().await?;
-    Ok(shell.collect().await?.stdout)
+    Ok(Shell::new(channel, rx).run_to_exit().await?.stdout)
 }
 
 /// Open a streaming `cmd` session.

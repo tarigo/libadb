@@ -962,7 +962,25 @@ fn a_handshake_packet_after_the_handshake_is_dropped_and_the_session_goes_on() {
 mod slot_tests {
     use super::*;
     use crate::base::mock::{one_slot, shell_frame, FAILED_WRITES};
-    use crate::shell::v2::{CommandOutput, FrameId, Shell};
+    use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell, WindowSize};
+    use crate::{cmd, logcat};
+    use embedded_io::ErrorKind;
+
+    /// The first write past the handshake and one OPEN, each of which
+    /// takes a header and a payload.
+    const FIRST_WRITE: usize = 4;
+
+    /// What is left of a slot after `err`, the failure of the first
+    /// write on the channel: nothing, unless that desynchronized the
+    /// connection, on which no close gets anywhere and no later call
+    /// gets as far as wanting the slot.
+    fn assert_failed_with(err: &Error<MockError>, kind: ErrorKind, in_use: usize, left: usize) {
+        assert!(
+            matches!(err, Error::Io(e) if embedded_io::Error::kind(e) == kind),
+            "{kind:?}: {err:?}"
+        );
+        assert_eq!(in_use, left, "{kind:?}");
+    }
 
     /// `collect` on a shell over a connection of one slot, whose device
     /// follows up its READY with `then`.
@@ -1025,6 +1043,42 @@ mod slot_tests {
             assert_eq!(output.stdout, b"out", "{kind:?}");
             assert_eq!(output.stderr, b"err", "{kind:?}");
             assert_eq!(output.exit_code, 7, "{kind:?}");
+        }
+    }
+
+    type OneShot = fn(&mut Connection<Mock>, &mut [u8]) -> Result<(), Error<MockError>>;
+
+    /// The calls that close a command's stdin for it and collect what it
+    /// wrote.
+    const ONE_SHOTS: [OneShot; 3] = [
+        |conn, rx| now(shell_v2::exec(conn, "x", rx)).map(drop),
+        |conn, rx| now(cmd::exec(conn, &["x"], rx)).map(drop),
+        |conn, rx| now(logcat::exec_text(conn, &["-d"], rx)).map(drop),
+    ];
+
+    #[test]
+    fn a_one_shot_gives_the_slot_back_when_close_stdin_fails() {
+        for one_shot in ONE_SHOTS {
+            for (kind, left) in FAILED_WRITES {
+                let mut conn = one_slot("shell_v2", &[]);
+                conn.transport.fail_write(FIRST_WRITE, kind);
+                let mut rx = [0u8; 64];
+                let err = one_shot(&mut conn, &mut rx).unwrap_err();
+                assert_failed_with(&err, kind, conn.table.in_use(), left);
+            }
+        }
+    }
+
+    #[test]
+    fn open_interactive_gives_the_slot_back_when_the_window_size_fails() {
+        for (kind, left) in FAILED_WRITES {
+            let mut conn = one_slot("shell_v2", &[]);
+            conn.transport.fail_write(FIRST_WRITE, kind);
+            let mut rx = [0u8; 64];
+            let size = Some(WindowSize { rows: 24, cols: 80 });
+            let opened = shell_v2::open_interactive(&mut conn, "", None, size, &mut rx);
+            let err = now(opened).map(drop).unwrap_err();
+            assert_failed_with(&err, kind, conn.table.in_use(), left);
         }
     }
 }

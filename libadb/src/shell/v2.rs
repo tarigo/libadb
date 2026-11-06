@@ -552,6 +552,17 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
         read
     }
 
+    /// What a one-shot does with the shell it opened: close stdin, then
+    /// [`collect`](Self::collect). A `CLOSE_STDIN` that fails ends it
+    /// there, the channel closed all the same.
+    pub(crate) async fn run_to_exit(mut self) -> Result<CommandOutput, Error<S::IoError>> {
+        if let Err(e) = self.close_stdin().await {
+            let _ = self.close().await;
+            return Err(e);
+        }
+        self.collect().await
+    }
+
     /// Close the underlying channel without consuming any further frames.
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
         self.channel.close().await
@@ -589,7 +600,8 @@ pub async fn open<'a, 'b, S: Session>(
 /// * `window_size` — if `Some`, a
 ///   [`WindowSizeChange`](FrameId::WindowSizeChange) frame is sent
 ///   right after the channel opens so the device PTY has
-///   the correct dimensions from the start.
+///   the correct dimensions from the start. If that fails, the channel
+///   is closed again and the failure comes back.
 /// * `rx` — caller-owned receive buffer; see [`Shell::new`] for
 ///   sizing advice.
 ///
@@ -609,7 +621,10 @@ pub async fn open_interactive<'a, 'b, S: Session>(
     let channel = session.open(dest.as_bytes()).await?;
     let mut shell = Shell::new(channel, rx);
     if let Some(size) = window_size {
-        shell.set_window_size(size).await?;
+        if let Err(e) = shell.set_window_size(size).await {
+            let _ = shell.close().await;
+            return Err(e);
+        }
     }
     Ok(shell)
 }
@@ -618,9 +633,9 @@ pub async fn open_interactive<'a, 'b, S: Session>(
 /// stderr and the exit code.
 ///
 /// High-level convenience: opens a `shell,v2,raw:` channel, closes
-/// stdin immediately, drains all output frames and closes the channel.
-/// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
-/// details.
+/// stdin immediately, drains all output frames and closes the channel,
+/// on every way out once it is open. `rx` is the caller-owned receive
+/// buffer — see [`Shell::new`] for details.
 ///
 /// `command` is shell source and reaches the device verbatim, so
 /// metacharacters in it keep their meaning and anything interpolated
@@ -632,9 +647,7 @@ pub async fn exec<S: Session>(
     command: &str,
     rx: &mut [u8],
 ) -> Result<CommandOutput, Error<S::IoError>> {
-    let mut shell = open(session, command, rx).await?;
-    shell.close_stdin().await?;
-    shell.collect().await
+    open(session, command, rx).await?.run_to_exit().await
 }
 
 /// Write `shell,v2,raw:<prefix> <args…>\0` into `buf`: `prefix` as it

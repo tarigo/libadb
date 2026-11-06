@@ -2933,15 +2933,23 @@ mod backpressure_tests {
 /// Nothing frees a slot but a close, a `Channel` having no `Drop`, so
 /// whatever opened a channel has to close it on every way out.
 mod slot_tests {
+    use alloc::boxed::Box;
+    use core::convert::Infallible;
+    use core::future::Future;
+    use core::pin::{pin, Pin};
+    use core::task::{Context, Poll, Waker};
+
     use crate::base::channel::{Channel, ChannelId};
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
     use crate::base::mock::{
-        clse, now, shell_frame, split_one_channel_delayed_ack, split_with_channel, wrte, MockError,
-        SharedMock, FAILED_WRITES,
+        clse, cnxn_with, now, okay_with_budget, shell_frame, split_one_channel_delayed_ack,
+        split_with_channel, wrte, Mock, MockError, NoAuth, SharedMock, FAILED_WRITES,
     };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
     use crate::error::{Error, ProtocolError};
-    use crate::shell::v2::{CommandOutput, FrameId, Shell};
+    use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell, WindowSize};
+    use crate::{cmd, logcat};
 
     use super::{Reader, Writer};
 
@@ -3054,5 +3062,92 @@ mod slot_tests {
             assert_eq!(output.stdout, b"out", "{kind:?}");
             assert_eq!(output.exit_code, 7, "{kind:?}");
         }
+    }
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// A connection with nothing open yet, and the `run` that dispatches
+    /// `answer` once a call has sent the OPEN it is for.
+    #[allow(clippy::type_complexity)]
+    fn dispatched(
+        answer: &[Packet],
+    ) -> (
+        Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
+        Writer<SharedMock>,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2,delayed_ack"));
+        for pkt in answer {
+            mock.feed(pkt);
+        }
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Raw(b"host::features=shell_v2,delayed_ack"),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (reader, writer) = conn.split().unwrap();
+        seen.parks_when_drained();
+        (Box::pin(reader.run()), writer)
+    }
+
+    /// Poll `fut` and `run` in turn until `fut` finishes.
+    fn driven<R: Future + ?Sized, F: Future>(run: &mut Pin<Box<R>>, fut: F) -> F::Output {
+        let mut fut = pin!(fut);
+        for _ in 0..64 {
+            if let Poll::Ready(output) = poll_once(fut.as_mut()) {
+                return output;
+            }
+            assert!(poll_once(run.as_mut()).is_pending(), "run ended");
+        }
+        panic!("the call never finished");
+    }
+
+    type OneShot = for<'a> fn(
+        &'a mut Writer<SharedMock>,
+        &'a mut [u8],
+    )
+        -> Pin<Box<dyn Future<Output = Result<(), Error<MockError>>> + 'a>>;
+
+    /// The calls that close a command's stdin for it and collect what it
+    /// wrote.
+    const ONE_SHOTS: [OneShot; 3] = [
+        |writer, rx| Box::pin(async { shell_v2::exec(writer, "x", rx).await.map(drop) }),
+        |writer, rx| Box::pin(async { cmd::exec(writer, &["x"], rx).await.map(drop) }),
+        |writer, rx| Box::pin(async { logcat::exec_text(writer, &["-d"], rx).await.map(drop) }),
+    ];
+
+    /// The fault closes the channel for the first write on it, which
+    /// leaves the device nothing to do with the close.
+    #[test]
+    fn a_one_shot_gives_the_slot_back_when_close_stdin_fails() {
+        for one_shot in ONE_SHOTS {
+            let (mut run, mut writer) = dispatched(&[okay_with_budget(1, 4096), fault()]);
+            let mut rx = [0u8; 64];
+            let err = driven(&mut run, one_shot(&mut writer, &mut rx)).unwrap_err();
+            assert!(
+                matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+                "got {err:?}"
+            );
+            assert_eq!(in_use(&writer), 0);
+        }
+    }
+
+    #[test]
+    fn open_interactive_gives_the_slot_back_when_the_window_size_fails() {
+        let (mut run, mut writer) = dispatched(&[okay_with_budget(1, 4096), fault()]);
+        let mut rx = [0u8; 64];
+        let size = Some(WindowSize { rows: 24, cols: 80 });
+        let opened = shell_v2::open_interactive(&mut writer, "", None, size, &mut rx);
+        let err = driven(&mut run, async { opened.await.map(drop) }).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+            "got {err:?}"
+        );
+        assert_eq!(in_use(&writer), 0);
     }
 }

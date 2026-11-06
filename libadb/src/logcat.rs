@@ -365,7 +365,5 @@ pub async fn exec_text<S: Session>(
     rx: &mut [u8],
 ) -> Result<CommandOutput, Error<S::IoError>> {
     let channel = shell_v2::open_argv(session, b"logcat", args, rx).await?;
-    let mut shell = Shell::new(channel, rx);
-    shell.close_stdin().await?;
-    shell.collect().await
+    Shell::new(channel, rx).run_to_exit().await
 }

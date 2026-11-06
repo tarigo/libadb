@@ -54,6 +54,8 @@ pub(crate) struct Mock {
     stall_write: Option<usize>,
     /// What every write fails with, once one has been asked for.
     write_failure: Option<ErrorKind>,
+    /// The one write that fails, by index, and what with.
+    failing_write: Option<(usize, ErrorKind)>,
     /// The device's end a CLSE's header stalls on, if any does.
     stall_close_to: Option<u32>,
     /// What the next read fails with, ahead of anything queued.
@@ -80,6 +82,7 @@ impl Mock {
             writes: Vec::new(),
             stall_write: None,
             write_failure: None,
+            failing_write: None,
             stall_close_to: None,
             read_failure: None,
             parks_when_drained: false,
@@ -95,6 +98,13 @@ impl Mock {
     /// Fail every write from now on with `kind`.
     pub(crate) fn fail_writes(&mut self, kind: ErrorKind) -> &mut Self {
         self.write_failure = Some(kind);
+        self
+    }
+
+    /// Fail the write with this index with `kind`, counting from the
+    /// first one the transport ever sees, and let the next one through.
+    pub(crate) fn fail_write(&mut self, index: usize, kind: ErrorKind) -> &mut Self {
+        self.failing_write = Some((index, kind));
         self
     }
 
@@ -240,6 +250,12 @@ impl Mock {
     fn push(&mut self, buf: &[u8]) -> Result<usize, MockError> {
         if let Some(kind) = self.write_failure {
             return Err(MockError(kind));
+        }
+        if let Some((index, kind)) = self.failing_write {
+            if index == self.writes.len() {
+                self.failing_write = None;
+                return Err(MockError(kind));
+            }
         }
         self.writes.push(buf.to_vec());
         Ok(buf.len())
