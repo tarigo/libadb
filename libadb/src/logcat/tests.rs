@@ -151,7 +151,8 @@ fn each_buffer_decodes_in_its_own_format() {
     for lid in 0..=8 {
         let data = make_v4_entry(1, 1, 0, 0, lid, 0, &payload);
         let (entry, _) = parse_entry(&data).unwrap().unwrap();
-        assert_eq!(u32::from(entry.log_id), lid);
+        assert_eq!(entry.log_id.number(), lid);
+        assert_eq!(entry.log_id.is_text(), text.contains(&lid), "{lid}");
         let got = (entry.priority, &entry.tag[..], &entry.message[..]);
         let want = if text.contains(&lid) {
             (Priority::Info, &b"Tag"[..], &b"msg"[..])
@@ -243,13 +244,21 @@ fn log_id_numbers_round_trip() {
     ];
     for (id, number) in known {
         assert_eq!(LogId::from(number), id, "{number}");
+        assert_eq!(id.number(), number, "{id}");
         assert_eq!(u32::from(id), number, "{id}");
     }
     for number in [8, u32::MAX] {
         let id = LogId::from(number);
         assert!(matches!(id, LogId::Unknown(_)), "{number}: {id:?}");
+        assert_eq!(id.number(), number);
         assert_eq!(u32::from(id), number);
     }
+}
+
+#[test]
+fn a_buffer_number_and_format_can_be_read_in_a_const() {
+    const KERNEL: (u32, bool) = (LogId::Kernel.number(), LogId::Kernel.is_text());
+    assert_eq!(KERNEL, (7, true));
 }
 
 #[test]

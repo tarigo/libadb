@@ -91,9 +91,20 @@ macro_rules! log_ids {
         }
 
         impl LogId {
-            /// Whether this buffer's entries are `[priority][tag\0][message]`
-            /// text.
-            fn is_text(self) -> bool {
+            /// The buffer's number, as an entry's header carries it.
+            pub const fn number(self) -> u32 {
+                match self {
+                    $(Self::$variant => $number,)*
+                    Self::Unknown(UnknownLogId(number)) => number,
+                }
+            }
+
+            /// Whether this buffer's entries are text,
+            /// `[priority][tag\0][message]`, which [`LogEntry`] splits into
+            /// priority, tag and message. Entries from other buffers,
+            /// [`Unknown`](Self::Unknown) ones included, keep their whole
+            /// payload in [`LogEntry::message`].
+            pub const fn is_text(self) -> bool {
                 match self {
                     $(Self::$variant => log_ids!(@text $format),)*
                     Self::Unknown(_) => false,
@@ -106,15 +117,6 @@ macro_rules! log_ids {
                 match number {
                     $($number => Self::$variant,)*
                     _ => Self::Unknown(UnknownLogId(number)),
-                }
-            }
-        }
-
-        impl From<LogId> for u32 {
-            fn from(id: LogId) -> Self {
-                match id {
-                    $(LogId::$variant => $number,)*
-                    LogId::Unknown(UnknownLogId(other)) => other,
                 }
             }
         }
@@ -140,8 +142,8 @@ log_ids! {
     /// [`Stats`](Self::Stats) and kernel entries as
     /// [`Security`](Self::Security), with their payload left raw.
     ///
-    /// `LogId::from` turns a buffer number into its id, and `u32::from`
-    /// gives the number back.
+    /// `LogId::from` turns a buffer number into its id, and
+    /// [`number`](Self::number) gives the number back.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum LogId {
@@ -154,15 +156,15 @@ log_ids! {
         Security = 6, "security", binary;
         Kernel = 7, "kernel", text;
         /// A buffer this version of libadb does not know, such as one a
-        /// newer Android added. Compare `u32::from(id)` rather than this
-        /// variant: a later libadb may name the buffer.
+        /// newer Android added. Compare [`number`](LogId::number) rather
+        /// than this variant: a later libadb may name the buffer.
         ///
         /// ```
         /// use libadb::logcat::LogId;
         ///
         /// let id = LogId::from(8);
         /// assert!(matches!(id, LogId::Unknown(_)));
-        /// assert_eq!(u32::from(id), 8);
+        /// assert_eq!(id.number(), 8);
         /// ```
         ///
         /// The number inside is private, so a known number cannot pose as an
@@ -180,6 +182,12 @@ log_ids! {
 /// The number of a buffer behind [`LogId::Unknown`], kept private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnknownLogId(u32);
+
+impl From<LogId> for u32 {
+    fn from(id: LogId) -> Self {
+        id.number()
+    }
+}
 
 /// A parsed binary log entry.
 ///
