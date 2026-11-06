@@ -1,5 +1,5 @@
 //! A slot's receive-side accounting around the READY that names the
-//! device's end.
+//! device's end, and the credit it may send on.
 
 use core::convert::Infallible;
 
@@ -208,4 +208,28 @@ fn a_channel_the_device_closed_owes_no_okay() {
             Err(Error::ChannelClosed)
         ));
     }
+}
+
+#[test]
+fn a_grant_past_the_largest_budget_saturates_it() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+    slot.send_budget = i64::MAX - 1;
+
+    slot.apply_ready(&100u32.to_le_bytes()).unwrap();
+    assert_eq!(slot.send_budget, i64::MAX);
+    assert_eq!(slot.try_reserve_send(100), Some(100));
+    assert_eq!(slot.send_budget, i64::MAX - 100);
+}
+
+/// On a 32-bit target the budget is wider than a `usize`, and a write
+/// may spend all a `usize` holds of it.
+#[test]
+fn a_budget_wider_than_a_usize_is_not_cut_short() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+    slot.send_budget = 1 << 32;
+
+    assert_eq!(slot.try_reserve_send(100), Some(100));
+    assert_eq!(slot.send_budget, (1 << 32) - 100);
 }

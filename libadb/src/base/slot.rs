@@ -18,6 +18,10 @@ pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
     }
 }
 
+fn credit_of(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PendingAck {
     pub(crate) ids: ChannelIds,
@@ -135,7 +139,10 @@ impl ChannelSlot {
 
     pub fn apply_ready(&mut self, payload: &[u8]) -> Result<(), ProtocolError> {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget += parse_ready_credit(payload)? as i64,
+            AckMode::Delayed => {
+                let credit = i64::from(parse_ready_credit(payload)?);
+                self.send_budget = self.send_budget.saturating_add(credit);
+            }
             AckMode::Classic => self.wrte_acked = true,
         }
         Ok(())
@@ -236,14 +243,15 @@ impl ChannelSlot {
 
     pub fn budget(&self) -> Option<usize> {
         match self.policy.ack {
-            AckMode::Delayed => (self.send_budget > 0).then_some(self.send_budget as usize),
+            AckMode::Delayed => (self.send_budget > 0)
+                .then(|| usize::try_from(self.send_budget).unwrap_or(usize::MAX)),
             AckMode::Classic => self.wrte_acked.then_some(usize::MAX),
         }
     }
 
     pub fn spend(&mut self, n: usize) {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget -= n as i64,
+            AckMode::Delayed => self.send_budget = self.send_budget.saturating_sub(credit_of(n)),
             AckMode::Classic => self.wrte_acked = false,
         }
     }
@@ -267,7 +275,7 @@ impl ChannelSlot {
 
     pub fn refund(&mut self, n: usize) {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget += n as i64,
+            AckMode::Delayed => self.send_budget = self.send_budget.saturating_add(credit_of(n)),
             AckMode::Classic => self.wrte_acked = true,
         }
     }
