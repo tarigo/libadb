@@ -2,27 +2,61 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-/// Log priority level.
+/// Log priority level, the first byte of a text entry.
 ///
-/// Matches the `android_LogPriority` enum in AOSP
-/// (`system/logging/liblog/include/android/log.h`).
+/// [`Unknown`](Self::Unknown) to [`Silent`](Self::Silent) are the
+/// `android_LogPriority` values of liblog's `android/log.h`, 0 to 8, and
+/// [`Other`](Self::Other) keeps any byte past them. `Priority::from`
+/// turns a byte into its priority and `u8::from` gives the byte back;
+/// priorities order as their bytes do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(u8)]
 pub enum Priority {
-    Unknown = 0,
-    Default = 1,
-    Verbose = 2,
-    Debug = 3,
-    Info = 4,
-    Warn = 5,
-    Error = 6,
-    Fatal = 7,
-    Silent = 8,
+    /// Priority 0, `ANDROID_LOG_UNKNOWN`.
+    Unknown,
+    /// Priority 1, `ANDROID_LOG_DEFAULT`.
+    Default,
+    /// Priority 2, `ANDROID_LOG_VERBOSE`.
+    Verbose,
+    /// Priority 3, `ANDROID_LOG_DEBUG`.
+    Debug,
+    /// Priority 4, `ANDROID_LOG_INFO`.
+    Info,
+    /// Priority 5, `ANDROID_LOG_WARN`.
+    Warn,
+    /// Priority 6, `ANDROID_LOG_ERROR`.
+    Error,
+    /// Priority 7, `ANDROID_LOG_FATAL`.
+    Fatal,
+    /// Priority 8, `ANDROID_LOG_SILENT`.
+    Silent,
+    /// A byte past 8, which `android_LogPriority` does not define.
+    Other(OtherPriority),
 }
 
+/// The byte behind [`Priority::Other`], kept private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OtherPriority(u8);
+
 impl Priority {
-    fn from_u8(b: u8) -> Self {
-        match b {
+    /// Single-character abbreviation used by the text logcat format, `?`
+    /// for a priority it has no letter for.
+    pub fn as_char(self) -> char {
+        match self {
+            Self::Unknown | Self::Default | Self::Other(_) => '?',
+            Self::Verbose => 'V',
+            Self::Debug => 'D',
+            Self::Info => 'I',
+            Self::Warn => 'W',
+            Self::Error => 'E',
+            Self::Fatal => 'F',
+            Self::Silent => 'S',
+        }
+    }
+}
+
+impl From<u8> for Priority {
+    fn from(byte: u8) -> Self {
+        match byte {
             0 => Self::Unknown,
             1 => Self::Default,
             2 => Self::Verbose,
@@ -32,21 +66,24 @@ impl Priority {
             6 => Self::Error,
             7 => Self::Fatal,
             8 => Self::Silent,
-            _ => Self::Unknown,
+            9..=u8::MAX => Self::Other(OtherPriority(byte)),
         }
     }
+}
 
-    /// Single-character abbreviation used by the text logcat format.
-    pub fn as_char(self) -> char {
-        match self {
-            Self::Unknown | Self::Default => '?',
-            Self::Verbose => 'V',
-            Self::Debug => 'D',
-            Self::Info => 'I',
-            Self::Warn => 'W',
-            Self::Error => 'E',
-            Self::Fatal => 'F',
-            Self::Silent => 'S',
+impl From<Priority> for u8 {
+    fn from(priority: Priority) -> Self {
+        match priority {
+            Priority::Unknown => 0,
+            Priority::Default => 1,
+            Priority::Verbose => 2,
+            Priority::Debug => 3,
+            Priority::Info => 4,
+            Priority::Warn => 5,
+            Priority::Error => 6,
+            Priority::Fatal => 7,
+            Priority::Silent => 8,
+            Priority::Other(OtherPriority(byte)) => byte,
         }
     }
 }
@@ -63,6 +100,7 @@ impl fmt::Display for Priority {
             Self::Error => "ERROR",
             Self::Fatal => "FATAL",
             Self::Silent => "SILENT",
+            Self::Other(OtherPriority(byte)) => return write!(f, "OTHER({byte})"),
         })
     }
 }
@@ -343,7 +381,7 @@ pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, Logca
     } else if !log_id.is_text() {
         (Priority::Unknown, Vec::new(), payload.to_vec())
     } else {
-        let priority = Priority::from_u8(payload[0]);
+        let priority = Priority::from(payload[0]);
         let rest = &payload[1..];
 
         let tag_end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());

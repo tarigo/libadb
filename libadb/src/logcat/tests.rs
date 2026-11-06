@@ -205,18 +205,71 @@ fn parse_message_without_trailing_nul() {
 }
 
 #[test]
-fn priority_ordering() {
-    assert!(Priority::Verbose < Priority::Debug);
-    assert!(Priority::Debug < Priority::Info);
-    assert!(Priority::Info < Priority::Warn);
-    assert!(Priority::Warn < Priority::Error);
-    assert!(Priority::Error < Priority::Fatal);
+fn every_priority_byte_survives_parsing() {
+    for byte in 0..=u8::MAX {
+        let data = make_v4_entry(1, 1, 0, 0, 0, 0, &text_payload(byte, b"Tag", b"msg"));
+        let (entry, _) = parse_entry(&data).unwrap().unwrap();
+        assert_eq!(u8::from(entry.priority), byte);
+    }
 }
 
 #[test]
-fn priority_display_and_char() {
-    assert_eq!(Priority::Info.as_char(), 'I');
-    assert_eq!(format!("{}", Priority::Error), "ERROR");
+fn each_named_priority_has_the_byte_android_gives_it() {
+    let named = [
+        (Priority::Unknown, 0),
+        (Priority::Default, 1),
+        (Priority::Verbose, 2),
+        (Priority::Debug, 3),
+        (Priority::Info, 4),
+        (Priority::Warn, 5),
+        (Priority::Error, 6),
+        (Priority::Fatal, 7),
+        (Priority::Silent, 8),
+    ];
+    for (priority, byte) in named {
+        assert_eq!(Priority::from(byte), priority, "{byte}");
+        assert_eq!(u8::from(priority), byte, "{priority}");
+    }
+    for byte in [9, u8::MAX] {
+        let priority = Priority::from(byte);
+        assert!(
+            matches!(priority, Priority::Other(_)),
+            "{byte}: {priority:?}"
+        );
+    }
+}
+
+#[test]
+fn priorities_order_as_their_bytes_do() {
+    for a in 0..=u8::MAX {
+        for b in 0..=u8::MAX {
+            let got = Priority::from(a).cmp(&Priority::from(b));
+            assert_eq!(got, a.cmp(&b), "{a} against {b}");
+        }
+    }
+}
+
+#[test]
+fn every_priority_displays_its_name_and_letter() {
+    let named = [
+        ("UNKNOWN", '?'),
+        ("DEFAULT", '?'),
+        ("VERBOSE", 'V'),
+        ("DEBUG", 'D'),
+        ("INFO", 'I'),
+        ("WARN", 'W'),
+        ("ERROR", 'E'),
+        ("FATAL", 'F'),
+        ("SILENT", 'S'),
+    ];
+    for (byte, (name, letter)) in (0..).zip(named) {
+        let priority = Priority::from(byte);
+        assert_eq!(format!("{priority}"), name);
+        assert_eq!(priority.as_char(), letter, "{name}");
+    }
+    let other = Priority::from(9);
+    assert_eq!(format!("{other}"), "OTHER(9)");
+    assert_eq!(other.as_char(), '?');
 }
 
 #[test]
