@@ -1,15 +1,7 @@
-//! What the two sides tell each other once the channel is secret.
-//!
-//! A fixed 8192-byte block, zero-padded, holding a type byte and a
-//! NUL-terminated string. AOSP declares it in
-//! `pairing_connection/include/adb/pairing/pairing_connection.h` and
-//! refuses anything of a different size.
-
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// The whole block, padding included.
 pub(crate) const SIZE: usize = 8192;
 
 /// What a `PeerInfo` carries.
@@ -77,11 +69,7 @@ impl core::fmt::Display for PeerInfoError {
 
 impl core::error::Error for PeerInfoError {}
 
-/// Build the block that carries `payload`, zero-padded to full size:
-/// the peer checks the decrypted length and closes on any other.
 pub(crate) fn encode(kind: PeerInfoType, payload: &[u8]) -> Result<Vec<u8>, PeerInfoError> {
-    // One byte for the type, one kept clear: the device reads the
-    // payload as a C string.
     if payload.len() > SIZE - 2 {
         return Err(PeerInfoError::TooLong(payload.len()));
     }
@@ -91,8 +79,6 @@ pub(crate) fn encode(kind: PeerInfoType, payload: &[u8]) -> Result<Vec<u8>, Peer
     Ok(block)
 }
 
-/// Read a block, as the device reads ours: up to the first NUL, which
-/// has to be there.
 pub(crate) fn decode(block: &[u8]) -> Result<(PeerInfoType, String), PeerInfoError> {
     if block.len() != SIZE {
         return Err(PeerInfoError::Size(block.len()));

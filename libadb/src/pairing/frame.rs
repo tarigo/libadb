@@ -1,19 +1,9 @@
-//! The packet framing of the pairing protocol.
-//!
-//! Nothing like the ADB framing that carries a session: six bytes of
-//! header, big-endian length, and only two kinds of packet. AOSP calls
-//! it `PairingPacketHeader` and keeps it in
-//! `pairing_connection/pairing_connection.cpp`.
-
 use alloc::vec::Vec;
 
-/// Header length on the wire. Packed, so six and not eight.
 pub(crate) const HEADER_LEN: usize = 6;
 
-/// The only version either side speaks.
 pub(crate) const VERSION: u8 = 1;
 
-/// Largest payload a peer will accept: twice a `PeerInfo`.
 pub(crate) const MAX_PAYLOAD: usize = 16384;
 
 /// What a pairing packet carries.
@@ -78,7 +68,6 @@ impl core::fmt::Display for FrameError {
 
 impl core::error::Error for FrameError {}
 
-/// Serialise a header in front of `payload`.
 pub(crate) fn encode(kind: PacketType, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.push(VERSION);
@@ -88,7 +77,6 @@ pub(crate) fn encode(kind: PacketType, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Read a header, checking it the way the peer will check ours.
 pub(crate) fn decode(header: &[u8; HEADER_LEN]) -> Result<(PacketType, usize), FrameError> {
     if header[0] != VERSION {
         return Err(FrameError::Version(header[0]));

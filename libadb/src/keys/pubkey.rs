@@ -1,5 +1,3 @@
-//! Encoder for the ADB (mincrypt `RSAPublicKey`) public-key format.
-
 use alloc::vec::Vec;
 
 use base64ct::{Base64, Encoding};
@@ -10,14 +8,9 @@ use crate::base::protocol::command::MAX_PAYLOAD;
 
 use super::KeyError;
 
-/// Modulus size the format is fixed at: RSA-2048, in bytes.
 const MODULUS_SIZE: usize = 256;
-/// The same modulus counted in the 32-bit words adbd expects.
 const MODULUS_WORDS: u32 = (MODULUS_SIZE / 4) as u32;
-/// `len | n0inv | n | rr | exponent`.
 const ENCODED_SIZE: usize = 4 + 4 + MODULUS_SIZE + MODULUS_SIZE + 4;
-/// What the line spends before the name: the base64 blob and the space
-/// that follows it.
 const PREFIX_LEN: usize = ENCODED_SIZE.div_ceil(3) * 4 + 1;
 
 /// The name a public key carries after its blob — `user@host` in the
@@ -51,8 +44,6 @@ impl<'a> KeyName<'a> {
         if name.bytes().any(|b| matches!(b, b'\0' | b'\r' | b'\n')) {
             return Err(KeyError::InvalidName);
         }
-        // A name past this point would only fail at first connect, on
-        // the one exchange that carries the public key.
         if name.len() > MAX_PAYLOAD as usize - PREFIX_LEN - 1 {
             return Err(KeyError::NameTooLong(name.len()));
         }
@@ -97,8 +88,6 @@ pub fn encode_public_key(key: &RsaPublicKey, name: KeyName<'_>) -> Result<Vec<u8
     Ok(out)
 }
 
-/// Build the 524-byte struct adbd reads: word count, Montgomery
-/// `n0inv`, little-endian modulus, `R^2 mod n`, and the exponent.
 fn mincrypt_struct(key: &RsaPublicKey) -> Result<[u8; ENCODED_SIZE], KeyError> {
     let n = key.n();
     let bits = n.bits();
@@ -106,19 +95,15 @@ fn mincrypt_struct(key: &RsaPublicKey) -> Result<[u8; ENCODED_SIZE], KeyError> {
         return Err(KeyError::UnsupportedModulus(bits));
     }
 
-    // 64 little-endian words and 256 little-endian bytes are the same
-    // bytes, so the limbs need no extraction of their own.
     let mut n_le = n.to_bytes_le();
     n_le.resize(MODULUS_SIZE, 0);
 
     let n0 = u32::from_le_bytes(n_le[..4].try_into().unwrap());
-    // The lifting below converges only for an odd modulus.
     if n0 % 2 == 0 {
         return Err(KeyError::EvenModulus);
     }
     let n0inv = neg_inverse_mod_2_32(n0);
 
-    // R = 2^2048, so rr = R^2 mod n — and can be shorter than n.
     let mut rr_le = ((BigUint::from(1u32) << (MODULUS_SIZE * 16)) % n).to_bytes_le();
     rr_le.resize(MODULUS_SIZE, 0);
 
@@ -128,8 +113,6 @@ fn mincrypt_struct(key: &RsaPublicKey) -> Result<[u8; ENCODED_SIZE], KeyError> {
     }
     let mut e_bytes = [0u8; 4];
     e_bytes[..e_le.len()].copy_from_slice(&e_le);
-    // `e = 1` would let anyone forge; an even or zero one is no
-    // exponent at all.
     let e = u32::from_le_bytes(e_bytes);
     if e < 3 || e % 2 == 0 {
         return Err(KeyError::UnsupportedExponent);
@@ -144,9 +127,6 @@ fn mincrypt_struct(key: &RsaPublicKey) -> Result<[u8; ENCODED_SIZE], KeyError> {
     Ok(out)
 }
 
-/// `-(n0^-1) mod 2^32` for an odd `n0`, by Hensel lifting: `inv = n0`
-/// is already correct modulo 8, and each step doubles the correct bits
-/// (3 → 6 → 12 → 24 → 48), so four steps cover the full word.
 fn neg_inverse_mod_2_32(n0: u32) -> u32 {
     let mut inv = n0;
     for _ in 0..4 {

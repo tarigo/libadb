@@ -19,9 +19,7 @@ use zeroize::Zeroizing;
 
 use super::{AdbKey, KeyError, KeyName};
 
-/// Private key file, as named by `adb keygen`.
 const PRIVATE_KEY_FILE: &str = "adbkey";
-/// Public key file: a convenience artifact for other tools, never read.
 const PUBLIC_KEY_FILE: &str = "adbkey.pub";
 
 /// Errors from reading or writing a key directory.
@@ -95,14 +93,10 @@ pub fn load<R: CryptoRngCore + ?Sized>(
     name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
     let path = dir.join(PRIVATE_KEY_FILE);
-    // The file is the private key in the clear; the buffer goes the
-    // same way as everything else that has held it.
     let bytes = Zeroizing::new(fs::read(&path).map_err(|source| StoreError::Io {
         path: path.clone(),
         source,
     })?);
-    // Reading as text would report a binary file as an IO fault, when
-    // the fault is the file's.
     let pem =
         core::str::from_utf8(&bytes).map_err(|_| StoreError::NotAKeyFile { path: path.clone() })?;
     parse(pem, rng, name).map_err(|source| StoreError::Malformed { path, source })
@@ -129,9 +123,6 @@ pub fn load_or_generate<R: CryptoRngCore + ?Sized>(
     name: KeyName<'_>,
 ) -> Result<AdbKey, StoreError> {
     let path = dir.join(PRIVATE_KEY_FILE);
-    // Opened, not read: whether the contents parse is `load`'s to say,
-    // only "nothing here" may lead to generating, and a probe has no
-    // business lifting the key into memory.
     match File::open(&path) {
         Ok(_) => adopt(dir, rng, name),
         Err(e) if e.kind() == io::ErrorKind::NotFound => generate_into(dir, rng, name),
@@ -144,8 +135,6 @@ fn parse<R: CryptoRngCore + ?Sized>(
     rng: &mut R,
     name: KeyName<'_>,
 ) -> Result<AdbKey, KeyError> {
-    // adb wrote PKCS#1 for years, and such a key is exactly the
-    // identity worth reusing.
     if pem.contains("BEGIN RSA PRIVATE KEY") {
         AdbKey::from_pkcs1_pem(pem, rng, name)
     } else {
@@ -162,14 +151,7 @@ fn generate_into<R: CryptoRngCore + ?Sized>(
     let key = AdbKey::generate(rng, name).map_err(StoreError::Key)?;
     let pem = key.to_pkcs8_pem().map_err(StoreError::Key)?;
 
-    // Generation takes long enough for `adb` itself to have created a
-    // key meanwhile, and that one may already be trusted: publishing
-    // without clobbering lets the first writer win, and the loser
-    // adopts the winner rather than replacing it.
     if !publish_new(&dir.join(PRIVATE_KEY_FILE), pem.as_bytes())? {
-        // The winner may have died between publishing its key and
-        // writing the derived file, so the promise to leave both
-        // behind falls to whoever is still here.
         return adopt(dir, rng, name);
     }
     write_public_key(&dir.join(PUBLIC_KEY_FILE), &key)?;
@@ -180,8 +162,6 @@ fn write_public_key(path: &Path, key: &AdbKey) -> Result<(), StoreError> {
     install(path, key.public_key_line(), false)
 }
 
-/// Take the key that is already on disk, deriving its public file if
-/// whoever put it there did not get that far.
 fn adopt<R: CryptoRngCore + ?Sized>(
     dir: &Path,
     rng: &mut R,
@@ -192,9 +172,6 @@ fn adopt<R: CryptoRngCore + ?Sized>(
     Ok(key)
 }
 
-/// Write the derived public file if it is not there. It is the same
-/// bytes for anyone holding this key, so rewriting it costs nothing
-/// and leaving it missing costs the tools that look for it.
 fn ensure_public_key(dir: &Path, key: &AdbKey) -> Result<(), StoreError> {
     let public = dir.join(PUBLIC_KEY_FILE);
     if public.exists() {
@@ -203,12 +180,6 @@ fn ensure_public_key(dir: &Path, key: &AdbKey) -> Result<(), StoreError> {
     write_public_key(&public, key)
 }
 
-/// Put `bytes` at `path` only if nothing is there yet, reporting
-/// whether this call is the one that installed them.
-///
-/// `rename` would overwrite, which is the one thing the store must not
-/// do to a key: linking fails instead, and the caller adopts whatever
-/// won.
 fn publish_new(path: &Path, bytes: &[u8]) -> Result<bool, StoreError> {
     let tmp = write_temp(path, bytes, true)?;
     let installed = match fs::hard_link(&tmp, path) {
@@ -226,8 +197,6 @@ fn publish_new(path: &Path, bytes: &[u8]) -> Result<bool, StoreError> {
     Ok(installed)
 }
 
-/// Put `bytes` at `path`, replacing what is there. For the public
-/// file, which is derived and may be rewritten freely.
 fn install(path: &Path, bytes: &[u8], private: bool) -> Result<(), StoreError> {
     let tmp = write_temp(path, bytes, private)?;
     fs::rename(&tmp, path).map_err(|source| {
@@ -239,10 +208,6 @@ fn install(path: &Path, bytes: &[u8], private: bool) -> Result<(), StoreError> {
     })
 }
 
-/// Write `bytes` to a fresh file beside `path` and return its name, so
-/// a reader never meets a half-written key. The name is unique per
-/// call, not per process, or two threads writing the same key file
-/// would share one temporary.
 fn write_temp(path: &Path, bytes: &[u8], private: bool) -> Result<PathBuf, StoreError> {
     static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -274,9 +239,6 @@ fn write_temp(path: &Path, bytes: &[u8], private: bool) -> Result<PathBuf, Store
     })
 }
 
-/// Create a file that must not exist yet. On Windows there are no mode
-/// bits and it inherits the profile's ACL, which is what `adb keygen`
-/// relies on there too; elsewhere the private half is owner-only.
 fn create(path: &Path, private: bool) -> io::Result<File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -291,8 +253,6 @@ fn create(path: &Path, private: bool) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // `mode` above is filtered by the umask, which may leave the
-        // owner without write on a hostile one.
         file.set_permissions(fs::Permissions::from_mode(mode_for(private)))?;
     }
     Ok(file)
@@ -307,15 +267,7 @@ fn mode_for(private: bool) -> u32 {
     }
 }
 
-/// Create the key directory and every parent it needs, closed to
-/// others where the platform has mode bits — `0o750`, the mode adb
-/// gives its own directory, so the owning group keeps the read and
-/// traverse bits it has there.
 fn create_dir(dir: &Path) -> Result<(), StoreError> {
-    // One component at a time, each usable before we descend into it:
-    // `mkdir` takes its mode through the umask, which is free to strip
-    // the owner's own bits and leave a directory its owner cannot
-    // enter — and `create_dir_all` would then fail halfway down.
     let mut path = PathBuf::new();
     for component in dir.components() {
         path.push(component);
@@ -334,8 +286,6 @@ fn create_one(path: &Path) -> io::Result<()> {
 
     fs::DirBuilder::new().mode(0o750).create(path)?;
 
-    // Group and other keep whatever the umask allowed them; the owner
-    // gets back what it takes to use the directory at all.
     let mode = fs::metadata(path)?.permissions().mode() & 0o777;
     if mode & 0o700 != 0o700 {
         fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;

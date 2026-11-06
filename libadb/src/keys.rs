@@ -48,10 +48,8 @@ use zeroize::Zeroizing;
 
 use crate::auth::Authenticator;
 
-/// Modulus size ADB fixes its public-key format at.
 const MODULUS_BITS: usize = 2048;
 
-/// Length of the SHA-1 prehash adbd issues as an AUTH token.
 const TOKEN_LEN: usize = 20;
 
 /// An ADB host key: signs AUTH tokens and carries the public half in
@@ -157,8 +155,6 @@ impl AdbKey {
         let mut public_key_wire = encode_public_key(&key.to_public_key(), name)?;
         public_key_wire.push(b'\0');
 
-        // Blinding needs entropy per signature and `sign` takes no RNG,
-        // so the key seeds one of its own from the caller's.
         let mut seed = <ChaCha12Rng as SeedableRng>::Seed::default();
         rng.fill_bytes(&mut seed);
 
@@ -173,8 +169,6 @@ impl AdbKey {
 
 impl fmt::Debug for AdbKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `rsa` derives Debug over its private fields, so forwarding
-        // the key to a formatter would print `d` and the primes.
         f.debug_struct("AdbKey")
             .field(
                 "public_key",
@@ -188,11 +182,7 @@ impl Authenticator for AdbKey {
     type Error = KeyError;
 
     fn sign(&mut self, token: &[u8]) -> impl Future<Output = Result<Vec<u8>, Self::Error>> {
-        // `rsa` pads whatever it is handed, and a stray length becomes a
-        // DigestInfo no device accepts.
         let res = if token.len() == TOKEN_LEN {
-            // Not `sign_prehash`: it passes `rsa` no RNG, leaving the
-            // exponentiation unmasked over a peer-chosen input.
             self.key
                 .sign_with_rng(&mut self.blinding, self.padding.clone(), token)
                 .map_err(KeyError::Rsa)

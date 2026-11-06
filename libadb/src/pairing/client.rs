@@ -1,5 +1,3 @@
-//! Running the pairing exchange over a transport.
-
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -16,13 +14,10 @@ use crate::keys::AdbKey;
 use crate::tls::TlsClientConfig;
 use crate::transport::tls::{MaybeTls, StartTls, TlsError};
 
-/// The exporter label, NUL and all: AOSP passes `sizeof("adb-label")`.
 const EXPORTER_LABEL: &[u8] = b"adb-label\0";
 
-/// How much exporter output goes into the password.
 const EXPORTER_LEN: usize = 64;
 
-/// Who we are and who we expect, terminators included.
 const CLIENT_NAME: &[u8] = b"adb pair client\0";
 const SERVER_NAME: &[u8] = b"adb pair server\0";
 
@@ -138,9 +133,6 @@ where
         .await
         .map_err(PairingError::Transport)?;
 
-    // The password is not the code. It is the code with this session's
-    // exporter output appended, which is what stops the exchange being
-    // replayed into another session.
     let mut exported = Zeroizing::new([0u8; EXPORTER_LEN]);
     transport
         .export_keying_material(exported.as_mut(), EXPORTER_LABEL, None)
@@ -149,7 +141,6 @@ where
     password.extend_from_slice(code.as_bytes());
     password.extend_from_slice(exported.as_ref());
 
-    // The host is Alice. Both sides write before they read.
     let spake2 = Spake2::new(Role::Alice, CLIENT_NAME, SERVER_NAME, &password, rng);
     send(transport, PacketType::Spake2Msg, spake2.message()).await?;
     let theirs = recv(transport, PacketType::Spake2Msg).await?;
@@ -168,12 +159,10 @@ where
 
     let answer = recv(transport, PacketType::PeerInfo).await?;
     if answer.len() != peer_info::SIZE + TAG_LEN {
-        // The device refuses a block of any other size too.
         return Err(PairingError::PeerInfo(PeerInfoError::Size(
             answer.len().saturating_sub(TAG_LEN),
         )));
     }
-    // The first and only place a wrong code shows itself.
     let opened = cipher.open(&answer).ok_or(PairingError::WrongCode)?;
     let (kind, guid) = peer_info::decode(&opened).map_err(PairingError::PeerInfo)?;
     if kind != PeerInfoType::DeviceGuid {

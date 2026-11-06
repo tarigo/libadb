@@ -1,9 +1,3 @@
-//! The cipher that protects the `PeerInfo` exchange.
-//!
-//! AES-128-GCM with a key stretched out of the SPAKE2 secret, and a
-//! nonce that is nothing but a counter. AOSP keeps it in
-//! `pairing_auth/aes_128_gcm.cpp`.
-
 use alloc::vec::Vec;
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -12,23 +6,12 @@ use hkdf::Hkdf;
 use rsa::sha2::Sha256;
 use zeroize::Zeroizing;
 
-/// The HKDF info string, without a trailing NUL — AOSP passes
-/// `sizeof(info) - 1`.
 const HKDF_INFO: &[u8] = b"adb pairing_auth aes-128-gcm key";
 
-/// AES-128, so sixteen bytes.
 const KEY_LEN: usize = 16;
 
-/// What GCM adds to a message.
 pub(crate) const TAG_LEN: usize = 16;
 
-/// The cipher for one pairing session. Each direction counts its
-/// own nonces from zero, as the peer does.
-///
-/// Dropping it wipes the AES key schedule, but not the GHASH subkey.
-/// `polyval`, which holds that, clears it only with a feature of its
-/// own, and on x86 not even then: there its state sits behind
-/// `ManuallyDrop` so that the backend can be picked at run time.
 pub(crate) struct Cipher {
     key: Aes128Gcm,
     encrypt_counter: u64,
@@ -36,30 +19,24 @@ pub(crate) struct Cipher {
 }
 
 impl Cipher {
-    /// Stretch the 64 bytes SPAKE2 agreed on into a session key. No
-    /// salt, as in AOSP.
     pub(crate) fn new(key_material: &[u8; 64]) -> Self {
         let hkdf = Hkdf::<Sha256>::new(None, key_material);
         let mut key = Zeroizing::new([0u8; KEY_LEN]);
         hkdf.expand(HKDF_INFO, key.as_mut())
             .expect("HKDF-SHA256 stretches to 8160 bytes, and the key is 16");
         Self {
-            // By reference: `into()` would leave an unwiped copy behind.
             key: Aes128Gcm::new(Key::<Aes128Gcm>::from_slice(key.as_ref())),
             encrypt_counter: 0,
             decrypt_counter: 0,
         }
     }
 
-    /// The nonce for message number `counter`: the counter itself,
-    /// little-endian, in the first eight of twelve bytes.
     fn nonce(counter: u64) -> [u8; 12] {
         let mut nonce = [0u8; 12];
         nonce[..8].copy_from_slice(&counter.to_le_bytes());
         nonce
     }
 
-    /// Encrypt one message, spending a nonce.
     pub(crate) fn seal(&mut self, plaintext: &[u8]) -> Vec<u8> {
         let nonce = Self::nonce(self.encrypt_counter);
         let sealed = self
@@ -76,10 +53,6 @@ impl Cipher {
         sealed
     }
 
-    /// Decrypt one message; `None` if it does not authenticate. Only a
-    /// message that opens spends a nonce. With pairing a failure means
-    /// one thing: the codes did not match, so the two sides hold
-    /// different keys.
     pub(crate) fn open(&mut self, ciphertext: &[u8]) -> Option<Vec<u8>> {
         let nonce = Self::nonce(self.decrypt_counter);
         let opened = self

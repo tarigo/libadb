@@ -33,14 +33,10 @@ use x509_cert::{Certificate, TbsCertificate, Version};
 
 use super::AdbKey;
 
-/// `sha256WithRSAEncryption`, the algorithm `adb` signs with.
 const SHA256_WITH_RSA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
 
-/// How long the certificate stays valid. AOSP uses ten 365-day years.
 const LIFETIME: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 10);
 
-/// Subject and issuer, written RFC 4514 style, last RDN first: they
-/// encode as C, O, CN, which is the order AOSP writes them in.
 const DISTINGUISHED_NAME: &str = "CN=Adb,O=Android,C=US";
 
 /// Why a certificate could not be built.
@@ -118,7 +114,6 @@ pub fn build_at<R: CryptoRngCore>(
     let name: Name = DISTINGUISHED_NAME.parse()?;
     let algorithm = AlgorithmIdentifierOwned {
         oid: SHA256_WITH_RSA,
-        // An explicit NULL, not an absent parameter: RFC 4055 section 5.
         parameters: Some(Any::from(Null)),
     };
 
@@ -148,7 +143,6 @@ pub fn build_at<R: CryptoRngCore>(
 
     let tbs_der = tbs.to_der()?;
     let digest = Sha256::digest(&tbs_der);
-    // `sign_with_rng`, not `sign`: private-key operations here are blinded.
     let signature = key
         .private_key()
         .sign_with_rng(rng, Pkcs1v15Sign::new::<Sha256>(), &digest)
@@ -162,12 +156,7 @@ pub fn build_at<R: CryptoRngCore>(
     Ok(certificate.to_der()?)
 }
 
-/// A timestamp as RFC 5280 section 4.1.2.5 wants it: `UTCTime` through
-/// 2049, `GeneralizedTime` after. `x509-cert` hands out the latter for
-/// everything, which `adb` does not and a strict verifier may refuse.
 fn rfc5280_time(at: SystemTime) -> Result<Time, CertError> {
-    // Its only failure is a time outside 1970 to 9999, which `x509-cert`
-    // reports as an encoding error; the cause is the clock.
     let time = Time::try_from(at).map_err(|_| CertError::Clock)?;
     if let Time::GeneralTime(t) = time {
         let date = t.to_date_time();
@@ -178,9 +167,6 @@ fn rfc5280_time(at: SystemTime) -> Result<Time, CertError> {
     Ok(time)
 }
 
-/// The three extensions AOSP puts on the certificate. `to_extension`
-/// marks the first two critical and the key identifier not, as AOSP
-/// does.
 fn extensions(name: &Name, spki: &SubjectPublicKeyInfoOwned) -> Result<Vec<Extension>, CertError> {
     let mut out = Vec::with_capacity(3);
 
@@ -193,7 +179,6 @@ fn extensions(name: &Name, spki: &SubjectPublicKeyInfoOwned) -> Result<Vec<Exten
     let usage = KeyUsage(KeyUsages::DigitalSignature | KeyUsages::KeyCertSign | KeyUsages::CRLSign);
     out.push(usage.to_extension(name, &out)?);
 
-    // `subjectKeyIdentifier = hash` in OpenSSL terms: SHA-1 of the key bits.
     let key_id = Sha1::digest(spki.subject_public_key.raw_bytes());
     let skid = SubjectKeyIdentifier(OctetString::new(key_id.as_slice())?);
     out.push(skid.to_extension(name, &out)?);
