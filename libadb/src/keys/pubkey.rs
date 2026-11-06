@@ -76,21 +76,15 @@ impl<'a> TryFrom<&'a str> for KeyName<'a> {
 /// Encode a public key as the `adbkey.pub` line: base64 of the
 /// mincrypt struct, then `" <name>"` when `name` is not empty.
 ///
-/// No trailing NUL and no newline — the AUTH payload appends the NUL
+/// No trailing NUL and no newline: the AUTH payload appends the NUL
 /// (see [`AdbKey::public_key_wire`]), key files append their own
 /// newline, if any.
 ///
-/// The key is checked as far as the format demands: 2048 bits, an odd
-/// modulus, and an odd exponent of at least 3 that fits the struct's
-/// 32-bit field. `RsaPublicKey::new` rejects what is not a usable RSA
-/// key at all — an even modulus, an exponent below 3 or even — but it
-/// admits any modulus size and exponents up to 2^33, so the two limits
-/// this format fixes are checked here whichever constructor built the
-/// key. Encoding a degenerate one would hand the device something it
-/// can only reject, or, for `e = 1`, something anyone can forge
-/// signatures against.
-///
-/// `name` fits the line already: [`KeyName::new`] made sure of that.
+/// The key is checked as far as the format demands, whichever
+/// constructor built it: 2048 bits, an odd modulus, and an odd exponent
+/// of at least 3 that fits the struct's 32-bit field. Encoding a
+/// degenerate one would hand the device something it can only reject,
+/// or, for `e = 1`, something anyone can forge signatures against.
 ///
 /// [`AdbKey::public_key_wire`]: super::AdbKey::public_key_wire
 pub fn encode_public_key(key: &RsaPublicKey, name: KeyName<'_>) -> Result<Vec<u8>, KeyError> {
