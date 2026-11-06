@@ -1,3 +1,7 @@
+//! The ADB wire format: [`Packet`], the 24-byte [`message`] header it
+//! travels under, the [`command`] and [`constant`] values, the
+//! [`features`] a banner advertises, and the payload [`Checksum`].
+
 mod checksum;
 pub mod command;
 pub mod constant;

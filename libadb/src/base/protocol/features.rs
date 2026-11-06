@@ -1,3 +1,6 @@
+//! [`Feature`], an entry of a CNXN banner's `features=` list, and the
+//! ones this library advertises as a host.
+
 use crate::error::ProtocolError;
 
 macro_rules! features {
@@ -8,7 +11,7 @@ macro_rules! features {
         /// exchanged during the ADB `CNXN` handshake.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum Feature {
-            $($variant,)*
+            $(/** The feature [`wire_name`](Self::wire_name) names in a CNXN banner. */$variant,)*
         }
 
         impl Feature {

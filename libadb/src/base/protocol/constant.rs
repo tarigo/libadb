@@ -1,3 +1,6 @@
+//! Numbers the protocol fixes: the `AUTH` types, the protocol and
+//! `STLS` versions, and the default maximum payload.
+
 /// Device sends a random token to be signed.
 pub const AUTH_TOKEN: u32 = 1;
 /// Host responds with RSA signature of the token.

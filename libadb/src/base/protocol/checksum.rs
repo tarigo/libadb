@@ -20,10 +20,14 @@ pub(crate) fn payload_checksum(payload: &[u8]) -> u32 {
 pub enum Checksum {
     /// The peer predates `0x0100_0001`, or its version is not known yet.
     Compute,
+    /// The peer is at `0x0100_0001` or later: `data_check` goes out as 0.
     Skip,
 }
 
 impl Checksum {
+    /// The policy for a peer at protocol `version`:
+    /// [`Skip`](Self::Skip) from `0x0100_0001` on,
+    /// [`Compute`](Self::Compute) below it.
     pub const fn for_version(version: u32) -> Self {
         if version >= ADB_VERSION_SKIP_CHECKSUM {
             Self::Skip
@@ -32,6 +36,9 @@ impl Checksum {
         }
     }
 
+    /// The `data_check` value for `payload`: the wrapping `u32` sum of
+    /// its bytes under [`Compute`](Self::Compute), 0 under
+    /// [`Skip`](Self::Skip).
     pub fn of(self, payload: &[u8]) -> u32 {
         match self {
             Self::Skip => 0,

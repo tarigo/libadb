@@ -54,12 +54,23 @@ pub const CMD_STLS: u32 = u32::from_le_bytes(*b"STLS");
 #[repr(u32)]
 #[non_exhaustive]
 pub enum Command {
+    /// `SYNC` ([`CMD_SYNC`]): obsolete, and never valid on the wire.
     Sync = CMD_SYNC,
+    /// `CNXN` ([`CMD_CNXN`]): the handshake both sides send, with the
+    /// protocol version and maximum payload in its arguments.
     Connect = CMD_CNXN,
+    /// `OPEN` ([`CMD_OPEN`]): open a stream to the destination its
+    /// payload names.
     Open = CMD_OPEN,
+    /// `OKAY` ([`CMD_OKAY`]): a stream is open, or ready for the next
+    /// `WRTE`.
     Ready = CMD_OKAY,
+    /// `CLSE` ([`CMD_CLSE`]): a stream is closed, or an `OPEN` failed.
     Close = CMD_CLSE,
+    /// `WRTE` ([`CMD_WRTE`]): data for an open stream.
     Write = CMD_WRTE,
+    /// `AUTH` ([`CMD_AUTH`]): a step of RSA authentication, its type in
+    /// `arg0`.
     Auth = CMD_AUTH,
     /// Upgrade the transport to TLS ([`CMD_STLS`]).
     ///
@@ -71,6 +82,8 @@ pub enum Command {
 }
 
 impl Command {
+    /// The `magic` field of a message with this command:
+    /// `command ^ 0xFFFF_FFFF`.
     pub fn magic(self) -> u32 {
         (self as u32) ^ 0xFFFFFFFF
     }

@@ -35,6 +35,7 @@ pub struct Packet {
 }
 
 impl Packet {
+    /// A packet with these fields; `payload` becomes [`data`](Self::data).
     pub fn new(command: Command, arg0: u32, arg1: u32, payload: impl Into<Bytes>) -> Self {
         let data = payload.into();
         Self {
@@ -58,10 +59,14 @@ impl Packet {
         Self::new(Command::Close, 0, remote.raw(), Bytes::new())
     }
 
+    /// `AUTH(SIGNATURE, 0, signature)`: the host's signature of the
+    /// device's token.
     pub fn auth_signature(signature: impl Into<Bytes>) -> Self {
         Self::new(Command::Auth, AuthKind::Signature.into(), 0, signature)
     }
 
+    /// `AUTH(RSAPUBLICKEY, 0, key)`: the host's public key, which the
+    /// device may ask the user to accept.
     pub fn auth_public_key(key: impl Into<Bytes>) -> Self {
         Self::new(Command::Auth, AuthKind::PublicKey.into(), 0, key)
     }
