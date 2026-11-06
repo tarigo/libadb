@@ -1972,10 +1972,13 @@ mod incoming_tests {
 /// on the connection must be told too, or they wait for ever.
 mod end_tests {
     use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
     use alloc::vec::Vec;
     use core::convert::Infallible;
     use core::future::Future;
     use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use core::task::{Context, Poll, Waker};
     use embedded_io::ErrorKind;
 
@@ -2399,6 +2402,80 @@ mod end_tests {
             Err(Error::Disconnected)
         ));
         assert_eq!(seen.sent().len(), written);
+    }
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn parked_for_credit<'a>(
+        writer: &'a Writer<SharedMock>,
+        a: ChannelId,
+    ) -> (Waiter<'a>, Arc<Woken>) {
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut parked: Waiter<'a> =
+            Box::pin(async move { ("write", writer.write_channel(a, b"two").await.err()) });
+        let first = parked.as_mut().poll(&mut Context::from_waker(&waker));
+        assert!(first.is_pending());
+        assert!(writer.waits_for_credit(a));
+        (parked, woken)
+    }
+
+    fn assert_woken_to_disconnected(mut parked: Waiter<'_>, woken: &Woken) {
+        assert!(woken.0.load(Ordering::Relaxed), "the parked write slept on");
+        let Poll::Ready((_, err)) = poll_once(parked.as_mut()) else {
+            panic!("the parked write is still waiting for credit");
+        };
+        assert!(matches!(err, Some(Error::Disconnected)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_write_parked_for_credit_ends_with_run_after_another_finds_the_device_gone() {
+        let (reader, writer, a, b, seen) = two_channels();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+        let (parked, woken) = parked_for_credit(&writer, a);
+
+        seen.fail_writes(ErrorKind::BrokenPipe);
+        let err = now(writer.write_channel(b, b"x")).unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        assert_woken_to_disconnected(parked, &woken);
+    }
+
+    /// The receive under way is a read of the other channel, and then
+    /// the `dispatch_one` that `Writer::waits_for_credit` calls for.
+    #[test]
+    fn a_write_parked_for_credit_ends_with_a_receive_after_another_finds_the_device_gone() {
+        for dispatch_one in [false, true] {
+            let (mut reader, writer, a, b, seen) = two_channels();
+            let (parked, woken) = parked_for_credit(&writer, a);
+            let mut buf = [0u8; 8];
+            let mut receive: Pin<Box<dyn Future<Output = Result<(), Error<MockError>>> + '_>> =
+                if dispatch_one {
+                    Box::pin(reader.dispatch_one())
+                } else {
+                    Box::pin(async { reader.read_channel(b, &mut buf).await.map(drop) })
+                };
+            assert!(poll_once(receive.as_mut()).is_pending());
+
+            seen.fail_writes(ErrorKind::BrokenPipe);
+            let err = now(writer.write_channel(b, b"x")).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "got {err:?}");
+            seen.hang_up();
+            let end = now(receive).unwrap_err();
+            assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+            assert_woken_to_disconnected(parked, &woken);
+        }
     }
 }
 
