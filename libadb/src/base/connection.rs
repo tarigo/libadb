@@ -456,13 +456,28 @@ where
         })
     }
 
-    /// Close a channel.
+    /// Close a channel: free its slot and send CLSE.
+    ///
+    /// The slot comes back however the CLSE fares, and a CLSE that fails
+    /// comes back as the error. Nothing sends it again. With the device
+    /// gone nothing needs to; any other failure desynchronizes the
+    /// connection, as a packet not sent whole does, and leaves the device
+    /// holding its end of the channel with no way left to reach it.
+    ///
+    /// A connection already desynchronized fails with
+    /// [`Error::Desynchronized`] and frees nothing: no call that wants a
+    /// slot gets anywhere on it.
+    ///
+    /// **Not cancellation-safe**, as a dropped
+    /// [`write_channel`](Self::write_channel) is not: the slot is free by
+    /// then, but the connection is marked desynchronized.
     pub async fn close_channel(
         &mut self,
         ch: ChannelId,
     ) -> Result<(), Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
         let ids = self.table.ids(ch)?;
+        self.table.free(ch);
         let checksum = self.negotiated.checksum();
         send_pkt(
             &mut self.transport,
@@ -470,9 +485,7 @@ where
             &Packet::close(ids),
             checksum,
         )
-        .await?;
-        self.table.free(ch);
-        Ok(())
+        .await
     }
 
     /// Read from a channel, returning early if `interrupt` resolves first.

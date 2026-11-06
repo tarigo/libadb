@@ -1043,6 +1043,7 @@ mod slot_tests {
             assert_eq!(output.stdout, b"out", "{kind:?}");
             assert_eq!(output.stderr, b"err", "{kind:?}");
             assert_eq!(output.exit_code, 7, "{kind:?}");
+            assert_eq!(conn.table.in_use(), 0, "{kind:?}");
         }
     }
 
@@ -1106,6 +1107,50 @@ mod slot_tests {
             let err = now(session.quit()).unwrap_err();
             assert_failed_with(&err, kind, conn.table.in_use(), left);
         }
+    }
+
+    #[test]
+    fn a_close_that_fails_gives_the_slot_back_with_its_error() {
+        for (kind, left) in FAILED_WRITES {
+            let (mut conn, ch) = connected_with_channel(None);
+            conn.transport.fail_writes(kind);
+            let err = now(conn.close_channel(ch)).unwrap_err();
+            assert_failed_with(&err, kind, conn.table.in_use(), 0);
+
+            let err = now(conn.close_channel(ch)).unwrap_err();
+            match left {
+                0 => assert!(matches!(err, Error::ChannelClosed), "{kind:?}: {err:?}"),
+                _ => assert!(matches!(err, Error::Desynchronized), "{kind:?}: {err:?}"),
+            }
+        }
+    }
+
+    /// With the device gone there is no stream to lose step with, so
+    /// the rest of what it sent stays readable.
+    #[test]
+    fn a_close_that_finds_the_device_gone_stops_no_read() {
+        let (mut conn, a, b) = two_channels_delayed_ack(4096, &[wrte(2, b"for-b")]);
+        conn.transport.fail_writes(ErrorKind::BrokenPipe);
+        let err = now(conn.close_channel(a)).unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+
+        let mut buf = [0u8; 8];
+        let n = now(conn.read_channel(b, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"for-b");
+    }
+
+    /// Nothing reaches the device after a failure that leaves half a
+    /// packet behind it, however many channels are left to close: the
+    /// close that failed is the last one that gets anywhere.
+    #[test]
+    fn a_close_that_desynchronizes_leaves_the_rest_to_fail_with_that() {
+        let (mut conn, a, b) = two_channels_delayed_ack(4096, &[]);
+        conn.transport.fail_writes(ErrorKind::Other);
+        now(conn.close_channel(a)).unwrap_err();
+
+        let err = now(conn.close_channel(b)).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+        assert_eq!(conn.table.in_use(), 1);
     }
 }
 
