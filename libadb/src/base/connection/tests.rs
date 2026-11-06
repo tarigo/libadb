@@ -964,6 +964,86 @@ fn the_banner_property_cap_comes_from_the_config() {
     assert_eq!(parsed.product_model(), Some("b"));
 }
 
+fn connected_with_banners(host: &[u8], device: &str) -> Connection<Mock> {
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(
+        Command::Connect,
+        crate::base::protocol::command::ADB_VERSION,
+        256 * 1024,
+        device.as_bytes().to_vec(),
+    ));
+    now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Raw(host),
+        ConnectionConfig::new(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn delayed_ack_goes_by_the_features_the_parsed_device_banner_lists() {
+    let host = b"host::features=shell_v2,delayed_ack";
+    for (device, listed) in [
+        ("device::features=shell_v2;features=delayed_ack", true),
+        (
+            "device::ro.product.name=features=delayed_ack;features=shell_v2",
+            false,
+        ),
+    ] {
+        let conn = connected_with_banners(host, device);
+        let parsed = conn.device_banner_parsed();
+        assert_eq!(parsed.has_feature(&Feature::DelayedAck), listed, "{device}");
+        assert_eq!(conn.delayed_ack(), listed, "{device}");
+    }
+}
+
+fn delayed_ack_with_host_banner(host: &str) -> bool {
+    let device = "device::features=shell_v2,delayed_ack";
+    connected_with_banners(host.as_bytes(), device).delayed_ack()
+}
+
+#[test]
+fn adbd_skips_a_host_banner_entry_with_no_equals_sign() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=delayed_ack;oops"
+    ));
+}
+
+#[test]
+fn adbd_skips_a_host_banner_entry_with_two_equals_signs() {
+    assert!(!delayed_ack_with_host_banner(
+        "host::ro.product.name=features=delayed_ack"
+    ));
+}
+
+#[test]
+fn adbd_keeps_the_last_features_entry_of_the_host_banner() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=shell_v2;features=delayed_ack"
+    ));
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=delayed_ack;features=shell_v2"
+    ));
+}
+
+#[test]
+fn adbd_ignores_the_host_banner_past_its_third_colon() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=delayed_ack:features=shell_v2"
+    ));
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=shell_v2:features=delayed_ack"
+    ));
+}
+
+#[test]
+fn adbd_reads_an_empty_features_entry_as_no_features() {
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=delayed_ack;features="
+    ));
+}
+
 #[test]
 fn an_auth_that_is_not_a_token_after_our_signature_is_a_rejection() {
     // The device answered the signature with AUTH again, but not with a
