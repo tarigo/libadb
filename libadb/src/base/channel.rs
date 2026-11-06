@@ -67,6 +67,12 @@ impl ChannelId {
 /// [`read_channel`](crate::Connection::read_channel), etc.), or split the
 /// connection and give each task a clone of the
 /// [`Writer`](crate::Writer).
+///
+/// Its calls are as safe to drop as the session's own: see
+/// [`Connection::read_channel`](crate::Connection::read_channel),
+/// [`Connection::write_channel`](crate::Connection::write_channel) and,
+/// on a split connection,
+/// [Dropping a call](crate::split#dropping-a-call).
 pub struct Channel<'a, S> {
     pub(crate) session: &'a mut S,
     pub(crate) id: ChannelId,

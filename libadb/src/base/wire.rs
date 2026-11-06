@@ -345,11 +345,9 @@ pub(crate) async fn send_open<T: Write>(
 }
 
 /// Put an encoded header and its payload on the wire, raising `desync`
-/// if the packet does not get out whole.
-///
-/// Unless the other end is gone. Then no stream is left to fall out of
-/// step with, and raising the flag would only stop reads short of what
-/// it sent before it went.
+/// if the packet does not get out whole, unless the other end is gone:
+/// no stream is left to fall out of step with then, and the flag would
+/// only stop reads short of what it had sent.
 async fn send_frame<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,

@@ -530,10 +530,9 @@ impl<WH> Shared<WH> {
     /// Whether a CLSE is called off: the stream is over, so the device
     /// cannot hear it, or the connection lost step, so it cannot be sent.
     /// The [`Reader`] going is neither, and a close then goes on waiting
-    /// for the write half.
-    ///
-    /// While a CLSE is owed nothing receives, so only a read already
-    /// under way that cannot be dropped can still find the stream over.
+    /// for the write half. While a CLSE is owed nothing receives, so only
+    /// a read already under way that cannot be dropped can find the
+    /// stream over.
     pub(super) fn clse_called_off(&self) -> bool {
         self.stream_over.load(Ordering::Acquire) || self.desync.check::<Infallible>().is_err()
     }
