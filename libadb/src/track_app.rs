@@ -58,14 +58,27 @@ use crate::error::Error;
 /// A single process entry from the device.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProcessEntry {
+    /// The process id.
     pub pid: i64,
+    /// Whether the runtime allows JDWP in the process; adbd opens a
+    /// `jdwp:<pid>` channel only to such a process.
     pub debuggable: bool,
+    /// Whether the process is profileable from the shell.
     pub profileable: bool,
+    /// The process's instruction set, such as `"arm64"`.
     pub architecture: String,
+    /// The Android user the process runs as: 0 on a device with one
+    /// user, another number for a work profile. Not a Linux uid, which
+    /// is [`uid`](Self::uid). `None` if the device leaves it out.
     pub user_id: Option<i64>,
+    /// The process name. `None` if the device leaves it out.
     pub process_name: Option<String>,
+    /// The packages running in the process.
     pub package_names: Vec<String>,
+    /// Whether the app is waiting for a debugger to attach. `None` if
+    /// the device leaves it out.
     pub waiting_for_debugger: Option<bool>,
+    /// The process's Linux uid. `None` if the device leaves it out.
     pub uid: Option<i64>,
 }
 
