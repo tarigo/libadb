@@ -5,17 +5,22 @@ use bytes::{Buf, BytesMut};
 
 use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::{AckMode, RxPolicy};
+use super::protocol::Command;
 use super::send_queue::SendQueue;
 use crate::error::{Error, ProtocolError, RxOverflow};
 
-pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
+pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<i32, ProtocolError> {
     if payload.len() >= 4 {
-        Ok(u32::from_le_bytes([
+        Ok(i32::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
         ]))
     } else {
         Err(ProtocolError::ShortReadyPayload)
     }
+}
+
+fn credit_of(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +131,7 @@ impl ChannelSlot {
         payload: &[u8],
     ) -> Result<(), ProtocolError> {
         if self.policy.ack == AckMode::Delayed {
-            self.send_budget = parse_ready_credit(payload)? as i64;
+            self.send_budget = i64::from(parse_ready_credit(payload)?);
         }
         self.remote = Some(remote);
         self.state = ChannelState::Open;
@@ -135,14 +140,22 @@ impl ChannelSlot {
 
     pub fn apply_ready(&mut self, payload: &[u8]) -> Result<(), ProtocolError> {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget += parse_ready_credit(payload)? as i64,
+            AckMode::Delayed => {
+                let credit = i64::from(parse_ready_credit(payload)?);
+                self.send_budget = self.send_budget.saturating_add(credit);
+            }
             AckMode::Classic => self.wrte_acked = true,
         }
         Ok(())
     }
 
-    pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, RxOverflow> {
-        self.push_rx(payload)?;
+    pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, ChannelFault> {
+        if self.state == ChannelState::Opening {
+            let early = ProtocolError::UnexpectedCommand(Command::Write);
+            return Err(ChannelFault::Protocol(early));
+        }
+        self.push_rx(payload)
+            .map_err(|RxOverflow| ChannelFault::RxOverflow)?;
         self.unacked = self.unacked.saturating_add(payload.len());
         if self.policy.ack == AckMode::Classic && self.held() < self.policy.watermark {
             if let Some(ack) = self.ack(payload.len()) {
@@ -236,14 +249,15 @@ impl ChannelSlot {
 
     pub fn budget(&self) -> Option<usize> {
         match self.policy.ack {
-            AckMode::Delayed => (self.send_budget > 0).then_some(self.send_budget as usize),
+            AckMode::Delayed => (self.send_budget > 0)
+                .then(|| usize::try_from(self.send_budget).unwrap_or(usize::MAX)),
             AckMode::Classic => self.wrte_acked.then_some(usize::MAX),
         }
     }
 
     pub fn spend(&mut self, n: usize) {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget -= n as i64,
+            AckMode::Delayed => self.send_budget = self.send_budget.saturating_sub(credit_of(n)),
             AckMode::Classic => self.wrte_acked = false,
         }
     }
@@ -267,7 +281,7 @@ impl ChannelSlot {
 
     pub fn refund(&mut self, n: usize) {
         match self.policy.ack {
-            AckMode::Delayed => self.send_budget += n as i64,
+            AckMode::Delayed => self.send_budget = self.send_budget.saturating_add(credit_of(n)),
             AckMode::Classic => self.wrte_acked = true,
         }
     }

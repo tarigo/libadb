@@ -30,9 +30,12 @@ pub enum HostBanner<'a> {
     Features(&'a [Feature]),
     /// Sent as given, e.g. `b"host::features=shell_v2,delayed_ack"`.
     ///
-    /// Delayed ACK is negotiated from these bytes as from a built
-    /// banner: it is on when they name `delayed_ack` among their
-    /// features and the device does too.
+    /// Delayed ACK is negotiated from these bytes as adbd reads them,
+    /// since adbd decides from them too: what counts is the last
+    /// `features=` entry between the second `:` and any third, and an
+    /// entry that is not exactly one `key=value` is passed over. It is
+    /// on when that entry lists `delayed_ack` and the device's banner
+    /// does too.
     Raw(&'a [u8]),
 }
 
@@ -60,6 +63,32 @@ impl HostBanner<'_> {
             Self::Raw(raw) => Bytes::copy_from_slice(raw),
         }
     }
+
+    pub(crate) fn lists(self, feature: Feature) -> bool {
+        match self {
+            Self::Features(features) => features.contains(&feature),
+            Self::Raw(raw) => features_adbd_reads(raw)
+                .split(|&b| b == b',')
+                .any(|name| name == feature.wire_name().as_bytes()),
+        }
+    }
+}
+
+fn features_adbd_reads(banner: &[u8]) -> &[u8] {
+    let Some(props) = banner.split(|&b| b == b':').nth(2) else {
+        return &[];
+    };
+    props
+        .split(|&b| b == b';')
+        .filter_map(|prop| {
+            let mut key_value = prop.split(|&b| b == b'=');
+            match (key_value.next(), key_value.next(), key_value.next()) {
+                (Some(key), Some(value), None) if key == b"features" => Some(value),
+                _ => None,
+            }
+        })
+        .next_back()
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

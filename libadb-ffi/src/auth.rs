@@ -64,8 +64,10 @@ fn normalize_public_key(pub_key: &[u8]) -> Vec<u8> {
 ///
 /// Implementations must store a PKCS#1 v1.5 signature of the 20-byte
 /// SHA-1 prehash in `token` through `out_signature` and `out_length`.
-/// Any other status than [`AdbStatus::Ok`] is reported to the caller as
-/// [`AdbStatus::Auth`].
+///
+/// It returns an `adb_status_t`, taken as the integer it is: any value
+/// but that of [`AdbStatus::Ok`], one `adb_status_t` names or not, is
+/// reported to the caller as [`AdbStatus::Auth`].
 pub type AdbSignFn = unsafe extern "C" fn(
     user_data: *mut c_void,
     token: *const u8,
@@ -73,7 +75,7 @@ pub type AdbSignFn = unsafe extern "C" fn(
     out_signature: *mut u8,
     out_capacity: usize,
     out_length: *mut usize,
-) -> AdbStatus;
+) -> i32;
 
 /// Caller-supplied authenticator passed to [`adb_connect_with_authenticator`].
 ///
@@ -157,24 +159,74 @@ impl Authenticator for CallbackAuthenticator {
                 &mut out_len,
             )
         };
+        const OK: i32 = AdbStatus::Ok as i32;
         let res = match status {
-            AdbStatus::Ok if out_len == 0 => {
-                Err(String::from("sign callback returned empty signature"))
-            }
-            AdbStatus::Ok if out_len <= buf.len() => {
+            OK if out_len == 0 => Err(String::from("sign callback returned empty signature")),
+            OK if out_len <= buf.len() => {
                 buf.truncate(out_len);
                 Ok(buf)
             }
-            AdbStatus::Ok => Err(format!(
+            OK => Err(format!(
                 "sign callback wrote {out_len} bytes, exceeds capacity {}",
                 buf.len()
             )),
-            other => Err(format!("sign callback returned status {}", other as i32)),
+            other => Err(format!("sign callback returned status {other}")),
         };
         core::future::ready(res)
     }
 
     fn public_key(&self) -> &[u8] {
         &self.public_key
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ffi::c_void;
+    use core::ptr;
+
+    use super::*;
+
+    unsafe extern "C" fn signs_with_the_status_in_user_data(
+        user_data: *mut c_void,
+        _token: *const u8,
+        _token_len: usize,
+        out_signature: *mut u8,
+        _out_capacity: usize,
+        out_length: *mut usize,
+    ) -> i32 {
+        // SAFETY: `signed_with` hands over a live i32, and the
+        // authenticator its own buffers.
+        unsafe {
+            *out_signature = 0xA5;
+            *out_length = 1;
+            *user_data.cast::<i32>()
+        }
+    }
+
+    fn signed_with(mut status: i32) -> Result<Vec<u8>, String> {
+        let authenticator = adb_authenticator_t {
+            public_key: ptr::null(),
+            public_key_len: 0,
+            sign: Some(signs_with_the_status_in_user_data),
+            user_data: ptr::from_mut(&mut status).cast(),
+        };
+        // SAFETY: the callback is a plain function, and `status` lives
+        // until the signature is in.
+        let mut auth = unsafe { CallbackAuthenticator::from_ffi(&authenticator) }.unwrap();
+        crate::block_on::block_on(auth.sign(&[0; ADB_AUTH_TOKEN_LEN]))
+    }
+
+    /// The status is whatever integer the C callback returned, one that
+    /// `adb_status_t` names or not.
+    #[test]
+    fn any_status_but_ok_from_the_sign_callback_fails_the_signature() {
+        assert_eq!(signed_with(AdbStatus::Ok as i32), Ok(vec![0xA5]));
+        for status in [AdbStatus::Auth as i32, 42, 256, -1, i32::MIN, i32::MAX] {
+            assert_eq!(
+                signed_with(status),
+                Err(format!("sign callback returned status {status}"))
+            );
+        }
     }
 }

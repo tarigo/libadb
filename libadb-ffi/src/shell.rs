@@ -240,7 +240,7 @@ pub unsafe extern "C" fn adb_shell_read_frame(
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let sh = unsafe { &*sh };
     if sh.closed.load(Ordering::Acquire) {
-        return AdbStatus::ChannelClosed;
+        return error::fail_error::<FfiTransportError>(Error::ChannelClosed);
     }
     let (id, payload) = match read_frame(sh) {
         Ok(frame) => frame,

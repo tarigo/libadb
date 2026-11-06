@@ -88,6 +88,7 @@ pub(super) struct Handshake<T, A> {
     pub(super) transport: T,
     auth: A,
     banner: Bytes,
+    delayed_ack: bool,
     config: ConnectionConfig,
     desync: DesyncFlag,
     pub(super) recv_buf: BytesMut,
@@ -108,6 +109,7 @@ where
             transport,
             auth,
             banner: banner.to_bytes(),
+            delayed_ack: banner.lists(crate::Feature::DelayedAck),
             config,
             desync: DesyncFlag::new(),
             recv_buf: BytesMut::new(),
@@ -174,7 +176,7 @@ where
         self,
         cnxn: Packet,
     ) -> Result<Connection<T>, Error<<T as ErrorType>::Error>> {
-        let negotiated = Negotiated::new(&self.banner, cnxn, self.config)?;
+        let negotiated = Negotiated::new(self.delayed_ack, cnxn, self.config)?;
         Ok(Connection {
             transport: self.transport,
             table: ChannelTable::new(negotiated.config.max_channels(), negotiated.rx_policy()),

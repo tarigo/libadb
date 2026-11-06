@@ -7,7 +7,7 @@ use super::negotiated::RxPolicy;
 use super::protocol::command::Command;
 use super::protocol::Packet;
 use super::slot::{AckDecision, ChannelFault, ChannelSlot, ChannelState, PendingAck};
-use crate::error::{Error, NoFreeChannels, RxOverflow};
+use crate::error::{Error, NoFreeChannels};
 
 #[cfg_attr(not(feature = "split"), allow(dead_code))]
 pub(crate) enum DispatchOutcome {
@@ -171,7 +171,7 @@ impl ChannelTable {
                     return match slot.apply_write(&pkt.data) {
                         Ok(AckDecision::Now(ack)) => DispatchOutcome::AckWrite { idx, ack },
                         Ok(AckDecision::Hold) => DispatchOutcome::DataBuffered { idx },
-                        Err(RxOverflow) => fault(idx, slot, remote, ChannelFault::RxOverflow),
+                        Err(broken) => fault(idx, slot, remote, broken),
                     };
                 }
                 Command::Ready if ours => {

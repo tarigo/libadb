@@ -1,7 +1,7 @@
 use super::connection::ConnectionConfig;
 use super::device_banner::DeviceBanner;
 use super::protocol::command;
-use super::protocol::features::{self, Feature};
+use super::protocol::features::Feature;
 use super::protocol::{Checksum, Packet};
 use crate::error::{Error, ProtocolError};
 
@@ -28,13 +28,12 @@ pub(crate) struct Negotiated {
 
 impl Negotiated {
     pub(crate) fn new(
-        host_banner: &[u8],
+        host_delayed_ack: bool,
         cnxn: Packet,
         config: ConnectionConfig,
     ) -> Result<Self, ProtocolError> {
-        let delayed_ack = features::has_feature(host_banner, features::DELAYED_ACK)
-            && features::has_feature(&cnxn.data, features::DELAYED_ACK);
         let device_banner = DeviceBanner::from_bytes(cnxn.data, config.max_banner_properties())?;
+        let delayed_ack = host_delayed_ack && device_banner.has_feature(&Feature::DelayedAck);
         Ok(Self {
             max_payload: cnxn.arg1.min(command::MAX_PAYLOAD),
             protocol_version: cnxn.arg0.min(command::ADB_VERSION),

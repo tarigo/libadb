@@ -216,9 +216,9 @@ where
     /// refused once the next packet arrives.
     ///
     /// A packet that breaks one channel alone, with data past its
-    /// receive cap or a READY it cannot take, closes that channel: the
-    /// device gets its CLSE, and the channel's calls fail with that
-    /// error once what it buffered before is read.
+    /// receive cap or ahead of its READY, or a READY it cannot take,
+    /// closes that channel: the device gets its CLSE, and the channel's
+    /// calls fail with that error once what it buffered before is read.
     ///
     /// Without delayed ACK, data is acknowledged from here as it
     /// arrives, so the OKAY may reach the device after packets a task

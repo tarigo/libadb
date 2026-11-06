@@ -48,7 +48,19 @@ impl<E: core::fmt::Display> core::fmt::Display for ConnectError<E> {
     }
 }
 
-impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ConnectError<E> {}
+impl<E> std::error::Error for ConnectError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Uri(e) => Some(e),
+            Self::Tcp(e) => Some(e),
+            Self::Usb(e) => Some(e),
+            Self::UsbBlockingTaskFailed => None,
+        }
+    }
+}
 
 /// Parse `uri_str` and open a transport, dialling with runtime `R` and
 /// serving `usb://` with backend `B`.

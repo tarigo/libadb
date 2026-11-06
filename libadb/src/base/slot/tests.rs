@@ -1,5 +1,4 @@
-//! A slot's receive-side accounting around the READY that names the
-//! device's end.
+//! A slot's receive-side accounting, and the credit it may send on.
 
 use core::convert::Infallible;
 
@@ -24,50 +23,13 @@ fn accept(slot: &mut ChannelSlot) {
         .unwrap();
 }
 
-/// Until the READY names the device's end an OKAY has nowhere to go, so
-/// the data stays buffered. The first read after it takes the data and
-/// acknowledges all of it.
 #[test]
-fn a_write_before_the_ready_is_read_and_acknowledged_only_after_it() {
+fn a_write_before_the_ready_breaks_the_channel() {
     for ack in [AckMode::Delayed, AckMode::Classic] {
         let mut slot = opening(ack);
-        assert!(matches!(slot.apply_write(b"early"), Ok(AckDecision::Hold)));
-
-        let mut buf = [0u8; 8];
-        assert!(!slot.take_acks(buf.len()), "{ack:?}");
-        assert!(
-            matches!(slot.take_buffered::<Infallible>(&mut buf), Ok(None)),
-            "{ack:?}: read before the READY"
-        );
-        assert_eq!((slot.buffered(), slot.unacked()), (5, 5), "{ack:?}");
-
-        accept(&mut slot);
-        assert!(slot.take_acks(buf.len()), "{ack:?}");
-        let owed = slot.settle_take(buf.len());
-        let n = slot.take_buffered::<Infallible>(&mut buf).unwrap().unwrap();
-        assert_eq!(&buf[..n], b"early", "{ack:?}");
-        let ids = ChannelIds {
-            local: LocalId::from(LOCAL),
-            remote: RemoteId::from(REMOTE),
-        };
-        assert_eq!(owed, Some(PendingAck { ids, len: 5 }), "{ack:?}");
+        assert!(slot.apply_write(b"early").is_err(), "{ack:?}");
         assert_eq!((slot.buffered(), slot.unacked()), (0, 0), "{ack:?}");
     }
-}
-
-/// An OPEN the device refused after writing on it never opened: the
-/// read fails rather than hand out data nobody can acknowledge.
-#[test]
-fn a_write_before_a_refusal_is_never_handed_out() {
-    let mut slot = opening(AckMode::Delayed);
-    slot.apply_write(b"early").unwrap();
-    slot.apply_close();
-
-    let mut buf = [0u8; 8];
-    assert!(matches!(
-        slot.take_buffered::<Infallible>(&mut buf),
-        Err(Error::ChannelClosed)
-    ));
 }
 
 /// A read dropped while this OKAY is written has taken nothing.
@@ -208,4 +170,56 @@ fn a_channel_the_device_closed_owes_no_okay() {
             Err(Error::ChannelClosed)
         ));
     }
+}
+
+#[test]
+fn a_grant_past_the_largest_budget_saturates_it() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+    slot.send_budget = i64::MAX - 1;
+
+    slot.apply_ready(&100u32.to_le_bytes()).unwrap();
+    assert_eq!(slot.send_budget, i64::MAX);
+    assert_eq!(slot.try_reserve_send(100), Some(100));
+    assert_eq!(slot.send_budget, i64::MAX - 100);
+}
+
+/// On a 32-bit target the budget is wider than a `usize`, and a write
+/// may spend all a `usize` holds of it.
+#[test]
+fn a_budget_wider_than_a_usize_is_not_cut_short() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+    slot.send_budget = 1 << 32;
+
+    assert_eq!(slot.try_reserve_send(100), Some(100));
+    assert_eq!(slot.send_budget, (1 << 32) - 100);
+}
+
+/// adbd reads an OKAY's credit as signed, and adds it as it is.
+#[test]
+fn a_negative_grant_takes_credit_back() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+
+    slot.apply_ready(&(-4000i32).to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(96));
+    slot.apply_ready(&(-100i32).to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), None);
+    slot.apply_ready(&5i32.to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(1));
+}
+
+/// The READY that answers an OPEN grants from nothing, as adbd counts
+/// the one that answers its own, so later grants have to make up a
+/// negative one before anything can be sent.
+#[test]
+fn a_negative_first_grant_leaves_the_channel_owing() {
+    let mut slot = opening(AckMode::Delayed);
+    slot.accept_open_ready(RemoteId::from(REMOTE), &(-10i32).to_le_bytes())
+        .unwrap();
+    assert_eq!(slot.budget(), None);
+
+    slot.apply_ready(&20i32.to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(10));
 }

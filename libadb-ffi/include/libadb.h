@@ -31,8 +31,7 @@
  * their reads.
  *
  * On error, functions return a non-zero adb_status_t and set a
- * thread-local error string retrievable via adb_last_error(). The one
- * exception is noted at adb_shell_read_frame().
+ * thread-local error string retrievable via adb_last_error().
  */
 
 #ifndef LIBADB_H
@@ -630,8 +629,7 @@ void adb_shell_free(adb_shell_t *sh);
  * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED. As with
  * adb_read_channel(), everything that arrived comes back before any
  * error does, however the connection failed. After adb_shell_close()
- * the call returns ADB_ERR_CHANNEL_CLOSED at once, and it is the one
- * error that sets no adb_last_error() string.
+ * the call returns ADB_ERR_CHANNEL_CLOSED at once.
  */
 adb_status_t adb_shell_read_frame(
     adb_shell_t *sh,

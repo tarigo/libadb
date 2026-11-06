@@ -486,6 +486,69 @@ fn a_ready_without_credit_fails_a_writer_open_on_a_reader_driven_connection() {
 }
 
 #[test]
+fn a_write_before_its_ready_fails_a_reader_open() {
+    use crate::error::ProtocolError;
+
+    let mut mock = Mock::new();
+    mock.feed(&crate::base::mock::cnxn())
+        .feed(&wrte(1, b"early"))
+        .feed(&okay(1));
+    let seen = SharedMock::new(mock);
+    let conn = now(Connection::connect(
+        seen.clone(),
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
+    let (mut reader, _writer) = conn.split().unwrap();
+
+    let err = now(reader.open_channel(b"shell:\0")).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Protocol(ProtocolError::UnexpectedCommand(Command::Write))
+        ),
+        "got {err:?}"
+    );
+    let (cmd, local, remote, _) = seen.sent().last().unwrap().clone();
+    assert_eq!((cmd, local, remote), (Command::Close, 1, 42));
+}
+
+#[test]
+fn a_write_before_its_ready_fails_a_writer_open_on_a_reader_driven_connection() {
+    use crate::error::ProtocolError;
+    use core::task::{Context, Waker};
+
+    let (mut reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(
+        64,
+        &[
+            Packet::new(Command::Write, 43, 2, b"early".to_vec()),
+            Packet::new(Command::Ready, 43, 2, 64u32.to_le_bytes().to_vec()),
+        ],
+    );
+    let mut open = pin!(writer.open_channel(b"svc:\0"));
+    assert!(open
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+        .is_pending());
+
+    let broken = |err: &Error<_>| {
+        matches!(
+            err,
+            Error::Protocol(ProtocolError::UnexpectedCommand(Command::Write))
+        )
+    };
+    let mut buf = [0u8; 8];
+    let err = now(reader.read_channel(ch, &mut buf)).unwrap_err();
+    assert!(broken(&err), "reader: got {err:?}");
+    let err = now(open).unwrap_err();
+    assert!(broken(&err), "opener: got {err:?}");
+    let (cmd, arg0, arg1, _) = seen.sent().last().unwrap().clone();
+    assert_eq!((cmd, arg0, arg1), (Command::Close, 2, 43));
+}
+
+#[test]
 fn a_read_dropped_waiting_for_the_ack_lock_takes_nothing() {
     use core::task::{Context, Waker};
 

@@ -339,6 +339,26 @@ fn the_rest_of_a_packet_is_staged_to_its_length() {
     assert_eq!(ZEROED.with(|zeroed| zeroed.get()), rest.len());
 }
 
+/// The read that completes the header asks how much more the packet
+/// needs before `decode` has turned the length down, and on a 32-bit
+/// target the header and that length add up past `usize::MAX`.
+#[test]
+fn a_header_announcing_the_largest_length_fails_as_too_large() {
+    let command = u32::from(Command::Write);
+    let header: Vec<u8> = [command, 1, 2, u32::MAX, 0, Command::Write.magic()]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let mut t = Feeder::new(header);
+    let mut buf = BytesMut::new();
+
+    let err = block_on(recv_pkt(&mut t, &mut buf, MAX_PAYLOAD)).unwrap_err();
+    assert!(
+        matches!(err, Error::Protocol(ProtocolError::PayloadTooLarge)),
+        "got {err:?}"
+    );
+}
+
 /// The largest transfer `daemon/usb.cpp` writes; a longer payload is
 /// split at this size.
 const ADBD_WRITE_SIZE: usize = 16384;

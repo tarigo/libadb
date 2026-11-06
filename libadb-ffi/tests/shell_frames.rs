@@ -3,7 +3,7 @@
 //! rewritten is never opened, and closing stdin tells a device that
 //! left first from a session closed here.
 
-use std::ffi::{c_void, CString};
+use std::ffi::{c_void, CStr, CString};
 use std::io::Write as _;
 use std::net::TcpListener;
 use std::ptr;
@@ -25,8 +25,8 @@ unsafe extern "C" fn never_signs(
     _out_signature: *mut u8,
     _out_capacity: usize,
     _out_length: *mut usize,
-) -> adb::AdbStatus {
-    adb::AdbStatus::Auth
+) -> i32 {
+    adb::AdbStatus::Auth as i32
 }
 
 /// `adb_shell_t` is `Send + Sync` by construction (the crate asserts
@@ -329,6 +329,31 @@ fn closing_stdin_after_a_local_close_fails() {
     assert_eq!(status, adb::AdbStatus::Ok);
     let status = unsafe { adb::adb_shell_close_stdin(sh.get()) };
     assert_eq!(status, adb::AdbStatus::ChannelClosed);
+
+    unsafe {
+        adb::adb_shell_free(sh.get());
+        adb::adb_connection_free(conn);
+    }
+    within("the device", move || device.join().unwrap());
+}
+
+#[test]
+fn a_read_after_a_local_close_says_why_it_failed() {
+    let (addr, device) = scripted_adbd("shell_v2", |d| {
+        d.accept_open(1, 0);
+        while d.recv().is_some() {}
+    });
+    let conn = connect(&addr, "shell_v2");
+    let sh = open_shell(conn);
+
+    let status = unsafe { adb::adb_shell_close(sh.get()) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+    let (status, ..) = read_frame(sh);
+    assert_eq!(status, adb::AdbStatus::ChannelClosed);
+    let text = adb::adb_last_error();
+    assert!(!text.is_null(), "no text for the failed read");
+    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+    assert_eq!(text, "channel closed");
 
     unsafe {
         adb::adb_shell_free(sh.get());

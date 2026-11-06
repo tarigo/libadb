@@ -15,8 +15,8 @@ unsafe extern "C" fn never_signs(
     _out_signature: *mut u8,
     _out_capacity: usize,
     _out_length: *mut usize,
-) -> adb::AdbStatus {
-    adb::AdbStatus::Auth
+) -> i32 {
+    adb::AdbStatus::Auth as i32
 }
 
 fn last_error() -> String {

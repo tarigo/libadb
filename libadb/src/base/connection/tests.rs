@@ -480,6 +480,37 @@ fn open_credit(conn: &Connection<Mock>, local: u32) -> u32 {
     open.expect("the channel was opened").2
 }
 
+#[test]
+fn a_write_before_its_ready_fails_the_open() {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn()).feed(&wrte(1, b"early")).feed(&okay(1));
+    let mut conn = now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
+
+    let err = now(conn.open_channel(b"shell:\0")).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Protocol(ProtocolError::UnexpectedCommand(Command::Write))
+        ),
+        "got {err:?}"
+    );
+    let (cmd, local, remote, _) = conn.transport().sent().last().unwrap().clone();
+    assert_eq!((cmd, local, remote), (Command::Close, 1, 42));
+}
+
+#[test]
+fn a_config_that_grants_no_credit_still_opens_with_some() {
+    let config = ConnectionConfig::new().with_initial_ack_bytes(0);
+    let (conn, ..) = two_channels_delayed_ack_with(config, 4096, &[]);
+    assert_eq!(open_credit(&conn, 1), 1);
+}
+
 /// The device sends all it may while nobody reads `b`, each time all but
 /// the last byte of its credit and then a full packet on that byte, as
 /// adbd can. It waits only once the credit is gone.
@@ -857,6 +888,28 @@ mod incoming {
     }
 
     #[test]
+    fn the_ready_credit_is_clamped_to_what_an_int32_holds() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2,delayed_ack"));
+        let config = ConnectionConfig::new().with_initial_ack_bytes(u32::MAX);
+        let mut conn = now(Connection::connect(
+            mock,
+            NoAuth,
+            HostBanner::Raw(b"host::features=shell_v2,delayed_ack"),
+            config,
+        ))
+        .unwrap();
+
+        now(conn.dispatch(open_pkt(7, 0, b"tcp:7\0"))).unwrap();
+        let incoming = conn.try_accept_incoming().unwrap().unwrap();
+        now(incoming.accept()).unwrap();
+
+        let (cmd, _, _, payload) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Ready);
+        assert_eq!(payload, i32::MAX.to_le_bytes());
+    }
+
+    #[test]
     fn accept_with_no_free_slot_refuses_and_reports() {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2"));
@@ -933,6 +986,86 @@ fn the_banner_property_cap_comes_from_the_config() {
     let conn = connect(2).unwrap();
     let parsed = conn.device_banner_parsed();
     assert_eq!(parsed.product_model(), Some("b"));
+}
+
+fn connected_with_banners(host: &[u8], device: &str) -> Connection<Mock> {
+    let mut mock = Mock::new();
+    mock.feed(&Packet::new(
+        Command::Connect,
+        crate::base::protocol::command::ADB_VERSION,
+        256 * 1024,
+        device.as_bytes().to_vec(),
+    ));
+    now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Raw(host),
+        ConnectionConfig::new(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn delayed_ack_goes_by_the_features_the_parsed_device_banner_lists() {
+    let host = b"host::features=shell_v2,delayed_ack";
+    for (device, listed) in [
+        ("device::features=shell_v2;features=delayed_ack", true),
+        (
+            "device::ro.product.name=features=delayed_ack;features=shell_v2",
+            false,
+        ),
+    ] {
+        let conn = connected_with_banners(host, device);
+        let parsed = conn.device_banner_parsed();
+        assert_eq!(parsed.has_feature(&Feature::DelayedAck), listed, "{device}");
+        assert_eq!(conn.delayed_ack(), listed, "{device}");
+    }
+}
+
+fn delayed_ack_with_host_banner(host: &str) -> bool {
+    let device = "device::features=shell_v2,delayed_ack";
+    connected_with_banners(host.as_bytes(), device).delayed_ack()
+}
+
+#[test]
+fn adbd_skips_a_host_banner_entry_with_no_equals_sign() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=delayed_ack;oops"
+    ));
+}
+
+#[test]
+fn adbd_skips_a_host_banner_entry_with_two_equals_signs() {
+    assert!(!delayed_ack_with_host_banner(
+        "host::ro.product.name=features=delayed_ack"
+    ));
+}
+
+#[test]
+fn adbd_keeps_the_last_features_entry_of_the_host_banner() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=shell_v2;features=delayed_ack"
+    ));
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=delayed_ack;features=shell_v2"
+    ));
+}
+
+#[test]
+fn adbd_ignores_the_host_banner_past_its_third_colon() {
+    assert!(delayed_ack_with_host_banner(
+        "host::features=delayed_ack:features=shell_v2"
+    ));
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=shell_v2:features=delayed_ack"
+    ));
+}
+
+#[test]
+fn adbd_reads_an_empty_features_entry_as_no_features() {
+    assert!(!delayed_ack_with_host_banner(
+        "host::features=delayed_ack;features="
+    ));
 }
 
 #[test]

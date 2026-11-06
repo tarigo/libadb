@@ -82,6 +82,18 @@ fn tcp_port_non_numeric() {
 }
 
 #[test]
+fn a_port_with_a_sign_is_not_a_port() {
+    assert_eq!(parse("tcp://host:+5555"), Err(UriError::InvalidPort));
+    assert_eq!(parse("tcp://[::1]:+5555"), Err(UriError::InvalidPort));
+}
+
+#[test]
+fn a_usb_id_with_a_sign_is_not_four_hex_digits() {
+    assert_eq!(parse("usb://+8d1:4ee7"), Err(UriError::InvalidUsbSelector));
+    assert_eq!(parse("usb://18d1:+ee7"), Err(UriError::InvalidUsbSelector));
+}
+
+#[test]
 fn tcp_bare_ipv6_rejected() {
     assert_eq!(parse("tcp://::1:5555"), Err(UriError::InvalidHost));
 }

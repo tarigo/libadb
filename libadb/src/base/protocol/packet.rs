@@ -124,11 +124,11 @@ impl Packet {
     /// announces. Only meaningful after `decode` returned `Ok(None)`,
     /// which is also what bounds the announced length.
     pub fn missing(buf: &[u8]) -> usize {
-        if buf.len() < MESSAGE_SIZE {
+        let Some(payload) = buf.len().checked_sub(MESSAGE_SIZE) else {
             return MESSAGE_SIZE - buf.len();
-        }
+        };
         let data_length = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) as usize;
-        (MESSAGE_SIZE + data_length).saturating_sub(buf.len())
+        data_length.saturating_sub(payload)
     }
 
     /// Serialize into one contiguous buffer. Test-only: on the wire a
