@@ -481,6 +481,30 @@ fn open_credit(conn: &Connection<Mock>, local: u32) -> u32 {
 }
 
 #[test]
+fn a_write_before_its_ready_fails_the_open() {
+    let mut mock = Mock::new();
+    mock.feed(&cnxn()).feed(&wrte(1, b"early")).feed(&okay(1));
+    let mut conn = now(Connection::connect(
+        mock,
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
+
+    let err = now(conn.open_channel(b"shell:\0")).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Protocol(ProtocolError::UnexpectedCommand(Command::Write))
+        ),
+        "got {err:?}"
+    );
+    let (cmd, local, remote, _) = conn.transport().sent().last().unwrap().clone();
+    assert_eq!((cmd, local, remote), (Command::Close, 1, 42));
+}
+
+#[test]
 fn a_config_that_grants_no_credit_still_opens_with_some() {
     let config = ConnectionConfig::new().with_initial_ack_bytes(0);
     let (conn, ..) = two_channels_delayed_ack_with(config, 4096, &[]);

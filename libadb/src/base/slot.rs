@@ -5,6 +5,7 @@ use bytes::{Buf, BytesMut};
 
 use super::ids::{ChannelIds, LocalId, RemoteId};
 use super::negotiated::{AckMode, RxPolicy};
+use super::protocol::Command;
 use super::send_queue::SendQueue;
 use crate::error::{Error, ProtocolError, RxOverflow};
 
@@ -148,8 +149,13 @@ impl ChannelSlot {
         Ok(())
     }
 
-    pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, RxOverflow> {
-        self.push_rx(payload)?;
+    pub fn apply_write(&mut self, payload: &[u8]) -> Result<AckDecision, ChannelFault> {
+        if self.state == ChannelState::Opening {
+            let early = ProtocolError::UnexpectedCommand(Command::Write);
+            return Err(ChannelFault::Protocol(early));
+        }
+        self.push_rx(payload)
+            .map_err(|RxOverflow| ChannelFault::RxOverflow)?;
         self.unacked = self.unacked.saturating_add(payload.len());
         if self.policy.ack == AckMode::Classic && self.held() < self.policy.watermark {
             if let Some(ack) = self.ack(payload.len()) {

@@ -1,5 +1,4 @@
-//! A slot's receive-side accounting around the READY that names the
-//! device's end, and the credit it may send on.
+//! A slot's receive-side accounting, and the credit it may send on.
 
 use core::convert::Infallible;
 
@@ -24,50 +23,13 @@ fn accept(slot: &mut ChannelSlot) {
         .unwrap();
 }
 
-/// Until the READY names the device's end an OKAY has nowhere to go, so
-/// the data stays buffered. The first read after it takes the data and
-/// acknowledges all of it.
 #[test]
-fn a_write_before_the_ready_is_read_and_acknowledged_only_after_it() {
+fn a_write_before_the_ready_breaks_the_channel() {
     for ack in [AckMode::Delayed, AckMode::Classic] {
         let mut slot = opening(ack);
-        assert!(matches!(slot.apply_write(b"early"), Ok(AckDecision::Hold)));
-
-        let mut buf = [0u8; 8];
-        assert!(!slot.take_acks(buf.len()), "{ack:?}");
-        assert!(
-            matches!(slot.take_buffered::<Infallible>(&mut buf), Ok(None)),
-            "{ack:?}: read before the READY"
-        );
-        assert_eq!((slot.buffered(), slot.unacked()), (5, 5), "{ack:?}");
-
-        accept(&mut slot);
-        assert!(slot.take_acks(buf.len()), "{ack:?}");
-        let owed = slot.settle_take(buf.len());
-        let n = slot.take_buffered::<Infallible>(&mut buf).unwrap().unwrap();
-        assert_eq!(&buf[..n], b"early", "{ack:?}");
-        let ids = ChannelIds {
-            local: LocalId::from(LOCAL),
-            remote: RemoteId::from(REMOTE),
-        };
-        assert_eq!(owed, Some(PendingAck { ids, len: 5 }), "{ack:?}");
+        assert!(slot.apply_write(b"early").is_err(), "{ack:?}");
         assert_eq!((slot.buffered(), slot.unacked()), (0, 0), "{ack:?}");
     }
-}
-
-/// An OPEN the device refused after writing on it never opened: the
-/// read fails rather than hand out data nobody can acknowledge.
-#[test]
-fn a_write_before_a_refusal_is_never_handed_out() {
-    let mut slot = opening(AckMode::Delayed);
-    slot.apply_write(b"early").unwrap();
-    slot.apply_close();
-
-    let mut buf = [0u8; 8];
-    assert!(matches!(
-        slot.take_buffered::<Infallible>(&mut buf),
-        Err(Error::ChannelClosed)
-    ));
 }
 
 /// A read dropped while this OKAY is written has taken nothing.

@@ -32,7 +32,7 @@ use super::wire::{
     connection_gone, recv_pkt, recv_pkt_or, send_okay_to, send_open, send_pkt, send_raw,
     DesyncFlag, Received,
 };
-use crate::error::Error;
+use crate::error::{Error, ProtocolError};
 
 /// ADB connection over an async transport.
 pub struct Connection<T>
@@ -258,21 +258,14 @@ where
                     let slot = self.table.insert_opening(ch);
                     if let Err(e) = slot.accept_open_ready(remote, &pkt.data) {
                         self.table.free(ch);
-                        let checksum = self.negotiated.checksum();
-                        let ids = ChannelIds {
-                            local: ch.local,
-                            remote,
-                        };
-                        send_pkt(
-                            &mut self.transport,
-                            &self.desync,
-                            &Packet::close(ids),
-                            checksum,
-                        )
-                        .await?;
-                        return Err(e.into());
+                        return self.close_broken_open(ch, remote, e).await;
                     }
                     return Ok(ch);
+                }
+                Command::Write if pkt.arg1 == ch.local.raw() => {
+                    let early = ProtocolError::UnexpectedCommand(Command::Write);
+                    let remote = RemoteId::from(pkt.arg0);
+                    return self.close_broken_open(ch, remote, early).await;
                 }
                 Command::Close if pkt.arg1 == ch.local.raw() => {
                     return Err(Error::ChannelClosed);
@@ -282,6 +275,27 @@ where
                 }
             }
         }
+    }
+
+    async fn close_broken_open(
+        &mut self,
+        ch: ChannelId,
+        remote: RemoteId,
+        broken: ProtocolError,
+    ) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
+        let ids = ChannelIds {
+            local: ch.local,
+            remote,
+        };
+        let checksum = self.negotiated.checksum();
+        send_pkt(
+            &mut self.transport,
+            &self.desync,
+            &Packet::close(ids),
+            checksum,
+        )
+        .await?;
+        Err(broken.into())
     }
 
     /// Read data from a channel into `buf`. Returns the number of bytes read.
