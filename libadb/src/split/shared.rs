@@ -537,7 +537,7 @@ impl<WH> Shared<WH> {
         self.stream_over.load(Ordering::Acquire) || self.desync.check::<Infallible>().is_err()
     }
 
-    /// What a close comes to with its CLSE
+    /// The result of a close whose CLSE was
     /// [called off](Self::clse_called_off): `Ok` with the stream over,
     /// even for its own packet given up part way, unless the connection
     /// had lost step by then.

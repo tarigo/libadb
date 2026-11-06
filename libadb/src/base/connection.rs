@@ -350,8 +350,9 @@ where
     ///
     /// A channel the device closed fails with [`Error::ChannelClosed`],
     /// credit or no credit, and sends nothing more: adbd drops a WRTE
-    /// for a socket it no longer has without a word. That goes by the
-    /// CLSE having come in, so a write can still cross one on the wire.
+    /// for a socket it no longer has without a word. The check goes by
+    /// the CLSE having arrived, so a write can still cross one on the
+    /// wire.
     ///
     /// **Not cancellation-safe.** Dropping the future once a packet's
     /// write was first polled desynchronizes the connection: every later
@@ -447,8 +448,8 @@ where
 
     /// Close a channel: free its slot and send CLSE.
     ///
-    /// The slot comes back however the CLSE fares, and a CLSE that fails
-    /// comes back as the error. Nothing sends it again. With the device
+    /// The slot is freed even if the CLSE fails, and the failure comes
+    /// back as the error. Nothing sends it again. With the device
     /// gone nothing needs to; any other failure desynchronizes the
     /// connection and leaves the device holding its end of the channel,
     /// with no way left to reach it.

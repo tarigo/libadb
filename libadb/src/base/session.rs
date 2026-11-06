@@ -74,8 +74,8 @@ pub trait Session {
         interrupt: F,
     ) -> impl Future<Output = Result<SelectResult<F::Output>, Error<Self::IoError>>>;
 
-    /// Free `ch`'s slot and send CLSE for it. The slot comes back
-    /// however that fares.
+    /// Free `ch`'s slot and send CLSE for it. The slot is freed even if
+    /// the CLSE fails.
     fn close_channel(
         &mut self,
         ch: ChannelId,

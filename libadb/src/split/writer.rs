@@ -328,7 +328,7 @@ where
 
     /// Release the channel slot and send CLSE. Any cloned `Writer`
     /// parked on this channel observes `ChannelClosed` and unblocks,
-    /// however the CLSE fares.
+    /// whether or not the CLSE gets out.
     ///
     /// The CLSE is [owed](crate::split#what-the-device-is-owed) from the
     /// moment the slot goes. With the device gone or the stream over

@@ -128,8 +128,8 @@ impl<S: Session> Channel<'_, S> {
         self.session.select_channel(self.id, buf, interrupt).await
     }
 
-    /// Close the channel, sending CLSE to the device and freeing the
-    /// slot, which comes back however the CLSE fares.
+    /// Close the channel: free the slot and send CLSE to the device. The
+    /// slot is freed even if the CLSE fails.
     ///
     /// Consumes the `Channel`.
     pub async fn close(self) -> Result<(), Error<S::IoError>> {
@@ -161,8 +161,8 @@ pub(crate) trait ReadToEnd: Sized {
     ///
     /// The close goes out, best-effort, on every way out, because
     /// nothing else frees the slot ([`Channel`] has no `Drop`) and a slot
-    /// left taken ends in [`Error::NoFreeChannels`]. What the reads came
-    /// to outranks its result.
+    /// left taken ends in [`Error::NoFreeChannels`]. The result of the
+    /// reads is returned, not the close's.
     ///
     /// Once `buf` is full, one more read into a scratch byte tells
     /// whether the device has more. The device closing the channel then

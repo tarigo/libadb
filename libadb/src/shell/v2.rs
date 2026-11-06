@@ -512,8 +512,9 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// The device closing without an exit frame is
     /// [`Error::ChannelClosed`]. The close goes out on every way out,
     /// since nothing else frees the slot ([`Channel`] has no `Drop`). It
-    /// is best-effort, and what the reads came to outranks its result,
-    /// so a close that fails costs a finished command none of its output.
+    /// is best-effort: the result of the reads is returned, not the
+    /// close's, so a close that fails costs a finished command none of
+    /// its output.
     pub async fn collect(mut self) -> Result<CommandOutput, Error<S::IoError>> {
         let mut out = CommandOutput::default();
         let read = loop {
