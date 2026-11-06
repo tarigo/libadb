@@ -47,8 +47,6 @@ pub enum AdbStatus {
     Internal = 255,
 }
 
-/// The advice for C callers: the core's own knows neither this crate's
-/// `tls` feature nor which C call can start TLS.
 #[cfg(not(feature = "tls"))]
 const TLS_REQUIRED: &str = "device requires TLS (Android 11+ wireless debugging): \
     build libadb-ffi with the `tls` feature, connect over USB, \
@@ -98,14 +96,10 @@ pub(crate) fn fail_invalid_uri(msg: impl core::fmt::Display) -> AdbStatus {
     AdbStatus::InvalidUri
 }
 
-/// The status of a pairing that did not put the key on the device.
 #[cfg(feature = "pairing")]
 pub(crate) fn fail_pairing(e: PairingError<std::io::Error>) -> AdbStatus {
     let status = match &e {
         PairingError::WrongCode => AdbStatus::Pairing,
-        // EOF mid-exchange is the device ending it — dialog dismissed,
-        // attempts used up — a verdict, not a network fault that a
-        // retry would cure.
         PairingError::Closed => AdbStatus::Pairing,
         PairingError::Transport(_) => AdbStatus::Io,
         PairingError::Frame(_) | PairingError::Spake2(_) | PairingError::PeerInfo(_) => {
@@ -139,8 +133,6 @@ pub(crate) fn fail_error<E: core::fmt::Display>(e: Error<E>) -> AdbStatus {
         Error::NoFreeChannels => AdbStatus::NoFreeChannels,
         Error::Desynchronized => AdbStatus::Desynchronized,
         Error::Disconnected => AdbStatus::Disconnected,
-        // The device refused the rule — an answer, not a breakage; a
-        // malformed reply is a protocol fault like any other.
         Error::Reverse(ReverseError::Failed(_)) => AdbStatus::Reverse,
         Error::Reverse(ReverseError::UnexpectedReply) => AdbStatus::Protocol,
         _ => AdbStatus::Internal,

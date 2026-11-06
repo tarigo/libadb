@@ -13,9 +13,6 @@ use libadb::base::error::Error;
 use crate::connection::{FfiReader, FfiWriter};
 use crate::transport::FfiTransportError;
 
-/// How long a call waiting on what the read lock's holder dispatches
-/// sleeps before it looks at the lock again. The holder wakes it only by
-/// dispatching something for it, and may return to C without doing so.
 const TICK: Duration = Duration::from_millis(10);
 
 struct ThreadWaker {
@@ -30,7 +27,6 @@ impl ThreadWaker {
         }
     }
 
-    /// [`wait`](Self::wait), but no longer than `limit`.
     fn wait_at_most(&self, limit: Duration) {
         if !self.notified.swap(false, Ordering::SeqCst) {
             std::thread::park_timeout(limit);
@@ -49,8 +45,6 @@ impl Wake for ThreadWaker {
     }
 }
 
-/// Poll `fut` to completion on this thread, calling `wait` whenever a
-/// poll leaves it pending.
 fn run<F: Future>(fut: F, wait: impl Fn(&ThreadWaker)) -> F::Output {
     let tw = Arc::new(ThreadWaker {
         thread: std::thread::current(),
@@ -71,14 +65,6 @@ pub(crate) fn block_on<F: Future>(fut: F) -> F::Output {
     run(fut, ThreadWaker::wait)
 }
 
-/// Read `ch` into `buf` under the read lock or, while another call holds
-/// the lock, from what the holder dispatches, until the lock comes free.
-///
-/// A read must not simply wait for the lock. The holder can be a write
-/// reading for its OKAY, and the device may send that only once this
-/// read has taken its earlier output: a command stuck on its stdout
-/// stops taking stdin. Buffered data needs no lock, and taking it is
-/// what gives the device credit back.
 pub(crate) fn block_on_read(
     reader: &Mutex<FfiReader>,
     writer: &FfiWriter,
@@ -95,14 +81,6 @@ pub(crate) fn block_on_read(
     }
 }
 
-/// [`block_on`] for a future writing on channel `ch`: a write parked for
-/// the device with no read call running reads for itself, one packet at
-/// a time (see the [crate docs](crate)).
-///
-/// The read never races the write, because on USB a dropped read loses
-/// data. The write is not polled while it runs, so only a write with
-/// nothing to do but wait starts one. A failed read fails the write: no
-/// packet is left half sent, but a frame of several packets can be.
 pub(crate) fn block_on_write<T>(
     reader: &Mutex<FfiReader>,
     writer: &FfiWriter,
@@ -114,8 +92,6 @@ pub(crate) fn block_on_write<T>(
         if let Poll::Ready(done) = write.as_mut().poll(cx) {
             return Poll::Ready(done);
         }
-        // Asked under the lock: a read that returned a moment ago may
-        // have taken the OKAY, and then no packet may be coming.
         let Some(mut reader) = try_lock(reader).filter(|_| writer.waits_for_credit(ch)) else {
             return Poll::Pending;
         };

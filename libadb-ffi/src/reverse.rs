@@ -1,5 +1,3 @@
-//! `adb reverse` rules: establishing, removing and listing them.
-
 use core::ffi::{c_char, CStr};
 
 use libadb::reverse;

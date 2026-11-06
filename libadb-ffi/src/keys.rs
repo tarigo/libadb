@@ -10,9 +10,6 @@ use libadb::keys::{store, KeyName};
 
 use crate::error::{self, AdbStatus};
 
-/// Name recorded in a generated key when the caller passes none. The
-/// library reads no environment, so a caller wanting `user@host` in the
-/// device's dialog supplies it.
 const DEFAULT_NAME: &str = "libadb@host";
 
 /// An RSA host key loaded from, or generated into, a key directory.
@@ -20,9 +17,6 @@ const DEFAULT_NAME: &str = "libadb@host";
 /// Free it with [`adb_key_free`].
 #[allow(non_camel_case_types)]
 pub struct adb_key_t {
-    /// NUL-terminated, and zeroized when the handle is freed: this is
-    /// the private key in the clear, and `CString` would hand it back
-    /// to the allocator untouched.
     private_key_pem: Zeroizing<Vec<u8>>,
     public_key: CString,
 }
@@ -49,8 +43,6 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
 
     // SAFETY: non-null, and a C string per `# Safety`.
     let dir = unsafe { CStr::from_ptr(android_dir) };
-    // A Unix path is any byte string without a NUL: insisting on UTF-8
-    // would make a directory that `fopen` opens an invalid argument.
     #[cfg(unix)]
     let dir = {
         use std::os::unix::ffi::OsStrExt;
@@ -71,7 +63,6 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         }
     };
 
-    // A name the format cannot carry is a bad argument to this call.
     let name = match KeyName::new(name) {
         Ok(n) => n,
         Err(e) => return error::fail_invalid_arg(e),
@@ -79,27 +70,17 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
 
     let key = match store::load_or_generate(dir, &mut OsRng, name) {
         Ok(k) => k,
-        // Unusable key material on disk is the same class of failure
-        // as a rejected handshake.
         Err(e @ (store::StoreError::Malformed { .. } | store::StoreError::NotAKeyFile { .. })) => {
             return error::fail_auth(e)
         }
         Err(e @ store::StoreError::Key(_)) => return error::fail_internal(e),
-        // Matched by name, not by wildcard: a variant added upstream
-        // should fail this build rather than acquire an ABI status by
-        // accident.
         Err(e @ store::StoreError::Io { .. }) => return error::fail_io(e),
     };
 
-    // Serializing a key we already hold is our failure, not a verdict
-    // on the file it came from: a caller told otherwise might delete a
-    // perfectly good identity.
     let pem = match key.to_pkcs8_pem() {
         Ok(p) => p,
         Err(e) => return error::fail_internal(e),
     };
-    // `CString` adds the terminator, so the file line goes in rather
-    // than the wire form with one of its own.
     let Ok(public_key) = CString::new(key.public_key_line()) else {
         return error::fail_internal("key material contains a NUL");
     };

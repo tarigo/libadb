@@ -51,7 +51,6 @@
 extern crate alloc;
 extern crate std;
 
-// First: `ffi_try!` is in scope only in the modules declared after it.
 #[macro_use]
 mod macros;
 

@@ -1,6 +1,3 @@
-//! Channels the device opens toward the host: waiting for one, then
-//! accepting or rejecting it.
-
 use crate::channel::encode_channel_id;
 use crate::connection::{adb_connection_t, lock_poisoned};
 use crate::error::{self, AdbStatus};
@@ -32,12 +29,7 @@ pub unsafe extern "C" fn adb_accept_channel(
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let conn = unsafe { &*conn };
-    // Held across the empty check, the dequeue and the store, so
-    // concurrent reports share one staged request. Lock order: this
-    // lock first, then the reader lock, never the reverse.
     let mut staged = lock_poisoned(&conn.staged_incoming);
-    // A request already staged is re-reported, not displaced — that
-    // keeps probe-allocate-copy sequences working on one request.
     if let Some(incoming) = staged.as_ref() {
         // SAFETY: `dest` and `out_dest_len` are NULL or writable as sized, per `# Safety`.
         unsafe { copy_out(incoming.destination(), dest, dest_cap, out_dest_len) };
@@ -48,8 +40,6 @@ pub unsafe extern "C" fn adb_accept_channel(
     drop(g);
     // SAFETY: `dest` and `out_dest_len` are NULL or writable as sized, per `# Safety`.
     unsafe { copy_out(incoming.destination(), dest, dest_cap, out_dest_len) };
-    // Stage the request itself: the verdict calls consume it, so they
-    // cannot answer some other OPEN that queued up in the meantime.
     *staged = Some(incoming);
     AdbStatus::Ok
 }

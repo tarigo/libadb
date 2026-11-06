@@ -1,6 +1,3 @@
-//! `adb pair` for C: put the caller's key on a device through its
-//! "Pair device with pairing code" dialog.
-
 use alloc::format;
 use core::ffi::{c_char, CStr};
 
@@ -71,9 +68,6 @@ pub unsafe extern "C" fn adb_pair(
         Err(e) => return error::fail_invalid_arg(e),
     };
 
-    // Everything a caller could have got wrong is refused here, before
-    // the socket opens: a bad call must not cost the device an attempt,
-    // or its port.
     let (host, port) = match uri::parse(uri) {
         Ok(Uri::Tcp { host, port }) => (host, port),
         Ok(Uri::Usb(_)) => return error::fail_invalid_uri("pairing is tcp:// only"),
@@ -83,10 +77,6 @@ pub unsafe extern "C" fn adb_pair(
         return error::fail_invalid_arg("pairing code is empty");
     }
 
-    // The line the device stores is derived from the private key, so
-    // the caller's name goes into it and the caller's blob is checked
-    // against it. A file read leaves a line ending behind; only that
-    // goes, since a name may end in anything but CR or LF.
     let pub_key = pub_key.trim_end_matches(['\r', '\n']);
     let (blob, name) = pub_key.split_once(' ').unwrap_or((pub_key, ""));
     let name = match KeyName::new(name) {
@@ -122,8 +112,6 @@ pub unsafe extern "C" fn adb_pair(
         Err(e) => return error::fail_pairing(e),
     };
 
-    // The device has the key and is closing its port; a close_notify
-    // is a courtesy, and nothing here depends on it going out.
     let _ = crate::block_on::block_on(transport.shutdown());
     // SAFETY: `guid` and `out_guid_len` are NULL or writable as sized, per `# Safety`.
     unsafe { crate::slice::copy_out(paired.guid.as_bytes(), guid, guid_cap, out_guid_len) };

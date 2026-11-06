@@ -1,6 +1,3 @@
-//! The `ADB_FEATURE_*` table and the C calls that ask a connection
-//! about features.
-
 use core::ffi::c_char;
 use core::ptr;
 

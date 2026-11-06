@@ -1,6 +1,3 @@
-//! The connection handle: opening it, its socket timeouts, what the
-//! handshake negotiated, and releasing it.
-
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::{c_char, CStr};
@@ -17,8 +14,6 @@ use crate::error::{self, AdbStatus};
 use crate::slice::copy_out;
 use crate::transport::{self, FfiTransport};
 
-// The halves a connection splits into: under TLS they are not the
-// transport itself.
 pub(crate) type FfiReadHalf = <FfiTransport as Splittable>::ReadHalf;
 pub(crate) type FfiWriteHalf = <FfiTransport as Splittable>::WriteHalf;
 pub(crate) type FfiReader = Reader<FfiReadHalf, FfiWriteHalf>;
@@ -35,11 +30,7 @@ pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,
     pub(crate) writer: FfiWriter,
-    /// Second handle to the TCP socket for timeouts; None over USB.
     pub(crate) tcp_socket: Option<std::net::TcpStream>,
-    /// The device-initiated OPEN that
-    /// [`adb_accept_channel`](crate::adb_accept_channel) reported. It stays
-    /// here, and calls report it again, until a verdict takes it out.
     pub(crate) staged_incoming: Mutex<Option<FfiIncoming>>,
 }
 
@@ -195,7 +186,6 @@ unsafe fn handshake(
     AdbStatus::Ok
 }
 
-/// The handshake in the clear.
 fn connect_plain<A: Authenticator>(
     t: FfiTransport,
     auth: A,
@@ -210,9 +200,6 @@ fn connect_plain<A: Authenticator>(
     .map_err(error::fail_error)
 }
 
-/// What `adb_connect` runs: TLS if a TCP device asks for it. adbd never
-/// offers STLS over USB, and the certificate costs an RSA signature, so
-/// only a `tcp://` connect pays for it.
 #[cfg(feature = "tls")]
 fn connect_with_key(
     t: FfiTransport,

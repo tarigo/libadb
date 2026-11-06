@@ -20,10 +20,6 @@ pub(crate) struct FfiAuthenticator {
 
 impl FfiAuthenticator {
     pub(crate) fn from_pkcs8_pem(priv_pem: &str, pub_key: &[u8]) -> Result<Self, String> {
-        // Signing goes through `AdbKey` so this path is blinded like
-        // every other: the token comes from whatever is on the other
-        // end of the wire. The name only feeds the public blob it
-        // derives, which the caller's own blob replaces below.
         let key = AdbKey::from_pkcs8_pem(priv_pem, &mut OsRng, KeyName::default())
             .map_err(|e| format!("parse private key: {e}"))?;
         Ok(Self {
@@ -32,17 +28,12 @@ impl FfiAuthenticator {
         })
     }
 
-    /// The TLS profile this key connects with. Built once per connect,
-    /// and only when a TCP device may ask for it.
     #[cfg(feature = "tls")]
     pub(crate) fn tls_config(&self) -> Result<TlsClientConfig, String> {
         tls_config_for(&self.key)
     }
 }
 
-/// The TLS profile `key` connects with: a self-signed certificate
-/// carrying its public key. Building one signs the certificate, which
-/// is the slow part of a TLS connection.
 #[cfg(feature = "tls")]
 pub(crate) fn tls_config_for(key: &AdbKey) -> Result<TlsClientConfig, String> {
     let identity = TlsIdentity::from_key(key, &mut OsRng).map_err(|e| format!("tls: {e}"))?;

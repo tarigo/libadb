@@ -33,8 +33,6 @@ impl ParseState {
         }
     }
 
-    /// The next frame, with its id as the byte C sees, whether or not
-    /// [`FrameId`] names it.
     fn try_next_frame(&mut self) -> Result<Option<(u8, Vec<u8>)>, Error<FfiTransportError>> {
         let frame = self
             .decoder
@@ -66,8 +64,6 @@ pub struct adb_shell_t {
     writer: FfiWriter,
     channel_id: ChannelId,
     parse_state: Mutex<ParseState>,
-    /// Held for the whole of one frame, so concurrent senders take
-    /// turns instead of interleaving: see [`send_frame_async`].
     send_lock: Mutex<()>,
     closed: AtomicBool,
 }
@@ -91,13 +87,6 @@ fn read_frame(sh: &adb_shell_t) -> Result<(u8, Vec<u8>), Error<FfiTransportError
     }
 }
 
-/// Send one shell_v2 frame, holding `send_lock` across both writes.
-///
-/// Without the lock two threads on one session send header A, header B,
-/// payload A, and the far side reads the middle of a payload as the next
-/// header. The frame is not assembled into one buffer because that would
-/// make every write allocate up to the 4 GiB a shell_v2 length field
-/// allows, and the session would hold on to that high-water mark.
 async fn send_frame_async(
     writer: &FfiWriter,
     send_lock: &Mutex<()>,
@@ -303,8 +292,6 @@ pub unsafe extern "C" fn adb_shell_close_stdin(sh: *mut adb_shell_t) -> AdbStatu
     let sh = unsafe { &*sh };
     match send_frame(sh, FrameId::CloseStdin, &[]) {
         Ok(()) => AdbStatus::Ok,
-        // `adb_shell_close` sets `closed` before it frees the slot, so a
-        // racing close is not mistaken for the device's.
         Err(Error::ChannelClosed) if !sh.closed.load(Ordering::Acquire) => AdbStatus::Ok,
         Err(e) => error::fail_error(e),
     }
@@ -364,7 +351,6 @@ unsafe fn send_frame_payload(sh: *mut adb_shell_t, id: FrameId, payload: &[u8]) 
     }
 }
 
-/// Send one frame on a session not yet closed from this end.
 fn send_frame(
     sh: &adb_shell_t,
     id: FrameId,

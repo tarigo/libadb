@@ -7,8 +7,6 @@ use libadb::transport::runtime::Inline;
 use libadb::transport::tcp::BlockingTcp;
 use libadb::transport::UsbBackend;
 
-// The C ABI has a single `adb_connect(uri)`, so when both backends are
-// compiled in one of them has to win: nusb, matching the `usb` alias.
 #[cfg(feature = "nusb")]
 type Backend = libadb::transport::nusb::Nusb;
 
@@ -20,7 +18,6 @@ type Backend = libadb::transport::common::NoUsb;
 
 type Usb = <Backend as UsbBackend<Inline>>::Transport;
 
-/// The TCP half: able to start TLS when the build can answer STLS.
 #[cfg(feature = "tls")]
 pub(crate) type FfiTcp = libadb::transport::tls::MaybeTls<BlockingTcp>;
 #[cfg(not(feature = "tls"))]
@@ -41,10 +38,6 @@ fn tcp(plain: BlockingTcp) -> FfiTcp {
     }
 }
 
-/// Open the transport `uri` names. Over `tcp://` a second handle to the
-/// socket comes along for socket options, cloned before wrapping because
-/// `MaybeTls` keeps its stream to itself. A failed clone fails the
-/// connect: the timeout setter would otherwise claim there is no socket.
 pub(crate) fn connect(uri: &str) -> Result<(FfiTransport, Option<TcpStream>), FfiConnectError> {
     match crate::block_on::block_on(any::connect::<Inline, Backend>(uri))? {
         Transport::Tcp(plain) => {
