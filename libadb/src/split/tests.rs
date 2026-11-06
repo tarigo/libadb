@@ -430,7 +430,7 @@ fn a_ready_without_credit_fails_a_writer_open_on_a_reader_driven_connection() {
         matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
         "reader: got {err:?}"
     );
-    // ... and the opener hears of it too, instead of waiting on.
+    // ... and the opener gets the fault too, instead of waiting on.
     let err = now(open).unwrap_err();
     assert!(
         matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
@@ -476,9 +476,7 @@ fn a_read_dropped_waiting_for_the_ack_lock_takes_nothing() {
     assert_eq!(&buf[..n], b"hello");
 }
 
-/// What a reader-driven read took off the wire stays in the channel
-/// until the read can have it, so a call dropped while it waits to
-/// acknowledge leaves the next one the bytes and the OKAY.
+/// The next read gets the bytes and sends the OKAY.
 #[test]
 fn a_reader_dropped_waiting_for_the_ack_lock_keeps_the_packet() {
     use core::task::{Context, Waker};
@@ -512,8 +510,7 @@ fn a_reader_dropped_waiting_for_the_ack_lock_keeps_the_packet() {
     assert_eq!(seen.acks_for(1), [5]);
 }
 
-/// A zero-length WRTE delivers nothing, so a read goes on to the next
-/// packet rather than come back with a zero that means nothing either.
+/// Returning zero for an empty packet would tell the caller nothing.
 #[test]
 fn a_reader_reads_past_a_zero_length_write() {
     let (mut reader, _writer, ch, _seen) =
@@ -523,8 +520,7 @@ fn a_reader_reads_past_a_zero_length_write() {
     assert_eq!(&buf[..n], b"after it");
 }
 
-/// Without delayed ACK the empty packet still has its OKAY coming: the
-/// device sends nothing more on the channel until it arrives.
+/// The device sends nothing more on this channel until the OKAY comes.
 #[test]
 fn a_zero_length_write_is_still_acknowledged_without_delayed_ack() {
     let (mut reader, _writer, ch) = split_with_channel(None);
@@ -538,8 +534,8 @@ fn a_zero_length_write_is_still_acknowledged_without_delayed_ack() {
     assert_eq!(seen.acks_for(1).len(), 2);
 }
 
-/// The packet a read asks for goes through the slot whole, and the cap
-/// never drops below a packet. Read in pieces, as `deliver` served it.
+/// The packet a read waits for goes through the slot whole, and the cap
+/// never drops below a packet.
 #[test]
 fn a_full_packet_fits_a_channel_with_the_smallest_receive_cap() {
     let config = ConnectionConfig::new()
@@ -612,8 +608,8 @@ fn an_opener_dropped_after_its_ready_was_taken_still_closes_the_channel() {
 
 #[test]
 fn a_fault_closes_the_device_end_even_once_the_slot_is_gone() {
-    // The opener was given up on between the fault and this: its
-    // slot is free, but the device still holds the channel open.
+    // The opener was dropped between the fault and this: its slot is
+    // free, but the device still holds the channel open.
     let (reader, _writer, _ch) = split_with_channel(None);
     let seen = reader.shared.write_half.try_lock().unwrap().clone();
     let ids = ChannelIds {
@@ -661,8 +657,8 @@ fn a_read_that_owes_no_ack_does_not_wait_for_the_write_lock() {
     assert_eq!(chs.get(ch).unwrap().unacked(), 1000);
 }
 
-/// A write given up on says nothing about bytes the device already
-/// delivered: the read gets them, and the next one the failure.
+/// The abandoned write does not affect bytes the device had already
+/// delivered. Only the next read fails.
 #[test]
 fn a_read_woken_on_a_desynchronized_connection_hands_out_what_arrived() {
     use core::task::{Context, Waker};
@@ -696,8 +692,7 @@ fn hold_back<WH: embedded_io_async::Write>(writer: &Writer<WH>, ch: ChannelId, d
     chs.get_mut(ch).unwrap().apply_write(data).unwrap();
 }
 
-/// The failure of an OKAY is the connection's and not the read's, whose
-/// bytes the device delivered all the same.
+/// The failure is the connection's: the bytes did arrive.
 #[test]
 fn a_failed_okay_costs_the_read_nothing() {
     let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -715,9 +710,9 @@ fn a_failed_okay_costs_the_read_nothing() {
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
 }
 
-/// Writes fail like this once the device is gone, which leaves no
-/// stream to fall out of step with: reads go on to what it sent before
-/// it went, here and on the wire.
+/// Writes fail with these kinds once the device is gone. No stream is
+/// left to fall out of step with, so reads still get what it sent
+/// before that, buffered or on the wire.
 #[test]
 fn an_okay_to_a_device_that_is_gone_desynchronizes_nothing() {
     for kind in [
@@ -746,8 +741,8 @@ fn an_okay_to_a_device_that_is_gone_desynchronizes_nothing() {
     }
 }
 
-/// An unknown failure is no such thing: the device may be there, and
-/// reading the rest of a packet from whatever comes next.
+/// With any other failure the device may still be there, and would read
+/// whatever comes next as the rest of the packet.
 #[test]
 fn an_okay_that_fails_otherwise_desynchronizes() {
     let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -763,8 +758,8 @@ fn an_okay_that_fails_otherwise_desynchronizes() {
         .is_err());
 }
 
-/// Without delayed ACK the OKAY goes out as the packet is dispatched,
-/// and a read cannot be left to fail with the packet still in the slot.
+/// Without delayed ACK the OKAY goes out at dispatch, with the packet
+/// the read waits for still in the slot.
 #[test]
 fn a_reader_hands_over_a_packet_whose_okay_failed() {
     let (mut reader, _writer, ch) = split_with_channel(None);
@@ -779,9 +774,9 @@ fn a_reader_hands_over_a_packet_whose_okay_failed() {
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
 }
 
-/// Taking the bytes ahead of the write would lose them with the call,
-/// and the next read, which a desync no longer stops, would come back
-/// past the gap with no word of it.
+/// If the bytes left the buffer before the OKAY was written, dropping
+/// the call would lose them. A desync no longer stops the next read, so
+/// it would skip the gap and report nothing.
 #[test]
 fn a_read_dropped_writing_its_okay_leaves_no_gap() {
     let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -803,9 +798,9 @@ fn a_read_dropped_writing_its_okay_leaves_no_gap() {
     assert!(matches!(err, Error::Desynchronized), "got {err:?}");
 }
 
-/// An OKAY lets the device send as much again, and `run` takes that in
-/// with the write still finishing. It owes an OKAY of its own, which a
-/// read taking it along would leave unsent, and the credit gone for good.
+/// An OKAY lets the device send as much again, and `run` can receive
+/// that while the write is still finishing. A read that took those bytes
+/// along would leave their OKAY unsent, and the credit lost for good.
 #[test]
 fn what_lands_during_an_okay_keeps_the_okay_it_owes() {
     use core::task::{Context, Waker};
@@ -831,10 +826,9 @@ fn what_lands_during_an_okay_keeps_the_okay_it_owes() {
     assert_eq!(seen.acks_for(1), [5, 6], "credit for every byte read");
 }
 
-/// Read `ch` with the OKAY for `packets[0]` held up on its way out, a
-/// second read taking the bytes it settled, and `packets[1]` landing in
-/// their place before it gets out. The first read has nothing left of
-/// what it settled, and what it finds instead owes an OKAY of its own.
+/// Read `ch` with the OKAY for `packets[0]` still going out. A second
+/// read takes those bytes and `packets[1]` lands in their place, so the
+/// first read returns `packets[1]`, which owes an OKAY of its own.
 fn read_overtaken_during_its_okay(
     reader: &mut Reader<SharedMock, SharedMock>,
     writer: &Writer<SharedMock>,
@@ -874,9 +868,8 @@ fn read_overtaken_during_its_okay(
     assert_eq!(slot.unacked(), 0, "bytes gone with no OKAY for them");
 }
 
-/// Under delayed ACK nothing would acknowledge those bytes later: with
-/// the buffer empty no read has anything to settle, and the credit they
-/// took is gone for good.
+/// Under delayed ACK, with the buffer empty, no later read would
+/// acknowledge those bytes, and their credit would be lost for good.
 #[test]
 fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead() {
     let (mut reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -885,8 +878,8 @@ fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead() {
 }
 
 /// Without delayed ACK a packet that reaches the watermark holds back
-/// its OKAY for a read, and it is the one OKAY the device waits for
-/// before it sends another: going without stops the channel.
+/// its OKAY until a read. The device waits for that OKAY before it
+/// sends another packet, so without it the channel stops.
 #[test]
 fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead_without_delayed_ack() {
     let mut mock = Mock::new();
@@ -909,8 +902,8 @@ fn a_read_overtaken_during_its_okay_owes_what_it_takes_instead_without_delayed_a
     assert_eq!(seen.acks_for(1), [0, 0], "an OKAY for each packet");
 }
 
-/// A stalled write half does not hold up what no OKAY can come of. A
-/// read that tried would never finish here: every write stalls.
+/// A read that tried to send the OKAY would never finish: every write
+/// stalls here.
 #[test]
 fn a_desynchronized_connection_is_sent_no_okay() {
     let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -937,8 +930,7 @@ fn a_connection_nobody_reads_is_sent_no_okay() {
     assert!(matches!(err, Error::Disconnected), "got {err:?}");
 }
 
-/// What a closed channel still holds owes nothing, so a read of it waits
-/// for no write half, however busy that is.
+/// What a closed channel still holds owes no OKAY.
 #[test]
 fn a_closed_channel_is_read_without_the_write_half() {
     let (_reader, writer, ch, seen) = crate::base::mock::split_one_channel_delayed_ack(64, &[]);
@@ -971,9 +963,9 @@ fn writes_that_complete_leave_both_halves_working() {
     ));
 }
 
-/// What a packet owes the device outlives the call that took it in: a
-/// call dropped behind a busy writer leaves it to go out ahead of
-/// whatever comes next, in the order it fell due.
+/// The OKAY or CLSE a received packet owes the device outlives the call
+/// that took the packet in. A call dropped behind a busy writer leaves
+/// it to go out ahead of whatever comes next, oldest first.
 mod debt_tests {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
@@ -1017,8 +1009,7 @@ mod debt_tests {
             .collect()
     }
 
-    /// The device's READY for an end of ours that nobody waits on any
-    /// more: an OPEN given up on before the answer.
+    /// The device's READY to an OPEN dropped before the answer.
     fn stray_ready(local_id: u32) -> Packet {
         Packet::new(Command::Ready, 43, local_id, Vec::new())
     }
@@ -1064,8 +1055,8 @@ mod debt_tests {
         assert_eq!(closes(&seen), [(7, 43)]);
     }
 
-    /// A READY without its credit breaks channel 1, and the device still
-    /// holds an end it takes for open.
+    /// A READY without its credit breaks channel 1, while the device
+    /// still treats its end as open.
     #[test]
     fn a_close_for_a_fault_survives_a_call_dropped_behind_a_busy_writer() {
         let (mut reader, _a, _b, seen) =
@@ -1082,9 +1073,9 @@ mod debt_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// `dispatch_one` waits for a packet however long one takes, and the
-    /// device, owed an OKAY, may have no reason to send one. Read here
-    /// as the end of the mock: the debt has to be out by then.
+    /// `dispatch_one` waits as long as a packet takes, and a device owed
+    /// an OKAY may have no reason to send one. The read here hits the
+    /// end of the mock, and the debt must be out by then.
     #[test]
     fn a_call_pays_before_it_waits_for_a_packet() {
         let (mut reader, writer, ch) = split_with_channel(None);
@@ -1100,9 +1091,9 @@ mod debt_tests {
         assert_eq!(closes(&seen), [(7, 43)]);
     }
 
-    /// The opener goes after the read that took its packets, so the
-    /// CLSE falls due behind the OKAY for the same channel, and a list
-    /// paid from the wrong end would close the channel first.
+    /// The opener is dropped after the read that received its packets,
+    /// so the CLSE is owed after the OKAY for the same channel. Sending
+    /// the newest first would close the channel before its OKAY.
     #[test]
     fn what_is_owed_goes_out_in_the_order_it_fell_due() {
         let mut mock = Mock::new();
@@ -1145,8 +1136,9 @@ mod debt_tests {
         );
     }
 
-    /// What bounds the list: nothing more comes in until it is paid, so
-    /// a call dropped over and over adds nothing, with more waiting.
+    /// Nothing more is received until the list is sent, so a call
+    /// dropped again and again adds nothing, even with more packets
+    /// waiting.
     #[test]
     fn repeated_cancellation_cannot_grow_what_is_owed() {
         let (mut reader, writer, ch) = split_with_channel(None);
@@ -1169,8 +1161,8 @@ mod debt_tests {
         assert_eq!(closes(&seen), [(10, 43), (11, 43), (12, 43), (13, 43)]);
     }
 
-    /// Only the wait for the write half can be walked away from: past
-    /// that the packet is on its way out, and a drop abandons it.
+    /// Only the wait for the write half is safe to drop. Past it the
+    /// packet is on its way out, and a drop abandons it.
     #[test]
     fn a_payment_dropped_mid_write_desynchronizes() {
         let (mut reader, writer, ch) = split_with_channel(None);
@@ -1187,8 +1179,8 @@ mod debt_tests {
             .is_err());
     }
 
-    /// Nothing reaches a device that is gone, and what it sent before it
-    /// went is still to be received past the debt that cannot be paid.
+    /// The debt cannot be paid, and must not keep back the packets
+    /// behind it.
     #[test]
     fn what_is_owed_to_a_device_that_is_gone_is_written_off() {
         let (mut reader, writer, ch) = split_with_channel(None);
@@ -1206,8 +1198,8 @@ mod debt_tests {
         assert!(writer.shared.lock_owed().is_empty());
     }
 
-    /// `run` refuses what nobody listens for ahead of every receive. The
-    /// refusal fails, which takes the request with it, and giving up
+    /// `run` refuses requests nobody listens for before every receive.
+    /// The refusal fails here, which consumes the request, and stopping
     /// there would leave the packets behind it unread.
     #[test]
     fn a_refusal_to_a_device_that_is_gone_stops_nothing() {
@@ -1229,9 +1221,8 @@ mod debt_tests {
         assert_eq!(&buf[..n], b"behind it");
     }
 
-    /// An OPEN past the cap is refused as it lands, and that refusal
-    /// failing is no reason for the call that took it in to fail: the
-    /// packets behind it are still to be read.
+    /// The call that received the OPEN past the cap does not fail with
+    /// the refusal: the packets behind it are still to be read.
     #[test]
     fn a_refusal_on_arrival_to_a_device_that_is_gone_stops_nothing() {
         let mut mock = Mock::new();
@@ -1256,7 +1247,7 @@ mod debt_tests {
         now(reader.dispatch_one()).unwrap();
     }
 
-    /// The same for what a cancelled refusal left past the cap.
+    /// The same for an OPEN that a cancelled refusal left past the cap.
     #[test]
     fn a_refusal_past_the_cap_to_a_device_that_is_gone_stops_nothing() {
         let mut mock = Mock::new();
@@ -1292,10 +1283,10 @@ mod debt_tests {
         assert_eq!(&buf[..n], b"behind it");
     }
 
-    /// Reception carries on once the device is gone, to what it sent
-    /// before it went, and that may be more OPENs than the queue has room
-    /// for. Each refusal fails. Were it to go back, each would land one
-    /// past the cap, and hold on to its destination.
+    /// Reception goes on after the device is gone, to get what it sent
+    /// before that, which may be more OPENs than the queue has room
+    /// for. Each refusal fails. If a refused OPEN went back to the
+    /// queue, each would sit one past the cap and keep its destination.
     #[test]
     fn opens_from_a_device_that_is_gone_stay_within_the_budget() {
         let mut mock = Mock::new();
@@ -1325,7 +1316,6 @@ mod debt_tests {
         assert_eq!(&buf[..n], b"behind them");
     }
 
-    /// A request for a verdict, with every slot of its connection taken.
     fn request_with_no_slot_left() -> (
         Reader<SharedMock, SharedMock>,
         Writer<SharedMock>,
@@ -1349,9 +1339,9 @@ mod debt_tests {
         (reader, writer, incoming, seen)
     }
 
-    /// A device that is gone leaves nobody to refuse, so the request goes,
-    /// and the call still fails. Any other failure says nothing of the
-    /// kind: the request is back for another verdict.
+    /// The call fails either way. With the device gone nothing is left
+    /// to refuse, so the request is consumed. Any other failure puts it
+    /// back for another verdict.
     #[test]
     fn a_reject_that_fails_keeps_the_request_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -1364,8 +1354,7 @@ mod debt_tests {
         }
     }
 
-    /// With no slot to give, an accept is a refusal, and goes the same
-    /// way.
+    /// With no slot free an accept is a refusal, and behaves the same.
     #[test]
     fn an_accept_with_no_slot_that_fails_keeps_the_request_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -1395,11 +1384,11 @@ mod debt_tests {
         (reader, writer, ch, seen)
     }
 
-    /// A READY that finds the device gone leaves nobody to take the
-    /// channel, so the request goes, and a listener that carries on waits
-    /// for the end of the connection like anyone else, rather than be
-    /// handed the same request for ever. Any other failure leaves the
-    /// request in the queue, behind the desync it raised.
+    /// With the device gone nobody can use the channel, so the request
+    /// is consumed. A listener that carries on waits for the end of the
+    /// connection, rather than get the same request for ever. After any
+    /// other failure the request stays queued and the next accept fails
+    /// with the desync.
     #[test]
     fn an_accept_that_fails_keeps_the_request_from_a_listener_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -1424,9 +1413,9 @@ mod debt_tests {
         }
     }
 
-    /// The same for a reader, which only gets to what the device sent
-    /// before it went, and to the end of that, with the request out of
-    /// the way.
+    /// The same on a `Reader`: only with the request out of the way
+    /// does `accept_incoming` reach the packets the device had already
+    /// sent, and the end of the stream after them.
     #[test]
     fn an_accept_that_fails_keeps_the_request_from_a_reader_unless_the_device_is_gone() {
         for (kind, left) in FAILED_WRITES {
@@ -1452,10 +1441,10 @@ mod debt_tests {
     }
 }
 
-/// The wait for the write half is a cancellation point callers are
-/// promised, so it writes nothing, whatever is owed: what they go on to
-/// write is their own packet alone, and what is owed stays for a call
-/// that writes as a matter of course.
+/// Callers are promised that dropping the wait for the write half is
+/// safe, so the wait writes nothing, whatever is owed. They then write
+/// only their own packet, and what is owed stays for a call that would
+/// write anyway.
 mod lock_wait_tests {
     use alloc::boxed::Box;
     use core::convert::Infallible;
@@ -1498,7 +1487,6 @@ mod lock_wait_tests {
         writer.shared.desync.check::<Infallible>().is_ok()
     }
 
-    /// A request for a verdict, with a CLSE owed behind it.
     fn request_with_a_close_owed() -> (
         Reader<SharedMock, SharedMock>,
         Writer<SharedMock>,
@@ -1553,8 +1541,7 @@ mod lock_wait_tests {
         assert_eq!(writer.shared.lock_owed().len(), 1);
     }
 
-    /// With no slot to give, the accept is a refusal, and goes the same
-    /// way.
+    /// With no slot free the accept is a refusal, and behaves the same.
     #[test]
     fn an_accept_with_no_slot_goes_past_what_is_owed() {
         let mut mock = Mock::new();
@@ -1579,10 +1566,9 @@ mod lock_wait_tests {
         assert!(done, "the accept went for a packet not its own");
     }
 
-    /// On a transport that takes nothing any more a call stalls on the
-    /// first thing it writes. A read that, by the time it has the write
-    /// half, has nothing of its own to write has no business there: the
-    /// device closed the channel while it waited, so no OKAY is owed.
+    /// Every write stalls here. The device closes the channel while the
+    /// read waits for the write half, which leaves no OKAY owed and
+    /// nothing for the read to write.
     #[test]
     fn a_read_left_with_nothing_to_send_writes_nothing() {
         let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -1609,7 +1595,6 @@ mod lock_wait_tests {
         assert_eq!(&buf[..5], b"hello");
     }
 
-    /// The wait itself was never the trouble, and stays safe to drop.
     #[test]
     fn a_call_dropped_waiting_for_the_write_half_abandons_nothing() {
         let (_reader, writer, incoming, seen) = request_with_a_close_owed();
@@ -1632,10 +1617,9 @@ mod lock_wait_tests {
         assert!(in_step(&writer));
     }
 
-    /// A transport that takes nothing stalls a call in its own packet,
-    /// which what is owed never reached, and from which nothing can walk
-    /// away: the write has been polled, and a drop abandons it. It costs
-    /// the call nothing it promised to keep.
+    /// The read stalls in its own OKAY, not in what is owed. That write
+    /// has been polled, so dropping the read abandons the packet. The
+    /// read keeps what it promised: the bytes stay readable.
     #[test]
     fn a_read_dropped_writing_its_own_packet_desynchronizes() {
         let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -1670,7 +1654,6 @@ mod lock_wait_tests {
         assert!(writer.shared.take_incoming().is_some(), "the request stays");
     }
 
-    /// What a call leaves owing goes with whatever writes next.
     #[test]
     fn what_a_read_left_owing_goes_out_with_the_next_write() {
         let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -1704,7 +1687,6 @@ mod send_queue_tests {
         fut.poll(&mut cx)
     }
 
-    /// WRTE payloads the writer put on the wire, in order.
     fn wrte_payloads(seen: &SharedMock) -> Vec<Vec<u8>> {
         seen.sent()
             .into_iter()
@@ -1903,9 +1885,9 @@ mod incoming_tests {
     }
 }
 
-/// A reader-driven connection ends in a receive some call happens to be
-/// making. That call gets the failure, and everyone else parked on the
-/// connection has to hear of it too, or they wait for ever.
+/// A reader-driven connection ends in a receive that some call happens
+/// to be making. That call gets the failure, and everyone else waiting
+/// on the connection must be told too, or they wait for ever.
 mod end_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
@@ -1933,9 +1915,9 @@ mod end_tests {
         fut.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    /// Two channels without delayed ACK and a read of `a` to go, which
-    /// waits for a packet: the first has one WRTE out, so the next waits
-    /// for its OKAY.
+    /// Two channels without delayed ACK. `a` has one WRTE out, so the
+    /// next write on it waits for its OKAY, and a read of `a` waits for
+    /// a packet.
     #[allow(clippy::type_complexity)]
     fn two_channels() -> (
         Reader<SharedMock, SharedMock>,
@@ -1962,8 +1944,7 @@ mod end_tests {
         (reader, writer, a, b, seen)
     }
 
-    /// One of everything a `Writer` waits for the device with, each
-    /// polled until it does.
+    /// Each call that waits for the device, polled until it parks.
     fn parked<'a>(
         writer: &'a Writer<SharedMock>,
         a: ChannelId,
@@ -2006,8 +1987,8 @@ mod end_tests {
         assert_all_disconnected(&mut waiters);
     }
 
-    /// The kinds a dropped connection comes back as, which `ErrorKind`
-    /// can tell from a timeout.
+    /// The error kinds of a dropped connection, which `ErrorKind` can
+    /// tell from a timeout.
     #[test]
     fn a_connection_gone_ends_every_waiter() {
         for kind in [
@@ -2068,10 +2049,10 @@ mod end_tests {
         }
     }
 
-    /// A read timeout looks like any other failure to everything but the
-    /// caller, who set it: on unix `SO_RCVTIMEO` comes back as
-    /// `WouldBlock`, which is `ErrorKind::Other` here. It says nothing
-    /// about the connection, so nothing ends and nobody is told.
+    /// Only the caller who set a read timeout can tell it from another
+    /// failure: on unix `SO_RCVTIMEO` comes back as `WouldBlock`, which
+    /// is `ErrorKind::Other` here. A timeout says nothing about the
+    /// connection, so nothing ends and the waiters stay parked.
     #[test]
     fn a_timeout_ends_nothing() {
         for kind in [
@@ -2097,9 +2078,9 @@ mod end_tests {
         }
     }
 
-    /// A packet with a wrong sum went whole, so the stream still has its
-    /// place. The packet is lost, as it always was, and the next is
-    /// read.
+    /// A packet with a wrong checksum was read whole, so the stream
+    /// keeps its place. The packet is lost, as it always was, and the
+    /// next one is read.
     #[test]
     fn a_wrong_checksum_ends_nothing() {
         let (mut reader, writer, a, b, seen) = two_channels();
@@ -2130,7 +2111,6 @@ mod end_tests {
         assert_all_answered(&mut reader, &mut waiters);
     }
 
-    /// What arrived goes first, on either half, and only then the end.
     #[test]
     fn what_arrived_is_read_before_the_end_comes_up() {
         let (mut reader, writer, a, b, seen) = two_channels();
@@ -2176,9 +2156,9 @@ mod end_tests {
         (run, writer, ch, seen)
     }
 
-    /// The end of the stream comes in with a read waiting for a write
-    /// half that a stalled writer holds. What the read is after has
-    /// arrived, and its OKAY has nobody left to go to.
+    /// The stream ends while a stalled writer holds the write half. The
+    /// read gets the bytes that arrived and sends no OKAY: the device is
+    /// gone.
     #[test]
     fn the_end_reaches_a_read_waiting_for_the_write_half() {
         let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
@@ -2201,11 +2181,10 @@ mod end_tests {
         drop(busy);
     }
 
-    /// The same with the OKAY itself on its way into a transport that
-    /// takes nothing. Giving it up keeps what it settled readable, with
-    /// the rest behind it. It leaves half a packet, which stops the
-    /// writes, but what ended the connection is what the calls waiting
-    /// on the device hear of.
+    /// The same with the OKAY stalled in the transport. Abandoning it
+    /// keeps the bytes readable. It leaves half a packet, so writes fail
+    /// with the desync, but calls waiting on the device still report the
+    /// end of the connection.
     #[test]
     fn the_end_reaches_a_read_stalled_in_its_okay() {
         let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello world");
@@ -2242,8 +2221,8 @@ mod end_tests {
         assert!(matches!(err, Error::Desynchronized), "close: {err:?}");
     }
 
-    /// A device that closed the channel before it went said all it had
-    /// to, and the OKAY given up on after that takes nothing from it.
+    /// The device closed the channel before the stream ended. The OKAY
+    /// abandoned after that does not hide the close.
     #[test]
     fn a_read_stalled_in_its_okay_still_hears_the_channel_close() {
         let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
@@ -2264,8 +2243,8 @@ mod end_tests {
         assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
     }
 
-    /// A request that cannot get a verdict out is not handed over: it
-    /// would only come back, for ever, to a listener that carries on.
+    /// No verdict can get out now, so the request would only come back,
+    /// for ever, to a listener that carries on.
     #[test]
     fn a_listener_gets_no_request_once_an_okay_was_given_up_on() {
         let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
@@ -2287,8 +2266,8 @@ mod end_tests {
         assert!(matches!(now(listener.accept()), Err(Error::Disconnected)));
     }
 
-    /// A write half that comes free after the end finds nobody to send
-    /// the OKAY to, so it writes nothing that could stall.
+    /// No OKAY can reach the device by the time the write half comes
+    /// free, so the read writes nothing that could stall.
     #[test]
     fn a_read_given_the_write_half_after_the_end_sends_no_okay() {
         let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
@@ -2308,9 +2287,8 @@ mod end_tests {
         assert!(seen.acks_for(1).is_empty());
     }
 
-    /// Once the end has come up nothing goes back to the transport for
-    /// more, and no call writes a packet that could only wait for an
-    /// answer.
+    /// Once the stream has ended no call reads the transport again, and
+    /// none writes a packet that could only wait for an answer.
     #[test]
     fn calls_after_the_end_fail_at_once() {
         let (mut reader, writer, _a, _b, seen) = two_channels();
@@ -2342,8 +2320,8 @@ mod end_tests {
     }
 }
 
-/// A write given up on mid-packet ends the connection for good, and
-/// nothing on the read side is writing to find that out by itself.
+/// A write abandoned mid-packet ends the connection for good, and the
+/// read side does not write, so it cannot find that out by itself.
 mod give_up_tests {
     use alloc::boxed::Box;
     use core::future::Future;
@@ -2363,8 +2341,8 @@ mod give_up_tests {
         fut.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    /// One channel with credit to write on and a transport that takes
-    /// nothing, so that writing means giving a write up.
+    /// One channel with credit and a transport that stalls every write,
+    /// so that any write can be abandoned mid-packet.
     fn stalled(
         configure: impl FnOnce(&mut Mock),
     ) -> (
@@ -2405,7 +2383,7 @@ mod give_up_tests {
         abandon(writer.write_channel(ch, b"cut short"));
         assert!(desynchronized(poll_once(run.as_mut())));
 
-        // That is what ended it, and stays what everyone hears.
+        // The desync ended it, and later calls report the same error.
         let mut buf = [0u8; 8];
         let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
         assert!(matches!(err, Error::Desynchronized), "got {err:?}");
@@ -2442,8 +2420,8 @@ mod give_up_tests {
         assert!(desynchronized(poll_once(accept.as_mut())));
     }
 
-    /// `run` can be left waiting on a read it may not drop, for which the
-    /// next packet is the first chance it has.
+    /// `run` may be waiting on a read it must not drop, so the next
+    /// packet is its first chance to stop.
     #[test]
     fn a_read_that_cannot_be_dropped_ends_run_at_the_next_packet() {
         let (reader, writer, ch, seen) = stalled(|mock| {
@@ -2465,8 +2443,8 @@ mod give_up_tests {
         assert_eq!(&buf[..n], b"next", "the packet it finished on stays");
     }
 
-    /// A connection desynchronized in any way ends it on the way in too,
-    /// with the transport never asked for more.
+    /// A desync from before the read ends its loop on the way in too,
+    /// without asking the transport for more.
     #[test]
     fn a_connection_already_desynchronized_ends_the_loop_of_a_read() {
         let (mut reader, writer, ch, seen) = stalled(|_| {});
@@ -2482,9 +2460,9 @@ mod give_up_tests {
     }
 }
 
-/// What falls due while a call waits for a packet has nobody else to
-/// send it: reads leave it alone, and the device may have nothing to
-/// say until it arrives.
+/// What becomes owed while a call waits for a packet must be sent by
+/// that call: reads leave it alone, and the device may send nothing
+/// until it arrives.
 mod parked_receive_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
@@ -2514,9 +2492,9 @@ mod parked_receive_tests {
             .collect()
     }
 
-    /// An opener with its READY taken in and nobody having looked yet,
-    /// to give up on: that leaves a CLSE to go out, with `run` or a read
-    /// the only thing left to send it.
+    /// An OPEN whose READY was received but not yet seen by the opener.
+    /// Dropping the opener leaves a CLSE owed, which only `run` or a
+    /// read can send.
     #[allow(clippy::type_complexity)]
     fn opener_answered(
         configure: impl FnOnce(&mut Mock),
@@ -2576,8 +2554,8 @@ mod parked_receive_tests {
         assert!(poll_once(read.as_mut()).is_ready());
     }
 
-    /// A read that cannot be dropped has to finish first, which is as
-    /// long as the device takes: the same as for a write given up on.
+    /// The read must finish first, which takes as long as the device
+    /// does, the same as after an abandoned write.
     #[test]
     fn a_read_that_cannot_be_dropped_sends_it_at_the_next_packet() {
         let (reader, _writer, _ch, open, seen) = opener_answered(|mock| {
@@ -2595,10 +2573,9 @@ mod parked_receive_tests {
         assert_eq!(closes(&seen), [(2, 43)]);
     }
 
-    /// An opener given up on after the receive that ended the connection
-    /// leaves a CLSE on the list. Nobody is left to hear it, so the way to
-    /// what arrived does not lead through the write half, which here
-    /// nobody lets go of.
+    /// An opener dropped after the stream ended leaves a CLSE owed. It
+    /// cannot reach the device, so the read must get the bytes that
+    /// arrived without the write half, which stays held here.
     #[test]
     fn a_read_after_the_end_pays_nothing() {
         let (mut reader, writer, ch, open, seen) = opener_answered(|_| {});
@@ -2726,9 +2703,9 @@ mod driving_tests {
     }
 
     /// The writer in flight needs polling to finish, and the device
-    /// cannot answer a packet it has not had, so a read here would wait
-    /// on the very write it stops. On USB the header would be out and
-    /// the payload never sent; a WRTE for another channel would have
+    /// cannot answer a packet it has not received, so a read here would
+    /// wait on the very write it blocks. On USB the header would be out
+    /// and the payload never sent. A WRTE for another channel would make
     /// the read's OKAY wait for a write half that same write holds.
     #[test]
     fn a_transfer_in_flight_holds_off_the_writer_parked_behind_it() {
@@ -2748,7 +2725,7 @@ mod driving_tests {
         );
     }
 
-    /// A transfer given up on stops counting, or the writers left would
+    /// An abandoned transfer stops counting, or the writers left would
     /// never be told to read.
     #[test]
     fn a_dropped_transfer_stops_holding_off_the_writer_behind_it() {
@@ -2804,8 +2781,7 @@ mod driving_tests {
         assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(()))));
     }
 
-    /// Under delayed ACK what is buffered keeps its credit until it is
-    /// read, as if a read had been waiting for it all along.
+    /// Buffered bytes keep their credit until they are read.
     #[test]
     fn a_wrte_stays_for_a_later_read_on_its_channel() {
         let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[wrte(2, b"for-b")]);
@@ -2819,9 +2795,8 @@ mod driving_tests {
         assert_eq!(read(&mut reader, a), b"for-a");
     }
 
-    /// `run` would refuse this OPEN with no listener alive. Here the
-    /// reader is kept for `accept_incoming`, and a listener is no part
-    /// of that.
+    /// `run` would refuse this OPEN with no listener alive, but
+    /// `accept_incoming` needs no listener.
     #[test]
     fn an_incoming_open_stays_queued_for_accept() {
         let (mut reader, _writer, _ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -2833,8 +2808,8 @@ mod driving_tests {
         assert_eq!(incoming.destination(), b"tcp:80\0");
     }
 
-    /// A READY without its credit is about channel 1 alone, whoever
-    /// happens to be taking packets, so that call carries on.
+    /// A READY without its credit concerns channel 1 alone, so the call
+    /// that happened to take the packet carries on.
     #[test]
     fn a_fault_closes_its_channel_and_nothing_else() {
         let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[
@@ -2871,8 +2846,8 @@ mod driving_tests {
         assert!(matches!(err, Error::Desynchronized), "got {err:?}");
     }
 
-    /// As in `read_channel`: what a cancelled refusal left past the cap
-    /// is refused before another packet comes in.
+    /// As in `read_channel`: an OPEN that a cancelled refusal left past
+    /// the cap is refused before another packet is received.
     #[test]
     fn queued_opens_past_the_cap_are_refused_first() {
         let mut mock = Mock::new();
@@ -2932,7 +2907,7 @@ mod backpressure_tests {
     }
 }
 
-/// Nothing frees a slot but a close, a `Channel` having no `Drop`, so
+/// A `Channel` has no `Drop`, so only a close frees a slot, and
 /// whatever opened a channel has to close it on every way out.
 mod slot_tests {
     use alloc::boxed::Box;
@@ -2978,7 +2953,6 @@ mod slot_tests {
         (reader, writer, ch, seen)
     }
 
-    /// `collect` on a shell over `ch`, going through `writer`.
     fn collected(
         writer: &Writer<SharedMock>,
         ch: ChannelId,
@@ -3125,8 +3099,8 @@ mod slot_tests {
         |writer, rx| Box::pin(async { logcat::exec_text(writer, &["-d"], rx).await.map(drop) }),
     ];
 
-    /// The fault closes the channel for the first write on it, which
-    /// leaves the device nothing to do with the close.
+    /// The fault closes the channel before the first write on it, so
+    /// the device takes no part in the close.
     #[test]
     fn a_one_shot_gives_the_slot_back_when_close_stdin_fails() {
         for one_shot in ONE_SHOTS {
@@ -3155,7 +3129,6 @@ mod slot_tests {
         assert_eq!(in_use(&writer), 0);
     }
 
-    /// `quit` on a sync session over `ch`, going through `writer`.
     fn quit(writer: &Writer<SharedMock>, ch: ChannelId) -> Result<(), Error<MockError>> {
         let mut session = writer.clone();
         let channel = Channel {
@@ -3185,7 +3158,7 @@ mod slot_tests {
     }
 }
 
-/// What a write to a channel the device closed comes to on a `Writer`.
+/// How a `Writer` handles a write to a channel the device closed.
 mod closed_channel_tests {
     use crate::base::channel::Channel;
     use crate::base::mock::{clse, now, split_one_channel_delayed_ack, sync_fail, wrte};
@@ -3202,8 +3175,8 @@ mod closed_channel_tests {
         assert!(!seen.sent().iter().any(|(cmd, ..)| *cmd == Command::Write));
     }
 
-    /// As `handle_send_file` goes: the `FAIL`, and nothing closed until
-    /// the host's `DONE`.
+    /// This follows `handle_send_file`: the `FAIL` comes first, and
+    /// nothing is closed until the host's `DONE`.
     #[test]
     fn a_failed_push_gets_the_devices_text() {
         const TEXT: &[u8] = b"couldn't create file: Read-only file system";
@@ -3231,8 +3204,8 @@ mod closed_channel_tests {
     }
 }
 
-/// A close frees its slot from the start, and owes its CLSE like any
-/// other packet the device has coming.
+/// A close frees its slot first, and its CLSE is owed like any other
+/// packet.
 mod close_tests {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
@@ -3288,9 +3261,9 @@ mod close_tests {
         }
     }
 
-    /// The writer parked for credit on a channel that has none, and a
-    /// close that fails: the slot comes back and the writer hears of it,
-    /// which is all the close promises however the CLSE fares.
+    /// A writer is parked for credit on a channel that has none when
+    /// the close fails. The slot comes back and the writer is woken,
+    /// which is all a close promises however its CLSE fares.
     #[test]
     fn a_close_that_fails_gives_the_slot_back_and_wakes_parked_writers() {
         for (kind, left) in FAILED_WRITES {
@@ -3337,8 +3310,8 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// A receive in flight gives way to what falls due, so with the
-    /// close gone it is what pays.
+    /// A receive in flight gives way to what is owed, so once the close
+    /// is dropped `run` sends the CLSE.
     #[test]
     fn a_close_dropped_with_run_parked_gets_its_clse_out() {
         let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3356,8 +3329,8 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// Past the end `pay` writes nothing, so a close has no write half
-    /// to wait for, and here nobody lets go of it.
+    /// With the stream over the CLSE is called off, so the close does
+    /// not wait for the write half, which stays held here.
     #[test]
     fn a_close_after_the_end_of_the_stream_leaves_the_write_half_alone() {
         let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3385,8 +3358,8 @@ mod close_tests {
         assert!(closes(&seen).is_empty());
     }
 
-    /// The `Reader` going says nothing of the device, and at shutdown a
-    /// close may be all that is left to tell it.
+    /// Dropping the `Reader` says nothing about the device, and at
+    /// shutdown a close may be the only way left to tell it.
     #[test]
     fn a_close_after_the_reader_went_puts_its_clse_on_the_wire() {
         let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3396,7 +3369,6 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// What a close left unsent goes with a call that writes anyway.
     #[test]
     fn a_close_after_the_end_goes_out_with_a_write_that_goes_anyway() {
         let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
@@ -3411,8 +3383,6 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// The `Reader` going calls nothing off: the CLSE goes out once the
-    /// write half comes free.
     #[test]
     fn a_close_behind_a_stalled_writer_outlasts_the_reader() {
         let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3429,8 +3399,8 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// With the `Reader` gone nothing receives, so what the dropped close
-    /// left owing goes with the next call that writes.
+    /// With the `Reader` gone nothing receives, so the next call that
+    /// writes sends the CLSE.
     #[test]
     fn a_close_dropped_past_the_reader_still_owes_its_clse() {
         let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
@@ -3449,8 +3419,8 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// The same with the CLSE on its way into a transport that takes
-    /// nothing: giving up on that packet is for the end of the stream.
+    /// With the CLSE stalled in the transport, only the end of the
+    /// stream abandons that packet.
     #[test]
     fn a_close_stalled_in_its_clse_outlasts_the_reader() {
         let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3463,8 +3433,8 @@ mod close_tests {
         assert!(writer.shared.desync.check::<Infallible>().is_ok());
     }
 
-    /// `run` with a read under way that cannot be dropped, which is what
-    /// lets a packet, or the end of the stream, in behind a close.
+    /// `run` with a read under way that cannot be dropped, which lets a
+    /// packet, or the end of the stream, arrive after a close.
     #[allow(clippy::type_complexity)]
     fn read_under_way() -> (
         Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
@@ -3507,8 +3477,8 @@ mod close_tests {
         drop(busy);
     }
 
-    /// Giving up on the CLSE leaves half a packet, which says nothing
-    /// about how the stream ended, and the close has nothing to report.
+    /// Abandoning the CLSE leaves half a packet, which says nothing
+    /// about how the stream ended, so the close reports no failure.
     #[test]
     fn a_close_stalled_in_its_clse_ends_with_a_read_that_meets_the_end() {
         let (mut run, writer, ch, seen) = read_under_way();
@@ -3525,8 +3495,8 @@ mod close_tests {
         assert!(writer.shared.desync.check::<Infallible>().is_err());
     }
 
-    /// What `collect` read comes back once the stream ends behind the
-    /// close, rather than wait for a writer that may never let go.
+    /// What `collect` read comes back once the stream ends, rather than
+    /// wait in the close for a writer that may never let go.
     #[test]
     fn a_finished_commands_output_gets_past_a_stalled_writer_at_the_end() {
         let (mut run, writer, ch, seen) = read_under_way();
@@ -3571,9 +3541,9 @@ mod close_tests {
         assert_eq!(in_use(&writer), 1);
     }
 
-    /// The desync comes up with the close parked, which the next to take
-    /// the write half keeps it from finding out by writing: its CLSE will
-    /// never go out, and it must not report that it did.
+    /// The desync happens with the close parked, and another call takes
+    /// the write half next, so the close cannot find out by writing.
+    /// Its CLSE will never go out, and it must not report that it did.
     #[test]
     fn a_close_parked_when_a_write_is_given_up_on_fails_with_the_desync() {
         let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
@@ -3593,9 +3563,9 @@ mod close_tests {
         drop(busy);
     }
 
-    /// With no end of the stream to go by, the desync is what the close
-    /// comes to, its CLSE never going out, however in step the connection
-    /// was when the `Reader` went.
+    /// The stream has not ended, so the desync is the close's result:
+    /// its CLSE never goes out, however in step the connection was when
+    /// the `Reader` was dropped.
     #[test]
     fn a_close_parked_past_the_reader_fails_with_a_later_desync() {
         let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
@@ -3617,8 +3587,8 @@ mod close_tests {
         drop(busy);
     }
 
-    /// A stale handle names a channel that is gone, not the one that
-    /// took its slot, whose local id is another.
+    /// A stale handle names the old channel, not the one that took its
+    /// slot, which has another local id.
     #[test]
     fn a_stale_handle_closes_nothing_in_a_slot_taken_since() {
         let mut mock = Mock::new();
@@ -3644,8 +3614,8 @@ mod close_tests {
         assert_eq!(closes(&seen).len(), 1);
     }
 
-    /// The device hears of the old channel ahead of the OPEN that takes
-    /// its slot, and what it still sends for the old one lands nowhere.
+    /// The old CLSE goes out ahead of the OPEN that takes the slot, and
+    /// what the device still sends for the old channel is dropped.
     #[test]
     fn a_slot_taken_behind_a_dropped_close_hears_nothing_of_the_old_channel() {
         let mut mock = Mock::new();
@@ -3682,9 +3652,9 @@ mod close_tests {
         assert_eq!(&buf[..n], b"for the new one");
     }
 
-    /// A channel closed with a read that cannot be dropped under way,
-    /// which comes back with a packet for it behind the free and ahead
-    /// of the CLSE.
+    /// A channel closed while a read that cannot be dropped is under
+    /// way. That read can then return a packet for the channel after
+    /// the slot is freed and before the CLSE goes out.
     #[allow(clippy::type_complexity)]
     fn closed_with_a_read_under_way() -> (
         Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
@@ -3721,13 +3691,13 @@ mod close_tests {
         assert!(seen.acks_for(1).is_empty());
     }
 
-    /// With every close dropped behind a busy writer and a read that
-    /// cannot be dropped keeping one packet in hand, the list comes to
-    /// all there is: the channels there were, the requests that took
-    /// their slots, the one of those a dropped refusal left past the
-    /// cap, and that packet. Any OPEN of ours would pay it, so none
-    /// comes into it, and `run` is what does not refuse the request past
-    /// the cap on its way to the read.
+    /// Every close is dropped behind a busy writer, and a read that
+    /// cannot be dropped brings in one more packet. The list then holds
+    /// all it can: the channels there were, the requests that took their
+    /// slots, the one a dropped refusal left past the cap, and that
+    /// packet. No OPEN of ours takes part, as it would send the list.
+    /// `run` does the reading because it does not refuse the request
+    /// past the cap on its way to the read.
     #[test]
     fn closes_owe_a_debt_for_every_channel_and_request_and_no_more() {
         const MAX_CHANNELS: usize = 2;
@@ -3796,9 +3766,9 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42)]);
     }
 
-    /// `run` got to the write half first, by way of an older debt, and
-    /// paid the lot, which leaves the close nothing to do and nothing to
-    /// report.
+    /// `run` reaches the write half first, because of an older debt,
+    /// and sends everything owed, so the close has nothing left to send
+    /// or report.
     #[test]
     fn a_close_paid_by_run_has_nothing_left_to_do() {
         let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
@@ -3820,8 +3790,8 @@ mod close_tests {
         assert_eq!(closes(&seen), [(1, 42), (2, 42)]);
     }
 
-    /// Whatever the write half does for the CLSE, a device that is gone
-    /// leaves the list empty and the close nothing to report.
+    /// With the device gone a failed CLSE leaves the list empty, and
+    /// the close reports no failure.
     #[test]
     fn a_close_to_a_device_that_is_gone_owes_nothing() {
         let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
@@ -3831,8 +3801,8 @@ mod close_tests {
         assert!(writer.shared.desync.check::<Infallible>().is_ok());
     }
 
-    /// A close that fails on a live connection leaves the debt where it
-    /// is, as any payment does, behind the desync the failure raised.
+    /// On a live connection a failed CLSE stays owed, as any packet
+    /// does, behind the desync the failure raised.
     #[test]
     fn a_close_that_fails_keeps_what_it_owes() {
         let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
