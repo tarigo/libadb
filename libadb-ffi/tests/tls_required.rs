@@ -1,5 +1,5 @@
-//! A device that wants TLS from a call that cannot start it is named as
-//! such, with advice a C caller can act on.
+//! A device that wants TLS from a call that cannot start it is reported
+//! as such, with advice a C caller can act on.
 
 use std::ffi::{c_void, CStr, CString};
 use std::ptr;

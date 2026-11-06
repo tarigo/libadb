@@ -1,5 +1,5 @@
-//! A device that says what it has to say and hangs up. A C read gets
-//! all of it in the order it was sent, and only then what ended it:
+//! A device that sends its data and hangs up. A C read gets all of it
+//! in the order it was sent, and only then the status that ended it:
 //! nothing reads the connection in the background, so most of it is
 //! still on the socket when the first OKAY fails.
 
@@ -130,9 +130,9 @@ fn a_channel_read_gets_all_a_device_left_without_delayed_ack() {
     );
 }
 
-/// The call that met the end has only what the transport said to go on,
-/// and ADB_ERR_IO is what a timeout looks like too. From the next call on
-/// there is no mistaking it.
+/// The call that meets the end has only the transport's error to go on,
+/// and ADB_ERR_IO is also what a timeout looks like. From the next call
+/// on there is no mistaking it.
 #[test]
 fn a_channel_read_gets_all_a_device_left_with_no_close_under_delayed_ack() {
     all_of_it_comes_back(
@@ -153,8 +153,8 @@ fn a_channel_read_gets_all_a_device_left_with_no_close_without_delayed_ack() {
     );
 }
 
-/// Nobody is left to hear a close, which gives the slot back all the
-/// same and has nothing to report.
+/// The CLSE cannot reach the device, but the close gives the slot back
+/// all the same and reports no failure.
 #[test]
 fn a_close_after_the_end_is_no_failure() {
     let (conn, id) = channel_on_a_device_gone(DELAYED_ACK, Goes::Abruptly);
@@ -168,8 +168,8 @@ fn a_close_after_the_end_is_no_failure() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// Whatever comes after the end says so, opening a channel included,
-/// which would otherwise send an OPEN and wait for an answer.
+/// Opening a channel is told too, or it would send an OPEN and wait for
+/// an answer.
 #[test]
 fn every_call_after_the_end_is_told() {
     let (conn, id) = channel_on_a_device_gone(DELAYED_ACK, Goes::Abruptly);

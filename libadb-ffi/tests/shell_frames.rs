@@ -276,8 +276,8 @@ fn closing_stdin_after_the_device_left_is_no_failure() {
     assert!(!sent.contains(&CMD_WRTE), "a frame on a closed channel");
 }
 
-/// The same with the CLSE taken in by a stdin write waiting for the
-/// device: what came ahead of it is still there to read afterwards.
+/// The same with the CLSE received by a stdin write waiting for the
+/// device: what came ahead of it can still be read afterwards.
 #[test]
 fn closing_stdin_leaves_what_the_device_wrote_readable() {
     let (addr, device) = scripted_adbd("shell_v2", |d| {
@@ -309,8 +309,9 @@ fn closing_stdin_leaves_what_the_device_wrote_readable() {
     within("the device", move || device.join().unwrap());
 }
 
-/// Closed here, the session is closed whoever closed the channel first:
-/// a caller that closes stdin on a closed handle has a bug to hear of.
+/// After `adb_shell_close` the session is closed, even if the device
+/// closed the channel first: a caller that closes stdin on a closed
+/// handle has a bug and should hear of it.
 #[test]
 fn closing_stdin_after_a_local_close_fails() {
     let (addr, device) = scripted_adbd("shell_v2", |d| {
@@ -357,7 +358,7 @@ fn closing_stdin_on_a_live_channel_sends_the_frame() {
 }
 
 /// A channel a fault closed is not one the device left. An OKAY without
-/// its credit closes the channel when a parked write takes it in, where
+/// its credit closes the channel when a parked write receives it, where
 /// a read would only fail.
 #[test]
 fn closing_stdin_after_a_fault_reports_the_fault() {

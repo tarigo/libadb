@@ -391,7 +391,6 @@ unsafe extern "C" fn never_signs(
     adb::AdbStatus::Auth
 }
 
-/// Connect to the device at `addr`, asking for the `features` given.
 pub fn connect(addr: &str, features: &str) -> *mut adb::adb_connection_t {
     let uri = CString::new(format!("tcp://{addr}")).unwrap();
     let banner = CString::new(format!("host::features={features}")).unwrap();

@@ -1,5 +1,5 @@
 //! `adb_read_channel` promises that `ADB_OK` never comes back with zero
-//! bytes read. This checks it keeps that promise.
+//! bytes read.
 
 use std::ffi::{c_void, CString};
 use std::ptr;

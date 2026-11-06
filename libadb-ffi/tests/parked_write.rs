@@ -1,8 +1,8 @@
 //! A write waiting for the device needs no read call running: with
 //! nobody else taking packets off the connection it takes them itself,
-//! and what it finds for others stays for them. The device here is
+//! and leaves what it finds for other calls to read. The device here is
 //! classic ACK unless a test says otherwise, so every WRTE after the
-//! first on a channel waits for an OKAY only a read can take in.
+//! first on a channel waits for an OKAY only a read can receive.
 
 use std::ffi::CString;
 use std::ptr;
@@ -123,7 +123,7 @@ fn a_shell_opens_with_its_window_size_on_a_classic_device() {
 }
 
 /// The caller of a failed open has no handle to clean up with, so the
-/// channel closes here, and the failure is the device's.
+/// channel is closed here, and the failure reported is the device's.
 #[test]
 fn a_device_that_closes_during_the_window_size_fails_the_open() {
     let (addr, device) = scripted_adbd(CLASSIC, |d| {
@@ -244,8 +244,8 @@ fn one_write_past_the_delayed_ack_credit_finishes_alone() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// The one that finishes last has nobody left to read for it, and the
-/// one reading until then is not told it may stop.
+/// The write that finishes last has no other call left to read for it,
+/// and the one reading until then gets no word that it may stop.
 #[test]
 fn writes_on_two_channels_finish_with_no_read_running() {
     let (addr, device) = scripted_adbd(CLASSIC, |d| {
@@ -273,8 +273,8 @@ fn writes_on_two_channels_finish_with_no_read_running() {
 }
 
 /// Chunks of the two may interleave, as they do on a socket, but all of
-/// both arrive, the writers taking turns at the one credit and at
-/// reading for it.
+/// both arrive: the writers take turns at the one credit and at reading
+/// for it.
 #[test]
 fn writes_on_one_channel_finish_with_no_read_running() {
     let (addr, device) = scripted_adbd(CLASSIC, |d| {
@@ -438,9 +438,10 @@ fn what_arrives_during_a_write_is_kept_for_those_it_is_for() {
     assert!(!refused, "the OPEN waited for its accept");
 }
 
-/// What the tick is for. The lock is taken while the write parks, so it
-/// cannot read for itself, and the read holding it returns to C with no
-/// OKAY taken, so nothing wakes the write: it has to look again.
+/// This is what `TICK` is for. The read lock is taken while the write
+/// parks, so the write cannot read for itself. The read holding the
+/// lock returns to C without having taken the OKAY, so nothing wakes
+/// the write: it has to look again.
 #[test]
 fn a_write_outlives_the_read_that_kept_it_from_reading() {
     let (running_tx, running) = mpsc::channel();
@@ -497,9 +498,9 @@ fn a_hangup_ends_a_parked_write() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// The read gets the error and takes it back to C, and the write it
-/// left behind is told the connection ended, with the status that says
-/// so: this one saw nothing fail itself.
+/// The read gets the error and returns it to C. The write behind it
+/// gets `Disconnected`, the status for a connection that ended: it saw
+/// nothing fail itself.
 #[test]
 fn a_hangup_that_ends_the_read_also_ends_the_write_behind_it() {
     let (running_tx, running) = mpsc::channel();
@@ -529,9 +530,9 @@ fn a_hangup_that_ends_the_read_also_ends_the_write_behind_it() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// The timeout reaches the write through its own read, and the OKAY
-/// that comes after it is not lost: what a timed-out read leaves stays
-/// on the socket for the next.
+/// The timeout reaches the write through its own read. The OKAY that
+/// comes after it is not lost: what a timed-out read leaves stays on
+/// the socket for the next one.
 #[test]
 fn a_read_timeout_ends_a_parked_write_and_the_connection_goes_on() {
     let (timed_out, timed_out_rx) = mpsc::channel::<()>();
@@ -569,10 +570,10 @@ fn a_read_timeout_ends_a_parked_write_and_the_connection_goes_on() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// A command stuck on its stdout stops taking stdin, so the device has
-/// no credit for the write until the host has read that output. The
-/// write sits in a read holding the lock by the time the read comes,
-/// and neither would ever move if the read waited for the lock.
+/// A command stuck on its stdout stops taking stdin, so the device
+/// gives the write no credit until the host has read that output. The
+/// write is already reading, holding the lock, when the read comes, and
+/// neither would ever move if the read waited for the lock.
 #[test]
 fn a_read_gets_past_a_write_that_holds_the_read_lock() {
     let (addr, device) = scripted_adbd(DELAYED_ACK, |d| {
@@ -599,8 +600,8 @@ fn a_read_gets_past_a_write_that_holds_the_read_lock() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// The same with the read there first, for data the write has yet to
-/// take in.
+/// The same with the read waiting first, for data the write has yet to
+/// receive.
 #[test]
 fn a_read_gets_what_a_write_takes_in_while_it_waits() {
     let (reading_tx, reading) = mpsc::channel::<()>();
@@ -664,9 +665,8 @@ fn a_read_takes_over_from_a_write_that_finished() {
     unsafe { adb::adb_connection_free(conn.get()) };
 }
 
-/// Two reads are no different: the one holding the lock takes in what
-/// the other waits for, and that one returns with the first still
-/// blocked, rather than waiting on the first read's data.
+/// Two reads are no different: the second returns while the first is
+/// still blocked, rather than wait on the first read's data.
 #[test]
 fn a_read_gets_what_the_read_holding_the_lock_takes_in() {
     let (running_tx, running) = mpsc::channel();

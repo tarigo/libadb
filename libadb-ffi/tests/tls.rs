@@ -19,7 +19,6 @@ use tls_device::{host_key, HostKey, KeyPolicy};
 
 const BANNER: &str = "host::features=shell_v2,delayed_ack";
 
-/// `adb_connect` to `addr` with `key`.
 fn connect(addr: &str, key: &HostKey) -> (adb::AdbStatus, *mut adb::adb_connection_t) {
     let uri = CString::new(format!("tcp://{addr}")).unwrap();
     let banner = CString::new(BANNER).unwrap();
