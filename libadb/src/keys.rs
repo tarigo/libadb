@@ -27,8 +27,6 @@ mod tests;
 pub use pubkey::{encode_public_key, KeyName};
 pub use record::{decode_key_record, encode_key_record};
 
-// The public API speaks these crates' types, so a caller names the
-// versions this crate resolved instead of guessing them in its own.
 pub use rsa;
 pub use zeroize;
 

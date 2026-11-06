@@ -64,6 +64,4 @@ mod identity;
 pub use config::{TlsClientConfig, TlsConfigError};
 pub use identity::{TlsIdentity, TlsIdentityError};
 
-// The public API speaks rustls' types, so a caller names the rustls
-// that libadb resolved instead of guessing the version in its own.
 pub use rustls;

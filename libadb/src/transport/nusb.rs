@@ -117,8 +117,6 @@ impl embedded_io_async::Write for UsbTransport {
     }
 }
 
-// Dropping a bulk transfer discards what the device already put
-// in it, so the bytes are gone rather than waiting to be re-read.
 impl crate::transport::ReadCancelSafety for UsbTransport {
     fn read_cancel_safe(&self) -> bool {
         false

@@ -70,8 +70,6 @@ mod slice;
 mod transport;
 
 pub use auth::{adb_authenticator_t, AdbSignFn};
-// Also reachable through the C ABI; re-exported so Rust consumers of the
-// rlib — the crate's own integration tests among them — can name them.
 pub use channel::{adb_close_channel, adb_open_channel, adb_read_channel, adb_write_channel};
 pub use connection::{
     adb_connect, adb_connect_with_authenticator, adb_connection_delayed_ack,

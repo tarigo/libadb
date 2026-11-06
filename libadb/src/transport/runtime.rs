@@ -22,8 +22,6 @@ use crate::transport::Splittable;
 /// Every method returns `impl Future + Send` rather than being an
 /// `async fn`, so generic callers keep the `Send` bound they need to
 /// spawn the resulting future.
-// `Tokio` and `Smol` are plain code spans on purpose: a doc build with
-// only one runtime enabled cannot resolve a link to the other.
 pub trait Runtime {
     /// TCP transport this runtime produces.
     type Tcp: Splittable + Send + 'static;

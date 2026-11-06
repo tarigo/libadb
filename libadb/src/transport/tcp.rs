@@ -82,10 +82,6 @@ mod blocking {
         }
     }
 
-    // Not that a dropped read would lose anything: the kernel buffer
-    // keeps what nobody has read. But a read here parks the thread in
-    // its first poll, so nothing polls an interrupt raced against it
-    // until bytes arrive, and there is never a pending read to drop.
     impl ReadCancelSafety for BlockingTcp {
         fn read_cancel_safe(&self) -> bool {
             false
@@ -110,9 +106,6 @@ mod tokio_split {
 
     use crate::transport::{ReadCancelSafety, Splittable};
 
-    // A dropped TCP read leaves its bytes in the kernel buffer. Claimed
-    // for the socket, not for every adapter: `FromTokio` can wrap
-    // readers whose dropped read loses data.
     impl ReadCancelSafety for FromTokio<TcpStream> {
         fn read_cancel_safe(&self) -> bool {
             true
@@ -142,8 +135,6 @@ mod smol_split {
 
     use crate::transport::{ReadCancelSafety, Splittable};
 
-    // Same scope as the tokio impl above: the socket, not the adapter.
-    // Covers the split halves too — they are the same type.
     impl ReadCancelSafety for FromFutures<TcpStream> {
         fn read_cancel_safe(&self) -> bool {
             true
