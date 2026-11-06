@@ -338,8 +338,8 @@ where
     /// [`Error::Desynchronized`] and frees nothing: no call that wants a
     /// slot gets anywhere on it.
     ///
-    /// Safe to drop while it waits for the write half: the next call
-    /// that writes or receives sends the CLSE. Dropping it during the
+    /// Safe to drop while it waits for the write half: the next write,
+    /// open, close or receive sends the CLSE. Dropping it during the
     /// write [abandons the packet](crate::split#dropping-a-call).
     ///
     /// A concurrent [`Reader::read_channel`] on the same channel is not

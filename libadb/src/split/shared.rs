@@ -170,7 +170,7 @@ impl<WH> Shared<WH> {
     /// Send what is owed, if anything is and the connection is live.
     /// Once it is not, a call that only reports that, or hands over what
     /// arrived, must not wait for the write half: what is owed stays for
-    /// a call that writes anyway.
+    /// the next write, open or close.
     pub(super) async fn pay(&self) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,

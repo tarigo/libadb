@@ -64,12 +64,12 @@
 //! # What the device is owed
 //!
 //! The OKAY for data that arrived and the CLSE for a channel closed
-//! here are recorded before any wait. The next call that writes or
-//! receives sends them before anything else, so a call dropped while it
+//! here are recorded before any wait. The next write, open, close or
+//! receive sends them before anything else, so a call dropped while it
 //! waits for the write half loses neither. Once the connection has
-//! ended only a call that writes still sends them. While anything is
-//! owed nothing is received, on any channel: a close behind a stalled
-//! writer holds up reception until the write half comes free.
+//! ended a receive no longer sends them. While anything is owed nothing
+//! is received, on any channel: a close behind a stalled writer holds
+//! up reception until the write half comes free.
 //!
 //! No CLSE is sent to a device that is gone. Once a write found it gone
 //! or a receive found the stream over, [`Writer::close_channel`]
