@@ -292,6 +292,10 @@ fn shift(buf: &mut [u8], from: core::ops::Range<usize>, to: usize) {
 /// tag and priority on the returned [`LogEntry`] values instead. `-b`
 /// and `--pid` do apply, as they choose what logcat reads.
 ///
+/// Arguments that make logcat print text in place of entries, such as
+/// `-g`, `-S` and `-p`, give no entries: [`Logcat::read_entry`] fails on
+/// that text with [`LogcatError::InvalidHeader`], call after call.
+///
 /// Each element is one argument to `logcat`, so an argument may hold
 /// spaces or shell metacharacters without being split or executed.
 ///
@@ -319,8 +323,10 @@ pub async fn open<'a, 'b, S: Session>(
 /// Fails with [`LogcatError::Exited`] when logcat exits with a non-zero
 /// status, as it does for an unknown buffer, with
 /// [`LogcatError::ClosedWithoutExit`] when the stream is cut before its
-/// exit status arrives, and with [`LogcatError::TruncatedEntry`] when
-/// logcat exits cleanly in the middle of an entry.  A failure drops the
+/// exit status arrives, with [`LogcatError::TruncatedEntry`] when
+/// logcat exits cleanly in the middle of an entry, and with
+/// [`LogcatError::InvalidHeader`] when it prints text in place of
+/// entries, as `-g`, `-S` and `-p` make it do.  A failure drops the
 /// entries read before it; to keep them, read the stream through
 /// [`open`] and [`Logcat::read_entry`].
 ///

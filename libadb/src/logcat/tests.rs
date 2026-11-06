@@ -680,17 +680,26 @@ fn a_failed_exit_wins_over_the_entry_it_cut_short() {
 }
 
 #[test]
-fn text_in_place_of_entries_is_refused() {
-    // `-g` makes logcat print its buffer sizes as text, then exit 0.
-    let text = b"main: ring buffer is 256 KiB (12 KiB consumed, 12 KiB readable), \
+fn text_in_place_of_entries_fails_every_read_and_the_dump() {
+    // The start of what `-g` prints in place of entries, before it exits 0.
+    let text = b"main: ring buffer is 5 MiB (4 MiB consumed, 23 MiB readable), \
                  max entry is 5120 B, max payload is 4068 B\n";
     let mut wire = frame(FrameId::Stdout, text);
     wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
-    let mut conn = device_sending(&[&wire]);
     let mut buf = [0u8; 256];
 
-    let (got, _) = read_to_end(&mut conn, &mut buf);
+    let mut conn = device_sending(&[&wire]);
+    let mut logcat = now(open(&mut conn, &["-g"], &mut buf)).unwrap();
+    for _ in 0..2 {
+        let got = now(logcat.read_entry());
+        assert!(
+            matches!(got, Err(Error::Logcat(LogcatError::InvalidHeader))),
+            "got {got:?}"
+        );
+    }
 
+    let mut conn = device_sending(&[&wire]);
+    let got = now(dump(&mut conn, &["-g"], &mut buf));
     assert!(
         matches!(got, Err(Error::Logcat(LogcatError::InvalidHeader))),
         "got {got:?}"
