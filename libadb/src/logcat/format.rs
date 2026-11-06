@@ -168,12 +168,22 @@ log_ids! {
         /// ```
         ///
         /// The number inside is private, so a known number cannot pose as an
-        /// unknown buffer, and no pattern can pick out one unknown number:
+        /// unknown buffer:
         ///
         /// ```compile_fail,E0423
         /// use libadb::logcat::{LogId, UnknownLogId};
         ///
         /// let system = LogId::Unknown(UnknownLogId(3));
+        /// ```
+        ///
+        /// Nor can a pattern pick out one unknown number:
+        ///
+        /// ```compile_fail,E0532
+        /// use libadb::logcat::{LogId, UnknownLogId};
+        ///
+        /// fn is_eight(id: LogId) -> bool {
+        ///     matches!(id, LogId::Unknown(UnknownLogId(8)))
+        /// }
         /// ```
         Unknown(UnknownLogId),
     }
