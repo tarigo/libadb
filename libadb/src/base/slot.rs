@@ -8,9 +8,9 @@ use super::negotiated::{AckMode, RxPolicy};
 use super::send_queue::SendQueue;
 use crate::error::{Error, ProtocolError, RxOverflow};
 
-pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<u32, ProtocolError> {
+pub(crate) fn parse_ready_credit(payload: &[u8]) -> Result<i32, ProtocolError> {
     if payload.len() >= 4 {
-        Ok(u32::from_le_bytes([
+        Ok(i32::from_le_bytes([
             payload[0], payload[1], payload[2], payload[3],
         ]))
     } else {
@@ -130,7 +130,7 @@ impl ChannelSlot {
         payload: &[u8],
     ) -> Result<(), ProtocolError> {
         if self.policy.ack == AckMode::Delayed {
-            self.send_budget = parse_ready_credit(payload)? as i64;
+            self.send_budget = i64::from(parse_ready_credit(payload)?);
         }
         self.remote = Some(remote);
         self.state = ChannelState::Open;

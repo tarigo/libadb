@@ -233,3 +233,31 @@ fn a_budget_wider_than_a_usize_is_not_cut_short() {
     assert_eq!(slot.try_reserve_send(100), Some(100));
     assert_eq!(slot.send_budget, (1 << 32) - 100);
 }
+
+/// adbd reads an OKAY's credit as signed, and adds it as it is.
+#[test]
+fn a_negative_grant_takes_credit_back() {
+    let mut slot = opening(AckMode::Delayed);
+    accept(&mut slot);
+
+    slot.apply_ready(&(-4000i32).to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(96));
+    slot.apply_ready(&(-100i32).to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), None);
+    slot.apply_ready(&5i32.to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(1));
+}
+
+/// The READY that answers an OPEN grants from nothing, as adbd counts
+/// the one that answers its own, so later grants have to make up a
+/// negative one before anything can be sent.
+#[test]
+fn a_negative_first_grant_leaves_the_channel_owing() {
+    let mut slot = opening(AckMode::Delayed);
+    slot.accept_open_ready(RemoteId::from(REMOTE), &(-10i32).to_le_bytes())
+        .unwrap();
+    assert_eq!(slot.budget(), None);
+
+    slot.apply_ready(&20i32.to_le_bytes()).unwrap();
+    assert_eq!(slot.budget(), Some(10));
+}
