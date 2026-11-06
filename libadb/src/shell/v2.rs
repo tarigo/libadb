@@ -526,21 +526,30 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     }
 
     /// Read frames until [`Frame::Exit`] is received, accumulating
-    /// stdout/stderr along the way. Closes the channel before returning.
+    /// stdout/stderr along the way, then close the channel.
+    ///
+    /// The close is sent on every way out: the exit frame, the device
+    /// closing without one, which is [`Error::ChannelClosed`], a fault
+    /// or a protocol error, since nothing else frees the slot
+    /// ([`Channel`] has no `Drop`). It is best-effort, its own result
+    /// dropped in favour of what the reads came to, so a close that
+    /// fails costs a finished command none of its output.
     pub async fn collect(mut self) -> Result<CommandOutput, Error<S::IoError>> {
         let mut out = CommandOutput::default();
-        loop {
-            match self.read_frame().await? {
-                Frame::Stdout(b) => out.stdout.extend_from_slice(&b),
-                Frame::Stderr(b) => out.stderr.extend_from_slice(&b),
-                Frame::Exit(code) => {
+        let read = loop {
+            match self.read_frame().await {
+                Ok(Frame::Stdout(b)) => out.stdout.extend_from_slice(&b),
+                Ok(Frame::Stderr(b)) => out.stderr.extend_from_slice(&b),
+                Ok(Frame::Exit(code)) => {
                     out.exit_code = code;
-                    self.channel.close().await?;
-                    return Ok(out);
+                    break Ok(out);
                 }
-                Frame::Other { .. } => {}
+                Ok(Frame::Other { .. }) => {}
+                Err(e) => break Err(e),
             }
-        }
+        };
+        let _ = self.channel.close().await;
+        read
     }
 
     /// Close the underlying channel without consuming any further frames.

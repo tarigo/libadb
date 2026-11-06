@@ -956,3 +956,75 @@ fn a_handshake_packet_after_the_handshake_is_dropped_and_the_session_goes_on() {
 
     assert_eq!(&buf[..n], b"after");
 }
+
+/// Nothing frees a slot but a close, a `Channel` having no `Drop`, so
+/// whatever opened a channel has to close it on every way out.
+mod slot_tests {
+    use super::*;
+    use crate::base::mock::{one_slot, shell_frame, FAILED_WRITES};
+    use crate::shell::v2::{CommandOutput, FrameId, Shell};
+
+    /// `collect` on a shell over a connection of one slot, whose device
+    /// follows up its READY with `then`.
+    fn collected(then: &[Packet]) -> (Connection<Mock>, Result<CommandOutput, Error<MockError>>) {
+        let mut conn = one_slot("shell_v2", then);
+        let mut rx = [0u8; 64];
+        let channel = now(conn.open(b"shell,v2,raw:x\0")).unwrap();
+        let output = now(Shell::new(channel, &mut rx).collect());
+        (conn, output)
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_when_the_device_closes_with_no_exit_frame() {
+        let stdout = shell_frame(FrameId::Stdout, b"so far");
+        let (conn, output) = collected(&[wrte(1, &stdout), clse(1)]);
+        assert!(matches!(output, Err(Error::ChannelClosed)), "{output:?}");
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_when_a_read_fails() {
+        let stdout = shell_frame(FrameId::Stdout, b"so far");
+        let (conn, output) = collected(&[wrte(1, &stdout)]);
+        assert!(matches!(output, Err(Error::UnexpectedEof)), "{output:?}");
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_on_a_protocol_error() {
+        let (conn, output) = collected(&[wrte(1, &shell_frame(FrameId::Exit, &[]))]);
+        assert!(
+            matches!(
+                output,
+                Err(Error::Protocol(ProtocolError::ShortExitPayload))
+            ),
+            "{output:?}"
+        );
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    /// The command finished and said so: what comes after that has no
+    /// bearing on its output. The frames land ahead of the read, for
+    /// their OKAYs to get out before the writes start failing.
+    #[test]
+    fn collect_keeps_a_finished_commands_output_when_its_close_fails() {
+        for (kind, _) in FAILED_WRITES {
+            let mut conn = one_slot("shell_v2", &[]);
+            let mut rx = [0u8; 64];
+            let channel = now(conn.open(b"shell,v2,raw:x\0")).unwrap();
+            for frame in [
+                shell_frame(FrameId::Stdout, b"out"),
+                shell_frame(FrameId::Stderr, b"err"),
+                shell_frame(FrameId::Exit, &[7]),
+            ] {
+                now(channel.session.dispatch(wrte(1, &frame))).unwrap();
+            }
+            channel.session.transport.fail_writes(kind);
+
+            let output = now(Shell::new(channel, &mut rx).collect()).unwrap();
+            assert_eq!(output.stdout, b"out", "{kind:?}");
+            assert_eq!(output.stderr, b"err", "{kind:?}");
+            assert_eq!(output.exit_code, 7, "{kind:?}");
+        }
+    }
+}

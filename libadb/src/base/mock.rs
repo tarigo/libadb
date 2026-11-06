@@ -16,6 +16,7 @@ use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
 use crate::base::protocol::{command, Checksum};
+use crate::shell::v2::FrameId;
 
 /// A transport failure of the kind a test asked for.
 #[derive(Debug, PartialEq, Eq)]
@@ -702,6 +703,14 @@ pub(crate) fn clse(local_id: u32) -> Packet {
 /// names no end of ours.
 pub(crate) fn withdraw(remote_id: u32) -> Packet {
     Packet::new(Command::Close, remote_id, 0, Vec::new())
+}
+
+/// A shell_v2 frame as the device writes it.
+pub(crate) fn shell_frame(id: FrameId, payload: &[u8]) -> Vec<u8> {
+    let mut frame = alloc::vec![id.into()];
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload);
+    frame
 }
 
 /// A connection with one open channel and one WRTE waiting to be read,

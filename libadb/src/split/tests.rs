@@ -2929,3 +2929,130 @@ mod backpressure_tests {
         assert_eq!(seen.acks_for(2), alloc::vec![5]);
     }
 }
+
+/// Nothing frees a slot but a close, a `Channel` having no `Drop`, so
+/// whatever opened a channel has to close it on every way out.
+mod slot_tests {
+    use crate::base::channel::{Channel, ChannelId};
+    use crate::base::mock::{
+        clse, now, shell_frame, split_one_channel_delayed_ack, split_with_channel, wrte, MockError,
+        SharedMock, FAILED_WRITES,
+    };
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+    use crate::error::{Error, ProtocolError};
+    use crate::shell::v2::{CommandOutput, FrameId, Shell};
+
+    use super::{Reader, Writer};
+
+    /// A READY with no credit on it, which breaks a delayed-ACK channel.
+    fn fault() -> Packet {
+        Packet::new(Command::Ready, 42, 1, alloc::vec::Vec::new())
+    }
+
+    /// A delayed-ACK channel with `packets` dispatched into it.
+    #[allow(clippy::type_complexity)]
+    fn channel_with(
+        packets: &[Packet],
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(4096, packets);
+        for _ in packets {
+            now(reader.dispatch_one()).unwrap();
+        }
+        (reader, writer, ch, seen)
+    }
+
+    /// `collect` on a shell over `ch`, going through `writer`.
+    fn collected(
+        writer: &Writer<SharedMock>,
+        ch: ChannelId,
+    ) -> Result<CommandOutput, Error<MockError>> {
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut rx = [0u8; 64];
+        now(Shell::new(channel, &mut rx).collect())
+    }
+
+    fn in_use(writer: &Writer<SharedMock>) -> usize {
+        writer.shared.lock_channels().in_use()
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_when_the_device_closes_with_no_exit_frame() {
+        let stdout = shell_frame(FrameId::Stdout, b"so far");
+        let (_reader, writer, ch, _seen) = channel_with(&[wrte(1, &stdout), clse(1)]);
+        let output = collected(&writer, ch);
+        assert!(matches!(output, Err(Error::ChannelClosed)), "{output:?}");
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_on_a_fault() {
+        let (_reader, writer, ch, _seen) = channel_with(&[fault()]);
+        let output = collected(&writer, ch);
+        assert!(
+            matches!(
+                output,
+                Err(Error::Protocol(ProtocolError::ShortReadyPayload))
+            ),
+            "{output:?}"
+        );
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_on_a_protocol_error() {
+        let (_reader, writer, ch, _seen) =
+            channel_with(&[wrte(1, &shell_frame(FrameId::Exit, &[]))]);
+        let output = collected(&writer, ch);
+        assert!(
+            matches!(
+                output,
+                Err(Error::Protocol(ProtocolError::ShortExitPayload))
+            ),
+            "{output:?}"
+        );
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    #[test]
+    fn collect_gives_the_slot_back_when_the_connection_ends() {
+        let (mut reader, writer, ch, _seen) = channel_with(&[]);
+        assert!(matches!(
+            now(reader.dispatch_one()),
+            Err(Error::UnexpectedEof)
+        ));
+        let output = collected(&writer, ch);
+        assert!(matches!(output, Err(Error::Disconnected)), "{output:?}");
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    /// Without delayed ACK the frames are acknowledged as they land, so
+    /// the CLSE is the one write left to fail.
+    #[test]
+    fn collect_keeps_a_finished_commands_output_when_its_close_fails() {
+        for (kind, _) in FAILED_WRITES {
+            let (mut reader, writer, ch) = split_with_channel(None);
+            let seen = now(writer.shared.write_half.lock()).clone();
+            let exit = shell_frame(FrameId::Exit, &[7]);
+            seen.feed(&wrte(1, &shell_frame(FrameId::Stdout, b"out")));
+            seen.feed(&wrte(1, &exit));
+            for _ in 0..3 {
+                now(reader.dispatch_one()).unwrap();
+            }
+            seen.fail_writes(kind);
+
+            let output = collected(&writer, ch).unwrap();
+            assert_eq!(output.stdout, b"out", "{kind:?}");
+            assert_eq!(output.exit_code, 7, "{kind:?}");
+        }
+    }
+}
