@@ -122,23 +122,13 @@ async fn send_frame_async(
     Ok(())
 }
 
-/// Open a shell_v2 session.
-///
-/// * `command` — shell command (need not be null-terminated; must be UTF-8).
-///   Pass empty to start a login shell (only meaningful with `pty == true`).
-/// * `pty`     — if true, opens `shell,v2,pty,...:`; otherwise `shell,v2,raw:`.
-/// * `term`    — value for the device's `TERM` env var (e.g. `"xterm-256color"`).
-///   Null or empty omits it. Ignored when `pty` is false. One holding a
-///   `,` or `:` would rewrite the request on the device, so it is refused
-///   with [`AdbStatus::Protocol`] before anything is sent, as a NUL in
-///   `command` is.
-/// * `rows`, `cols` — if `pty` and either is non-zero, a `WINDOW_SIZE_CHANGE`
-///   frame is sent right after the channel opens, a write like any other
-///   (see the [crate docs](crate)).
+/// Open a shell_v2 session running `command`, which must be UTF-8 and
+/// need not be null-terminated. With `pty` the session gets a PTY, with
+/// `term` for its `TERM` and `rows` and `cols` for its window size.
 ///
 /// On success, `*out_sh` receives a handle that must be released with
-/// [`adb_shell_free`]. Call [`adb_shell_close`] beforehand to tear down the
-/// channel gracefully.
+/// [`adb_shell_free`]. Call [`adb_shell_close`] beforehand to tear down
+/// the channel gracefully. See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle and must outlive the returned session.
@@ -226,10 +216,9 @@ pub unsafe extern "C" fn adb_shell_open(
     AdbStatus::Ok
 }
 
-/// Release a handle previously returned by [`adb_shell_open`].
-///
-/// NULL is a no-op. The channel is not closed automatically — call
-/// [`adb_shell_close`] first to avoid leaking the channel on the device.
+/// Release a handle previously returned by [`adb_shell_open`]. NULL is
+/// a no-op. The channel is not closed automatically: call
+/// [`adb_shell_close`] first to avoid leaking it on the device.
 ///
 /// # Safety
 /// `sh` must be NULL or a handle returned by [`adb_shell_open`] that has
@@ -243,20 +232,10 @@ pub unsafe extern "C" fn adb_shell_free(sh: *mut adb_shell_t) {
     drop(unsafe { Box::from_raw(sh) });
 }
 
-/// Read one decoded shell_v2 frame.
-///
-/// `*out_id` receives the frame id (see `ADB_SHELL_V2_*` constants).
-/// Up to `buf_cap` bytes of payload are copied into `buf`; `*out_len`
-/// receives the full payload length (a value greater than `buf_cap`
-/// means truncation — the overflow is discarded).
-///
-/// Large frames whose payload exceeds the internal rx buffer are
-/// delivered in multiple consecutive calls with the same id — concatenate
-/// the chunks to reconstruct the payload.
-///
-/// Channel closure is reported as [`AdbStatus::ChannelClosed`]. As with
-/// [`adb_read_channel`](crate::adb_read_channel), everything that arrived
-/// comes back before any error does, however the connection failed.
+/// Read one decoded shell_v2 frame: `*out_id` receives the frame id,
+/// `buf` up to `buf_cap` bytes of payload and `*out_len` the full
+/// payload length. Channel closure is [`AdbStatus::ChannelClosed`]. See
+/// `libadb.h`.
 ///
 /// # Safety
 /// `sh` must be a valid handle. `out_id` must point to a writable `u8`.
@@ -291,17 +270,9 @@ pub unsafe extern "C" fn adb_shell_read_frame(
     AdbStatus::Ok
 }
 
-/// Send a `STDIN` frame.
-///
-/// Safe to call from several threads on one session: each frame is
-/// assembled and written under a lock, so frames arrive whole rather
-/// than interleaved with another sender's.
-///
-/// The frame header and a payload go out as two WRTEs, and the second
-/// can wait for the device: see the [crate docs](crate). A failure can
-/// leave the header out and the payload not, and the device then takes
-/// whatever comes next for that payload. After one the session's frame
-/// stream cannot be trusted: close it.
+/// Send a `STDIN` frame. Safe to call from several threads on one
+/// session: frames arrive whole. After a failure the session's frame
+/// stream cannot be trusted: close it. See `libadb.h`.
 ///
 /// # Safety
 /// `sh` must be a valid handle. `data` must be NULL or point to at least
@@ -322,14 +293,8 @@ pub unsafe extern "C" fn adb_shell_write_stdin(
     unsafe { send_frame_payload(sh, FrameId::Stdin, payload) }
 }
 
-/// Send a `CLOSE_STDIN` frame — no more stdin will follow.
-///
-/// A channel the device has already closed is not a failure: there is
-/// no stdin left to close, and what the device wrote before closing
-/// stays readable, so a command that finished first still gives up its
-/// output. After [`adb_shell_close`] this is
-/// [`AdbStatus::ChannelClosed`], and on a channel a fault closed it is
-/// that fault's status.
+/// Send a `CLOSE_STDIN` frame — no more stdin will follow. A channel
+/// the device has already closed is not a failure. See `libadb.h`.
 ///
 /// # Safety
 /// `sh` must be a valid handle.

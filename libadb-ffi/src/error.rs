@@ -37,13 +37,12 @@ pub enum AdbStatus {
     /// match, or the device ended the exchange itself (dialog
     /// dismissed, attempts used up); [`adb_last_error`] says which.
     Pairing = 12,
-    /// The connection has ended, so nothing more will arrive from the
-    /// device: it or the transport went away, or what came in does not
-    /// parse. The call that saw that happen returned what it saw, which
-    /// is [`AdbStatus::Io`] or [`AdbStatus::Protocol`]. This is what the
-    /// calls that wait on the device get from then on, reads once they
-    /// have handed over what had already arrived. A read timeout ends
-    /// nothing, and never leads here. Open a new connection.
+    /// The connection has ended and nothing more will arrive from the
+    /// device. The call that saw this returned [`AdbStatus::Io`] or
+    /// [`AdbStatus::Protocol`]; every later call that waits on the
+    /// device gets this status, a read only after handing over what had
+    /// already arrived. A read timeout never leads here. Open a new
+    /// connection.
     Disconnected = 13,
     Internal = 255,
 }

@@ -4,22 +4,21 @@
 //! operation is driven to completion by a tiny internal executor. No
 //! tokio or smol runtime is required.
 //!
+//! `include/libadb.h` is the contract: it says in full what each call
+//! does and returns, how it fails, what stays valid and what the caller
+//! must do. The rustdoc here gives a summary and the `# Safety` section.
+//!
 //! Under the hood a handle is a split [`Reader`] / [`Writer`] pair
 //! sharing a reference-counted state. A write never waits for the
 //! [`Reader`]'s mutex, so a thread blocked in a long read does not
 //! prevent another thread from writing — which is what makes
 //! interactive shell sessions usable from C without any async runtime.
 //!
-//! A write needs no read call running. [`Reader::run`] is never started,
-//! so only a call holding the read lock takes packets off the
-//! connection, and that includes the OKAY [`Writer::write_channel`]
-//! waits for. Without delayed ACK a channel has room for one WRTE at a
-//! time, so a second write in a row waits for the OKAY to the first;
-//! with delayed ACK a write waits once the credit runs out. While it
-//! waits for the device and no read call is running, the write reads the
-//! connection itself, holding the read lock, so a call that needs the
-//! lock waits its turn and data for other channels is kept for their
-//! reads. A read does not wait for the lock: finding it taken, the read
+//! [`Reader::run`] is never started, so only a call holding the read
+//! lock takes packets off the connection, and that includes the OKAY
+//! [`Writer::write_channel`] waits for. A write waiting for the device
+//! with no read call running reads the connection itself, under that
+//! lock. A read does not wait for the lock: finding it taken, the read
 //! takes what the holder dispatches for its channel, and the lock once
 //! it comes free.
 //!
@@ -27,9 +26,8 @@
 //!
 //! TCP support is always compiled in and needs no async runtime. USB
 //! support is opt-in: enable `usb` (alias for the pure-Rust `nusb`
-//! backend) or `rusb` (libusb). Both may be on at once, and then
-//! `usb://` goes to `nusb`: there is one [`adb_connect`] and nothing in
-//! it to choose a backend with.
+//! backend) or `rusb` (libusb). Both may be on at once, and `usb://`
+//! then goes to `nusb`, since [`adb_connect`] cannot choose a backend.
 //!
 //! `tls` answers a wireless-debugging device's `STLS` (Android 11+)
 //! from [`adb_connect`] with TLS 1.3, presenting the caller's key in a

@@ -28,11 +28,9 @@ pub(crate) type FfiIncoming = SplitIncoming<FfiWriteHalf>;
 /// Opaque connection handle.
 ///
 /// Holds a split Reader + Writer pair. The Reader sits behind a mutex
-/// so that multiple C threads can share a handle safely. The Writer is
-/// cheaply cloneable and the write path only briefly locks an internal
-/// write-half mutex, so a read does not hold a write up. A write waiting
-/// for the device takes the Reader's mutex itself when it finds it free:
-/// see the [crate docs](crate).
+/// so that multiple C threads can share a handle safely. A write does
+/// not wait for that mutex, but takes it when it finds it free and has
+/// to wait for the device: see the [crate docs](crate).
 #[allow(non_camel_case_types)]
 pub struct adb_connection_t {
     pub(crate) reader: Arc<Mutex<FfiReader>>,
@@ -66,46 +64,17 @@ const _: fn() = || {
 };
 
 /// Parse `uri`, open a transport, and perform the CNXN/AUTH handshake.
-///
-/// All arguments are null-terminated C strings:
-/// * `uri` — `tcp://HOST:PORT` or `usb://[VID:PID|serial/SERIAL]`
-/// * `priv_key_pem` — PKCS#8 PEM-encoded RSA private key (contents of
-///   `~/.android/adbkey`)
-/// * `pub_key` — ADB-formatted public key blob (contents of
-///   `~/.android/adbkey.pub`)
-/// * `banner` — identity banner, e.g. `"host::features=shell_v2,delayed_ack"`
-///
 /// On success `*out` is set to a freshly-allocated handle that must be
 /// released with [`adb_connection_free`].
 ///
-/// Wireless debugging (Android 11+): the port the "Wireless debugging"
-/// screen shows answers the handshake with `STLS` and speaks TLS 1.3 from
-/// then on. Built with the `tls` feature, this call takes that up: it
-/// presents a certificate carrying the key in `priv_key_pem`, so a key
-/// the device already trusts — confirmed at a USB prompt, or paired —
-/// needs nothing more, and one it does not trust is
-/// [`AdbStatus::Auth`]. Without the feature the call is
-/// [`AdbStatus::TlsRequired`]. The port changes every time the setting
-/// is switched on and this library does no DNS-SD, so the caller
-/// supplies it. The legacy port `adb tcpip` opens, and USB, stay in the
-/// clear either way. A certificate that cannot be built for the key —
-/// the system clock outside what a certificate can carry, for one — is
-/// [`AdbStatus::Internal`].
-///
-/// # Security
-///
-/// As with `adb`, the device is not authenticated. Its certificate is
-/// self-signed and taken on trust, and TLS starts only when the device
-/// asks for it with `STLS`: a peer that answers CNXN or AUTH instead is
-/// served in the clear. On a network you do not trust, an attacker in
-/// the middle can therefore take the device's place, inside TLS or, by
-/// answering without `STLS`, outside it. TLS keeps a passive
-/// eavesdropper out, but this API has no way to pin the device's
-/// certificate or to insist on TLS.
+/// With the `tls` feature this answers a wireless-debugging device's
+/// `STLS`; without it such a device is [`AdbStatus::TlsRequired`]. As
+/// with `adb`, the device is not authenticated. See `libadb.h`.
 ///
 /// # Safety
-/// All pointers must be valid null-terminated C strings. `out` must
-/// point to a writable `adb_connection_t*`.
+/// `uri`, `priv_key_pem`, `pub_key` and `banner` must be valid
+/// null-terminated C strings. `out` must point to a writable
+/// `adb_connection_t*`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_connect(
     uri: *const c_char,
@@ -154,19 +123,11 @@ pub unsafe extern "C" fn adb_connect(
 }
 
 /// Like [`adb_connect`], but uses a caller-supplied [`adb_authenticator_t`]
-/// instead of the built-in RSA/PEM authenticator.
+/// instead of the built-in RSA/PEM authenticator, for a private key that
+/// lives outside the host process.
 ///
-/// Use this when the private key lives outside the host process — e.g.
-/// in an HSM, a remote signing service, or a non-PKCS#8 key store. The
-/// [`sign`](adb_authenticator_t::sign) callback runs synchronously
-/// during the handshake.
-///
-/// Plaintext only: the callback signs the 20-byte AUTH token, while TLS
-/// 1.3 client authentication needs an RSA-PSS signature over the
-/// handshake transcript and a certificate, neither of which it can
-/// produce. Against a wireless-debugging port this call is
-/// [`AdbStatus::TlsRequired`] whatever the build; use [`adb_connect`]
-/// with the private key there.
+/// Plaintext only: against a wireless-debugging port this call is
+/// [`AdbStatus::TlsRequired`] whatever the build. See `libadb.h`.
 ///
 /// # Safety
 /// `uri` and `banner` must be valid null-terminated C strings.
@@ -289,44 +250,13 @@ fn connect_with_key(
     connect_plain(t, auth, banner)
 }
 
-/// Set receive/send timeouts on a `tcp://` connection, in
-/// milliseconds; 0 disables the corresponding timeout. USB transports
-/// have no such knob and answer [`AdbStatus::InvalidArg`].
+/// Set the receive and send timeouts of a `tcp://` connection, in
+/// milliseconds; 0 disables that timeout. USB transports answer
+/// [`AdbStatus::InvalidArg`].
 ///
-/// A read that hits the timeout fails with [`AdbStatus::Io`], and the
-/// connection stays usable: bytes of a partially received packet are
-/// kept, so the next read continues where this one stopped.
-///
-/// **Platform note.** That recoverable-read guarantee holds on Unix,
-/// where `SO_RCVTIMEO` leaves the socket intact. On Windows, Winsock
-/// documents a blocking receive that expires under `SO_RCVTIMEO` as
-/// leaving the connection in an indeterminate state and advises
-/// closing it — so there a timed-out read means close the connection,
-/// not read again. Until this path uses a readiness-based deadline on
-/// Windows, treat the read timeout as recoverable on Unix only.
-///
-/// A write waiting for the device reads for itself (see the
-/// [crate docs](crate)), so the timeout ends that read too: the write
-/// fails with [`AdbStatus::Io`], and what it had sent by then stays
-/// sent. While a read call on another thread holds the read lock, the
-/// timeout ends that call and the write goes on waiting until it finds
-/// the lock free.
-///
-/// A signal handled during a wait does not fail the call: it goes on
-/// waiting, and the timeout starts over.
-///
-/// A *write* timeout is a harder stop even on Unix: firing mid-packet
-/// abandons a write the device has partially seen, so the connection
-/// is marked desynchronized and every later channel operation fails
-/// with [`AdbStatus::Desynchronized`] — reads once they have handed
-/// over what had already arrived; metadata queries and this setter
-/// still answer. Set it only where tearing the connection down beats
-/// blocking; for a recoverable bound, use the read timeout.
-///
-/// Both hold on a TLS (wireless-debugging) connection too: the timeouts
-/// sit on the socket underneath, a timed-out read leaves the session
-/// and the partial packet intact, and a timed-out write is the same
-/// abandoned packet.
+/// A read timeout fails the read with [`AdbStatus::Io`] and, on Unix,
+/// leaves the connection usable. A write timeout can leave the
+/// connection [`AdbStatus::Desynchronized`]. See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle.
@@ -355,26 +285,22 @@ pub unsafe extern "C" fn adb_connection_set_io_timeout_ms(
     AdbStatus::Ok
 }
 
-/// Release a handle previously returned by [`adb_connect`].
-///
-/// Passing NULL is a no-op. Passing any other value that was not
-/// obtained from [`adb_connect`] is undefined behaviour.
+/// Release a handle from [`adb_connect`] or
+/// [`adb_connect_with_authenticator`]. NULL is a no-op.
 ///
 /// # Safety
-/// `conn` must be NULL or a handle returned by [`adb_connect`] that
+/// `conn` must be NULL or a handle returned by one of those calls that
 /// has not yet been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn adb_connection_free(conn: *mut adb_connection_t) {
     if conn.is_null() {
         return;
     }
-    // SAFETY: a live handle from `adb_connect`, which boxed it, per `# Safety`.
+    // SAFETY: a live handle from `handshake`, which boxed it, per `# Safety`.
     drop(unsafe { Box::from_raw(conn) });
 }
 
-/// Negotiated maximum payload size, in bytes.
-///
-/// Returns 0 if `conn` is NULL.
+/// Negotiated maximum payload size, in bytes; 0 if `conn` is NULL.
 ///
 /// # Safety
 /// `conn` must be NULL or a valid handle.
@@ -387,9 +313,8 @@ pub unsafe extern "C" fn adb_connection_max_payload(conn: *const adb_connection_
     unsafe { &*conn }.writer.max_payload()
 }
 
-/// Whether delayed-ACK (credit-based flow control) was negotiated.
-///
-/// Returns `false` if `conn` is NULL.
+/// Whether delayed-ACK (credit-based flow control) was negotiated;
+/// `false` if `conn` is NULL.
 ///
 /// # Safety
 /// `conn` must be NULL or a valid handle.
@@ -403,17 +328,8 @@ pub unsafe extern "C" fn adb_connection_delayed_ack(conn: *const adb_connection_
 }
 
 /// Copy the device banner bytes into `buf` (up to `buf_len` bytes) and
-/// write the full banner length through `out_len`.
-///
-/// Returns [`AdbStatus::Ok`] on success. If the banner is longer than
-/// `buf_len`, `buf` receives the first `buf_len` bytes and `*out_len`
-/// still reflects the full length so the caller can retry with a
-/// larger buffer.
-///
-/// Does not take the read lock — safe to call while another thread is
-/// blocked in [`adb_read_channel`].
-///
-/// [`adb_read_channel`]: crate::adb_read_channel
+/// write the full banner length through `out_len`, so a caller whose
+/// buffer was too short can retry with a larger one.
 ///
 /// # Safety
 /// `conn` must be a valid handle. `buf` must be NULL or point to

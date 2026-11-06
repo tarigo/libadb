@@ -28,18 +28,10 @@ pub struct adb_key_t {
 }
 
 /// Load `<android_dir>/adbkey`, generating and persisting a key when
-/// there is none.
-///
-/// `android_dir` is required — pass the directory the standard client
-/// uses (`~/.android`) to reuse the identity a device already trusts,
-/// or any directory of your own. `name` is the `user@host` comment
-/// shown in the device's authorization dialog; NULL picks a default.
-///
-/// An existing key is reused untouched. One that will not parse is
-/// [`AdbStatus::Auth`] and is left on disk: it may be an identity the
-/// device still trusts.
-///
-/// On success `*out` receives a handle to release with [`adb_key_free`].
+/// there is none. `name` is the `user@host` comment shown in the
+/// device's authorization dialog; NULL picks a default. On success
+/// `*out` receives a handle to release with [`adb_key_free`]. See
+/// `libadb.h`.
 ///
 /// # Safety
 /// `android_dir` and, if non-NULL, `name` must be valid null-terminated
@@ -129,10 +121,9 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
     AdbStatus::Ok
 }
 
-/// The PKCS#8 PEM private key, ready to pass to `adb_connect`.
-///
-/// The string is owned by `key` and stays valid until [`adb_key_free`].
-/// Returns NULL if `key` is NULL.
+/// The PKCS#8 PEM private key, ready to pass to `adb_connect`; NULL if
+/// `key` is NULL. The string is owned by `key` and stays valid until
+/// [`adb_key_free`].
 ///
 /// # Safety
 /// `key` must be NULL or a handle from [`adb_key_load_or_generate`]
@@ -147,10 +138,8 @@ pub unsafe extern "C" fn adb_key_private_key_pem(key: *const adb_key_t) -> *cons
 }
 
 /// The ADB-format public key — the `adbkey.pub` line — ready to pass to
-/// `adb_connect`.
-///
-/// The string is owned by `key` and stays valid until [`adb_key_free`].
-/// Returns NULL if `key` is NULL.
+/// `adb_connect`; NULL if `key` is NULL. The string is owned by `key`
+/// and stays valid until [`adb_key_free`].
 ///
 /// # Safety
 /// `key` must be NULL or a handle from [`adb_key_load_or_generate`]

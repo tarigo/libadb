@@ -13,19 +13,10 @@ use crate::slice::copy_out;
 /// `host_spec` as its destination. Receive those channels with
 /// [`adb_accept_channel`].
 ///
-/// The port adbd reports is written to `(data, data_cap, out_data_len)`
-/// in unsigned decimal, as [`adb_connection_features`] writes its text,
-/// and `*out_data_len` is 0 when it reports none:
-///
-/// * a newly bound `tcp:0` reports the port adbd picked;
-/// * a fixed `tcp:<port>` reports it from Android 10 on, not on
-///   Android 9;
-/// * a `vsock:` listener reports its port;
-/// * a rule that already exists, and any other spec, answer a bare
-///   `OKAY` and report none.
-///
-/// A reported port is 32 bits wide because vsock ports are; a `tcp:`
-/// port always fits a `u16`.
+/// The port adbd reports, if any, is written to
+/// `(data, data_cap, out_data_len)` in unsigned decimal, with the
+/// convention of [`adb_connection_features`], and `*out_data_len` is 0
+/// when it reports none. `libadb.h` says which specs report one.
 ///
 /// [`adb_accept_channel`]: crate::adb_accept_channel
 /// [`adb_connection_features`]: crate::adb_connection_features

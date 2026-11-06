@@ -75,11 +75,6 @@ features! {
 /// Returns `false` if `conn` is NULL, or if `feature` is not one of
 /// the `ADB_FEATURE_*` constants defined in `libadb.h`.
 ///
-/// Does not take the read lock — safe to call while another thread is
-/// blocked in [`adb_read_channel`].
-///
-/// [`adb_read_channel`]: crate::adb_read_channel
-///
 /// # Safety
 /// `conn` must be NULL or a valid handle.
 #[unsafe(no_mangle)]
@@ -116,14 +111,8 @@ pub extern "C" fn adb_feature_name(feature: u32) -> *const c_char {
 /// `out_len`. Either pointer may be NULL; pass `(NULL, 0, &n)` to
 /// query the count, then call again with a larger buffer.
 ///
-/// Features the library does not recognise are silently skipped at
-/// handshake parse time, so the returned count covers only known
-/// `ADB_FEATURE_*` values.
-///
-/// Does not take the read lock — safe to call while another thread is
-/// blocked in [`adb_read_channel`].
-///
-/// [`adb_read_channel`]: crate::adb_read_channel
+/// Features the library does not recognise are skipped, so the count
+/// covers only known `ADB_FEATURE_*` values.
 ///
 /// # Safety
 /// `conn` must be NULL or a valid handle. `buf` must be NULL or

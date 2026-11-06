@@ -10,24 +10,10 @@ use crate::slice::copy_out;
 /// waiting for one to arrive if none is staged, and copy its
 /// destination into `(dest, dest_cap, out_dest_len)` per
 /// [`adb_connection_features`]. The request stays staged on the handle
-/// until [`adb_incoming_accept`] or [`adb_incoming_reject`] consumes
-/// exactly it — repeated calls report the same request again, which is
-/// what makes the truncate-and-report convention usable here: probe
-/// with `(NULL, 0, &len)`, allocate, call again for the bytes.
+/// until [`adb_incoming_accept`] or [`adb_incoming_reject`] takes it, so
+/// repeated calls report the same request again. See `libadb.h`.
 ///
 /// [`adb_connection_features`]: crate::adb_connection_features
-///
-/// With nothing staged this blocks until a channel arrives, exactly as
-/// [`adb_read_channel`] blocks for data, and — like it — holds the read
-/// lock while waiting, so a device that never opens one parks this
-/// call. The staged request is held locked for the whole call, so
-/// concurrent reports and verdicts serialize against it rather than
-/// racing for the queue. There is no way to interrupt it yet; in
-/// particular the handle must stay alive until this returns — freeing
-/// it from another thread while a call is blocked is undefined
-/// behaviour, not an interruption mechanism.
-///
-/// [`adb_read_channel`]: crate::adb_read_channel
 ///
 /// # Safety
 /// `conn` must be a valid handle and must not be freed while this call

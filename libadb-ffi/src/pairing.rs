@@ -16,42 +16,16 @@ use crate::transport::FfiConnectError;
 
 /// Pair with a device: put the key in `priv_key_pem` into its trusted
 /// store through "Pair device with pairing code" on its Wireless
-/// debugging screen (SPAKE2 inside TLS, as `adb pair` does). A key the
-/// device already trusts — one confirmed at a USB prompt — needs none
-/// of this; adbd checks both against the same store.
+/// debugging screen (SPAKE2 inside TLS, as `adb pair` does).
 ///
-/// * `uri` — `tcp://HOST:PORT`, the *pairing* port shown beside the
-///   code. It is not the port the device connects on, it changes each
-///   time the dialog opens, and it stops listening once one pairing
-///   succeeds. `usb://` is [`AdbStatus::InvalidUri`].
-/// * `priv_key_pem` — PKCS#8 PEM RSA private key, as
-///   [`adb_connect`](crate::adb_connect) takes it.
-/// * `pub_key` — the matching ADB-format public key line. The text
-///   after the base64 blob (`user@host`) is the name the device lists
-///   this host under, as it stands; a line ending after it, as a file
-///   read leaves, is dropped. A blob that does not belong to the
-///   private key is [`AdbStatus::InvalidArg`].
-/// * `code` — what the dialog shows: six digits when typed, or the
-///   password a QR code carried. Only emptiness is checked here;
-///   validate a typed code yourself, since a wrong one costs the device
-///   one of its attempts, and it stops serving after twenty.
-/// * `guid`, `guid_cap`, `out_guid_len` — receive the device's GUID,
-///   the name it announces its connect port under over DNS-SD, with
-///   the truncate-and-report convention of
-///   [`adb_connection_features`](crate::adb_connection_features);
-///   either pointer may be NULL.
+/// `uri` is the `tcp://` pairing port shown beside the code, `pub_key`
+/// the matching ADB-format public key line, and `code` what the dialog
+/// shows. `guid`, `guid_cap` and `out_guid_len` receive the device's
+/// GUID, with the truncate-and-report convention of
+/// [`adb_connection_features`](crate::adb_connection_features).
 ///
-/// Returns [`AdbStatus::Ok`] once the device has stored the key,
-/// whatever became of the GUID copy: by then the pairing is done and
-/// the port is gone, so a short buffer is no reason to fail. From then
-/// on the same key connects over TLS through `adb_connect`.
-///
-/// [`AdbStatus::Pairing`] is the device saying no: the code did not
-/// match, or it ended the exchange itself. [`AdbStatus::Connect`]
-/// means nothing answered at that address, typically a pairing port
-/// that has already closed; [`AdbStatus::Io`] is a connection that
-/// broke part way. Blocks until the exchange ends; there is no
-/// timeout.
+/// Returns [`AdbStatus::Ok`] once the device has stored the key. Blocks
+/// until the exchange ends; there is no timeout. See `libadb.h`.
 ///
 /// # Safety
 /// The four strings must be valid null-terminated C strings. `guid`

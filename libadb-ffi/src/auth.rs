@@ -69,19 +69,12 @@ fn normalize_public_key(pub_key: &[u8]) -> Vec<u8> {
     v
 }
 
-/// C-callable signing callback.
+/// C-callable signing callback, `adb_sign_fn` in `libadb.h`.
 ///
-/// Implementations must produce a PKCS#1 v1.5 signature of the SHA-1
-/// prehash supplied in `token` (always 20 bytes), write up to
-/// `out_capacity` bytes of signature into `out_signature`, and store
-/// the actual signature length through `out_length`. Returning any
-/// non-[`AdbStatus::Ok`] value aborts authentication and is reported
-/// to the caller as [`AdbStatus::Auth`].
-///
-/// It signs the AUTH token only. TLS 1.3 client authentication needs
-/// an RSA-PSS signature over the handshake transcript and a
-/// certificate, neither of which this callback can supply, so a
-/// connection through it stays in the clear.
+/// Implementations must store a PKCS#1 v1.5 signature of the 20-byte
+/// SHA-1 prehash in `token` through `out_signature` and `out_length`.
+/// Any other status than [`AdbStatus::Ok`] is reported to the caller as
+/// [`AdbStatus::Auth`].
 pub type AdbSignFn = unsafe extern "C" fn(
     user_data: *mut c_void,
     token: *const u8,
@@ -93,23 +86,22 @@ pub type AdbSignFn = unsafe extern "C" fn(
 
 /// Caller-supplied authenticator passed to [`adb_connect_with_authenticator`].
 ///
-/// `public_key` / `public_key_len` describe the ADB-format public key
-/// blob (the contents of `~/.android/adbkey.pub`). The bytes are copied
-/// internally on connect, so the buffer only needs to remain valid for
-/// the duration of the call. A trailing NUL is appended automatically
-/// if not already present.
-///
-/// `sign` is invoked synchronously during the handshake to produce a
-/// signature for the device-issued token. `user_data` is forwarded
-/// verbatim to every call and is otherwise opaque to libadb.
-///
 /// [`adb_connect_with_authenticator`]: crate::adb_connect_with_authenticator
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct adb_authenticator_t {
+    /// ADB-format public key blob (the contents of
+    /// `~/.android/adbkey.pub`). The bytes are copied on connect, so the
+    /// buffer only needs to stay valid for the call. A trailing NUL is
+    /// appended if not already present.
     pub public_key: *const u8,
+    /// Length of [`public_key`](Self::public_key) in bytes.
     pub public_key_len: usize,
+    /// Invoked synchronously during the handshake to sign the
+    /// device-issued token.
     pub sign: Option<AdbSignFn>,
+    /// Forwarded verbatim to every [`sign`](Self::sign) call; otherwise
+    /// opaque to libadb.
     pub user_data: *mut c_void,
 }
 

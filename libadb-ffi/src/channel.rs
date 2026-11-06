@@ -27,17 +27,10 @@ fn decode_channel_id(conn: &adb_connection_t, id: u64) -> Result<ChannelId, AdbS
     Ok(ChannelId::from_raw(slot, (id >> 32) as u32))
 }
 
-/// Open a new channel to `destination`.
-///
-/// `destination` is an ADB service string, e.g. `"shell:ls"`,
-/// `"tcp:8080"`, `"sync:"`. It does not need to be null-terminated.
-/// On success, `*out_id` receives a 64-bit channel ID (packed slot +
-/// wire local_id) usable with the other `adb_*_channel` functions
-/// until it is closed. A channel ID from a closed channel is stale:
-/// calls against it fail with [`AdbStatus::ChannelClosed`] even if
-/// the slot has since been reused for a new channel. One whose slot
-/// lies outside the connection's channel table, which no call returns,
-/// is [`AdbStatus::InvalidArg`].
+/// Open a new channel to `destination`, an ADB service string such as
+/// `"shell:ls"` that need not be null-terminated. On success `*out_id`
+/// receives a 64-bit channel ID for the other `adb_*_channel` functions.
+/// See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle. `destination` must be NULL or point
@@ -68,20 +61,8 @@ pub unsafe extern "C" fn adb_open_channel(
 /// Read from a channel into `buf` (up to `buf_len` bytes). Writes the
 /// number of bytes actually read through `out_read`.
 ///
-/// A return of `ADB_OK` with `*out_read == 0` never occurs; channel
-/// closure is reported as [`AdbStatus::ChannelClosed`]. That is what
-/// makes `while (adb_read_channel(...) == ADB_OK)` a correct loop, so
-/// `buf_len == 0` is rejected with [`AdbStatus::InvalidArg`] rather
-/// than answering with a zero that the loop would spin on, and a
-/// zero-length WRTE from the device — legal, and delivering nothing —
-/// is read past instead of surfacing as that same zero.
-///
-/// Everything that arrived comes back before any error does, however
-/// the connection failed: a device that hangs up leaves what it sent
-/// readable. The call that meets the end of the connection returns what
-/// it met, as [`AdbStatus::Io`] or [`AdbStatus::Protocol`], and the next
-/// call [`AdbStatus::Disconnected`]; a read timeout is
-/// [`AdbStatus::Io`] too, and the next call simply reads on.
+/// `ADB_OK` with `*out_read == 0` never occurs: channel closure is
+/// [`AdbStatus::ChannelClosed`]. See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle. `buf` must be NULL or point to at
@@ -122,15 +103,8 @@ pub unsafe extern "C" fn adb_read_channel(
 /// Write `buf_len` bytes from `buf` to a channel. Returns only after
 /// all bytes have been framed and handed to the transport.
 ///
-/// They go out as WRTEs of at most the negotiated `max_payload`, and
-/// each can first wait for the device's OKAY to the one before it, or
-/// for credit under delayed ACK. No read call has to be running for
-/// that: with none, this call reads the connection itself, and can then
-/// fail as a read does, with part of `buf` already sent. See the
-/// [crate docs](crate).
-///
-/// Never waits for the read lock — safe to call concurrently with
-/// [`adb_read_channel`] on another thread.
+/// With no read call running, this reads the connection itself while
+/// it waits for the device. See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle. `buf` must be NULL or point to at
@@ -162,11 +136,7 @@ pub unsafe extern "C" fn adb_write_channel(
 }
 
 /// Close a channel. Subsequent reads/writes against this ID will fail
-/// with [`AdbStatus::ChannelClosed`].
-///
-/// Its slot comes back however the CLSE fares. With the device gone, or
-/// once the connection has ended, nobody is left to hear one and this is
-/// [`AdbStatus::Ok`] without it.
+/// with [`AdbStatus::ChannelClosed`]. See `libadb.h`.
 ///
 /// # Safety
 /// `conn` must be a valid handle.
