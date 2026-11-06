@@ -2,17 +2,22 @@
  * libadb — C API for the ADB wire-protocol library.
  *
  * All functions are synchronous and block the calling thread until the
- * underlying async operation completes.
+ * underlying async operation completes. A const char * is a
+ * null-terminated string.
  *
  * Handles may be passed between threads and used from several at once.
  * The calls that wait on the device for an answer — adb_open_channel(),
  * adb_read_channel(), adb_accept_channel(), the reverse calls,
  * adb_shell_open() and adb_shell_read_frame() — hold the connection's
- * read lock, so two of them serialise. The exception is a read that
- * finds the lock taken: it takes what the holder dispatches for its
+ * read lock, so they run one at a time. The exception is a read that
+ * finds the lock taken: it takes the data the holder dispatches for its
  * channel, and the lock once it comes free. Writes and closes never wait
- * for it: a thread blocked in a read does not keep another from writing.
- * The metadata queries take no lock at all.
+ * for the lock: a thread blocked in a read does not keep another from
+ * writing. The metadata queries — adb_connection_max_payload(),
+ * adb_connection_delayed_ack(), adb_connection_device_banner(),
+ * adb_connection_has_feature() and adb_connection_features() — take no
+ * lock at all, so they are safe to call while another thread is blocked
+ * in adb_read_channel().
  *
  * A write, adb_write_channel() or a shell frame, needs no read call
  * running. Nothing reads the connection in the background: only a call
@@ -26,7 +31,8 @@
  * their reads.
  *
  * On error, functions return a non-zero adb_status_t and set a
- * thread-local error string retrievable via adb_last_error().
+ * thread-local error string retrievable via adb_last_error(). The one
+ * exception is noted at adb_shell_read_frame().
  */
 
 #ifndef LIBADB_H
@@ -68,13 +74,13 @@ typedef enum {
      * match, or the device ended the exchange itself (dialog dismissed,
      * attempts used up); adb_last_error() says which. */
     ADB_ERR_PAIRING         = 12,
-    /* The connection has ended, so nothing more will arrive from the
-     * device: it or the transport went away, or what came in does not
-     * parse. The call that saw that happen returned what it saw, which
-     * is ADB_ERR_IO or ADB_ERR_PROTOCOL. This is what the calls that
-     * wait on the device get from then on, reads once they have handed
-     * over what had already arrived. A read timeout ends nothing, and
-     * never leads here. Open a new connection. */
+    /* The connection has ended and nothing more will arrive from the
+     * device: the device or the transport went away, or what came in
+     * does not parse. The call that saw this returned ADB_ERR_IO or
+     * ADB_ERR_PROTOCOL. Every later call that waits on the device gets
+     * ADB_ERR_DISCONNECTED; a read gets it only after handing over what
+     * had already arrived. A read timeout does not end the connection
+     * and never leads here. Open a new connection. */
     ADB_ERR_DISCONNECTED    = 13,
     ADB_ERR_INTERNAL        = 255
 } adb_status_t;
@@ -90,16 +96,16 @@ typedef enum {
  *
  * Wireless debugging (Android 11+): the port the "Wireless debugging"
  * screen shows answers the handshake with STLS and speaks TLS 1.3 from
- * then on. Built with the `tls` feature, adb_connect takes that up: it
- * presents a certificate carrying the key in priv_key_pem, so a key the
- * device already trusts — confirmed at a USB prompt, or paired — needs
- * nothing more, and a key it does not trust is ADB_ERR_AUTH. Without
- * the feature the call is ADB_ERR_TLS_REQUIRED. The port changes every
+ * then on. Built with the `tls` feature, adb_connect() starts TLS and
+ * presents a certificate carrying the key in priv_key_pem. A key the
+ * device already trusts, confirmed at a USB prompt or paired, needs
+ * nothing more; a key it does not trust is ADB_ERR_AUTH. Without the
+ * feature the call returns ADB_ERR_TLS_REQUIRED. The port changes every
  * time the setting is switched on and the library does no DNS-SD, so
- * the caller supplies it. The legacy port `adb tcpip` opens, and USB,
- * stay in the clear either way. A certificate that cannot be built for
- * the key — the system clock outside what a certificate can carry, for
- * one — is ADB_ERR_INTERNAL.
+ * the caller supplies it. USB and the legacy port `adb tcpip` opens
+ * stay in the clear either way. If no certificate can be built for the
+ * key, for example because the system clock is outside what a
+ * certificate can carry, the call returns ADB_ERR_INTERNAL.
  *
  * Security, as with `adb`: the device is not authenticated. Its
  * certificate is self-signed and taken on trust, and TLS starts only
@@ -119,6 +125,7 @@ adb_status_t adb_connect(
 
 /*
  * Caller-supplied signing callback for adb_connect_with_authenticator().
+ * It runs synchronously during the handshake.
  *
  * The implementation must produce a PKCS#1 v1.5 signature of the SHA-1
  * prehash supplied in `token` (always 20 bytes), write up to
@@ -126,8 +133,8 @@ adb_status_t adb_connect(
  * signature length through `*out_length`. Returning anything other
  * than ADB_OK aborts the handshake; the caller observes ADB_ERR_AUTH.
  *
- * `user_data` is forwarded verbatim from adb_authenticator_t and is
- * otherwise opaque to libadb.
+ * `user_data` is forwarded verbatim from adb_authenticator_t to every
+ * call and is otherwise opaque to libadb.
  */
 typedef adb_status_t (*adb_sign_fn)(
     void          *user_data,
@@ -138,10 +145,12 @@ typedef adb_status_t (*adb_sign_fn)(
     size_t        *out_length);
 
 /*
- * Caller-supplied authenticator. The public_key bytes are copied
- * internally on connect, so the buffer only needs to remain valid for
- * the duration of the call. The `sign` callback must remain valid for
- * the duration of the call.
+ * Caller-supplied authenticator. `public_key` and `public_key_len`
+ * describe the ADB-format public key blob (contents of
+ * ~/.android/adbkey.pub); a trailing NUL is appended if it is not
+ * already there. The bytes are copied on connect, so the buffer only
+ * needs to stay valid for the duration of the call. The `sign` callback
+ * must stay valid for the duration of the call too.
  */
 typedef struct {
     const uint8_t *public_key;
@@ -168,7 +177,9 @@ adb_status_t adb_connect_with_authenticator(
     const char                *banner,
     adb_connection_t         **out);
 
-/* Release a handle returned by adb_connect(). NULL is a no-op. */
+/* Release a handle from adb_connect() or adb_connect_with_authenticator().
+ * NULL is a no-op. Any other value, or a handle already freed, is
+ * undefined behaviour. */
 void adb_connection_free(adb_connection_t *conn);
 
 /* ---- host key store -------------------------------------------------
@@ -186,10 +197,10 @@ typedef struct adb_key adb_key_t;
  *
  *   android_dir  key directory — required. Point it at ~/.android to
  *                reuse the identity the standard adb client already
- *                had the device trust; the library resolves no paths
- *                and reads no environment of its own. Taken as bytes
- *                on Unix, so a path that is not valid UTF-8 is fine;
- *                on Windows it must be UTF-8.
+ *                had the device trust, or at any directory of your own;
+ *                the library resolves no paths and reads no environment
+ *                of its own. Taken as bytes on Unix, so a path that is
+ *                not valid UTF-8 is fine; on Windows it must be UTF-8.
  *   name         "user@host" comment shown in the device's dialog,
  *                or NULL for a default
  *   out          receives the handle; release with adb_key_free()
@@ -235,10 +246,10 @@ void adb_key_free(adb_key_t *key);
  *   priv_key_pem   PKCS#8 PEM RSA private key, as adb_connect() takes it
  *   pub_key        the matching ADB-format public key line. The text
  *                  after the base64 blob ("user@host") is the name the
- *                  device lists this host under, as it stands; a line
- *                  ending after it, as a file read leaves, is dropped.
- *                  A blob that does not belong to the private key is
- *                  ADB_ERR_INVALID_ARG.
+ *                  device lists this host under, unchanged; a line
+ *                  ending after it, which reading a file leaves behind,
+ *                  is dropped. A blob that does not belong to the
+ *                  private key is ADB_ERR_INVALID_ARG.
  *   code           the code on the dialog: six digits when typed, or
  *                  the password a QR code carried. Only emptiness is
  *                  checked here — validate a typed code yourself, since
@@ -252,8 +263,8 @@ void adb_key_free(adb_key_t *key);
  *                  adb_connection_features(); either pointer may be
  *                  NULL.
  *
- * Returns ADB_OK once the device has stored the key, whatever became
- * of the GUID copy: by then the pairing is done and the port is gone,
+ * Returns ADB_OK once the device has stored the key, even if the GUID
+ * copy was cut short: by then the pairing is done and the port is gone,
  * so a short buffer is no reason to fail. From then on the same
  * priv_key_pem / pub_key connect over TLS through adb_connect().
  *
@@ -272,31 +283,43 @@ adb_status_t adb_pair(
     size_t      guid_cap,
     size_t     *out_guid_len);
 
-/* Set receive/send timeouts on a tcp:// connection, in milliseconds;
- * 0 disables the corresponding timeout. USB transports have no such
- * knob and answer ADB_ERR_INVALID_ARG. A read that hits the timeout
- * fails with ADB_ERR_IO and the connection stays usable: bytes of a
- * partially received packet are kept, so the next read continues
- * where this one stopped. This recoverable-read guarantee holds on
- * Unix; on Windows a receive that expires under SO_RCVTIMEO leaves the
- * connection indeterminate (Winsock advises closing it), so there a
- * timed-out read means close, not read again. A write waiting for the
- * device reads for itself (see the top of this file), so the timeout
- * ends that read too: the write fails with ADB_ERR_IO, and what it had
- * sent by then stays sent. While a read call on another thread holds
- * the read lock, the timeout ends that call and the write goes on
- * waiting until it finds the lock free. A signal handled during a wait
- * does not fail the call: it goes on waiting, and the timeout starts
- * over. A write timeout is a harder stop even on Unix: firing
- * mid-packet abandons a write the device has partially seen, so the
- * connection is marked desynchronized and every later channel
- * operation fails with ADB_ERR_DESYNCHRONIZED, reads once they have
- * handed over what had already arrived (metadata queries and this
- * setter still answer). Both hold on a TLS (wireless-debugging)
- * connection too: the timeouts sit on the socket underneath, a
- * timed-out read leaves the session and the partial packet intact, and
- * a timed-out write is the same abandoned packet. Prefer the read
- * timeout for a recoverable bound. */
+/*
+ * Set the receive and send timeouts of a tcp:// connection, in
+ * milliseconds; 0 disables that timeout. USB transports have no such
+ * knob and return ADB_ERR_INVALID_ARG.
+ *
+ * A read that hits the timeout fails with ADB_ERR_IO and the connection
+ * stays usable: bytes of a partially received packet are kept, so the
+ * next read continues where this one stopped. That guarantee holds on
+ * Unix, where SO_RCVTIMEO leaves the socket intact. On Windows, Winsock
+ * documents a blocking receive that expires under SO_RCVTIMEO as
+ * leaving the connection in an indeterminate state and advises closing
+ * it, so there a timed-out read means close the connection, not read
+ * again. Until this path uses a readiness-based deadline on Windows,
+ * treat the read timeout as recoverable on Unix only.
+ *
+ * A write waiting for the device reads for itself (see the top of this
+ * file), so the timeout ends that read too: the write fails with
+ * ADB_ERR_IO, and what it had sent by then stays sent. While a read
+ * call on another thread holds the read lock, the timeout ends that
+ * call and the write goes on waiting until it finds the lock free.
+ *
+ * A signal handled during a wait does not fail the call: it goes on
+ * waiting, and the timeout starts over.
+ *
+ * A write timeout is a harder stop even on Unix: firing mid-packet
+ * abandons a write the device has partially seen, so the connection is
+ * marked desynchronized and every later channel operation fails with
+ * ADB_ERR_DESYNCHRONIZED. Reads first hand over what had already
+ * arrived; metadata queries and this setter still answer. Set a write
+ * timeout only where tearing the connection down beats blocking; for a
+ * recoverable bound, use the read timeout.
+ *
+ * Both hold on a TLS (wireless-debugging) connection too: the timeouts
+ * sit on the socket underneath, a timed-out read leaves the session and
+ * the partial packet intact, and a timed-out write is the same
+ * abandoned packet.
+ */
 adb_status_t adb_connection_set_io_timeout_ms(
     adb_connection_t *conn,
     uint32_t          read_ms,
@@ -305,16 +328,14 @@ adb_status_t adb_connection_set_io_timeout_ms(
 /* Negotiated max payload in bytes; 0 if conn is NULL. */
 uint32_t adb_connection_max_payload(const adb_connection_t *conn);
 
-/* Whether delayed-ACK flow control was negotiated. */
+/* Whether delayed-ACK (credit-based flow control) was negotiated; false
+ * if conn is NULL. */
 bool adb_connection_delayed_ack(const adb_connection_t *conn);
 
 /*
  * Copy up to buf_len bytes of the device banner into buf and write the
- * full banner length through *out_len. Either pointer may be NULL.
- *
- * Like adb_connection_has_feature() and adb_connection_features(),
- * never takes the read lock: safe to call while another thread is
- * blocked in adb_read_channel().
+ * full banner length through *out_len, so a caller whose buffer was too
+ * short can retry with a larger one. Either pointer may be NULL.
  */
 adb_status_t adb_connection_device_banner(
     const adb_connection_t *conn,
@@ -367,10 +388,12 @@ const char *adb_feature_name(adb_feature_t feature);
 /*
  * Copy up to buf_cap features advertised by the device into buf (in
  * handshake order) and write the full count through *out_len. Either
- * pointer may be NULL.
+ * pointer may be NULL: pass (NULL, 0, &n) to query the count, then call
+ * again with a larger buffer.
  *
- * Unknown features the library does not recognise are skipped at parse
- * time, so the returned count covers only known ADB_FEATURE_* values.
+ * Features the library does not recognise are skipped when the
+ * handshake is parsed, so the returned count covers only known
+ * ADB_FEATURE_* values.
  */
 adb_status_t adb_connection_features(
     const adb_connection_t *conn,
@@ -381,9 +404,13 @@ adb_status_t adb_connection_features(
 /*
  * Open a channel to `destination` (e.g. "shell:ls", "tcp:8080", "sync:").
  * `destination` need not be null-terminated; `destination_len` bytes are
- * sent verbatim. *out_id receives the channel ID on success. An ID whose
- * table slot no call could have returned makes the channel calls fail
- * with ADB_ERR_INVALID_ARG.
+ * sent verbatim. *out_id receives the channel ID on success, usable
+ * with the other adb_*_channel functions until the channel is closed.
+ *
+ * The ID of a closed channel is stale: calls with it fail with
+ * ADB_ERR_CHANNEL_CLOSED, even if the slot has since been reused for a
+ * new channel. An ID whose table slot no call could have returned makes
+ * the channel calls fail with ADB_ERR_INVALID_ARG.
  */
 adb_status_t adb_open_channel(
     adb_connection_t *conn,
@@ -392,21 +419,23 @@ adb_status_t adb_open_channel(
     adb_channel_id_t *out_id);
 
 /*
- * Read from a channel. *out_read receives the number of bytes read.
- * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED; ADB_OK with
- * *out_read == 0 never happens, which is what makes
+ * Read up to buf_len bytes from a channel into buf. *out_read receives
+ * the number of bytes read. Channel closure is reported as
+ * ADB_ERR_CHANNEL_CLOSED; ADB_OK with *out_read == 0 never happens,
+ * which is what makes
  *
  *     while (adb_read_channel(...) == ADB_OK) { ... }
  *
  * a correct loop. buf_len == 0 is rejected with ADB_ERR_INVALID_ARG
  * rather than answering with a zero such a loop would spin on, and a
- * zero-length WRTE from the device is read past for the same reason.
+ * zero-length WRTE from the device, which is legal and delivers
+ * nothing, is read past for the same reason.
  *
  * Everything that arrived comes back before any error does, however
  * the connection failed: a device that hangs up leaves what it sent
- * readable. The call that meets the end of the connection returns what
- * it met, as ADB_ERR_IO or ADB_ERR_PROTOCOL, and the next call
- * ADB_ERR_DISCONNECTED; a read timeout is ADB_ERR_IO too, and the next
+ * readable. The call that meets the end of the connection returns that
+ * failure, ADB_ERR_IO or ADB_ERR_PROTOCOL, and the next call returns
+ * ADB_ERR_DISCONNECTED. A read timeout is ADB_ERR_IO too, but the next
  * call simply reads on.
  */
 adb_status_t adb_read_channel(
@@ -433,9 +462,9 @@ adb_status_t adb_write_channel(
 
 /* Close a channel. Subsequent ops on this id return ADB_ERR_CHANNEL_CLOSED.
  *
- * Its slot comes back however the CLSE fares. With the device gone, or
- * once the connection has ended, nobody is left to hear one and this is
- * ADB_OK without it. */
+ * The slot is freed even if sending the CLSE fails. If the device is
+ * gone or the connection has ended, no CLSE is sent and the call
+ * returns ADB_OK. */
 adb_status_t adb_close_channel(
     adb_connection_t *conn,
     adb_channel_id_t  id);
@@ -490,19 +519,21 @@ adb_status_t adb_reverse_list(
  * for one to arrive if none is staged, and copy its destination into
  * (dest, dest_cap, out_dest_len), same convention as
  * adb_connection_features(). The request stays staged on the handle
- * until adb_incoming_accept() or adb_incoming_reject() consumes exactly
- * it — repeated calls report the same request again, so the
- * truncate-and-report convention works here: probe with (NULL, 0,
- * &len), allocate, call again for the bytes.
+ * until adb_incoming_accept() or adb_incoming_reject() takes it, so
+ * repeated calls report the same request again. That makes the
+ * truncate-and-report convention work here: probe with (NULL, 0, &len),
+ * allocate, call again for the bytes.
  *
  * With nothing staged this blocks until a channel arrives, as
  * adb_read_channel() blocks for data, and holds the read lock while
- * waiting. The staged request stays locked for the whole call, so
- * concurrent reports and verdicts serialize against it rather than
- * racing for the queue. There is no way to interrupt it yet; in
- * particular the handle must stay alive until the call returns —
- * adb_connection_free() from another thread while a call is blocked is
- * undefined behaviour, not an interruption mechanism.
+ * waiting, so a device that never opens one blocks this call for good.
+ * The staged request stays locked for the whole call, so concurrent
+ * calls to this function, adb_incoming_accept() and
+ * adb_incoming_reject() run one at a time rather than racing for the
+ * queue. There is no way to interrupt the call yet, and the handle must
+ * stay alive until it returns: adb_connection_free() from another
+ * thread while a call is blocked is undefined behaviour, not an
+ * interruption mechanism.
  */
 adb_status_t adb_accept_channel(
     adb_connection_t *conn,
@@ -530,8 +561,8 @@ const char *adb_last_error(void);
 /* ---- shell_v2 ------------------------------------------------------ */
 
 /*
- * Frame ids in the shell_v2 framing protocol; read_frame returns one
- * of these through *out_id.
+ * Frame ids in the shell_v2 framing protocol; adb_shell_read_frame()
+ * returns one of these through *out_id.
  */
 #define ADB_SHELL_V2_STDIN                0
 #define ADB_SHELL_V2_STDOUT               1
@@ -549,18 +580,19 @@ typedef struct adb_shell adb_shell_t;
  * an empty buffer (NULL, 0) for a login shell (only sensible with a pty).
  *
  * `pty` selects shell,v2,pty,... (true) or shell,v2,raw: (false).
- * `term` is the value for the device's TERM env var; may be NULL or
- *   empty to omit it; ignored when `pty` is false. A term holding ','
- *   or ':' would rewrite the request on the device, so it is refused
- *   with ADB_ERR_PROTOCOL before anything is sent, as a NUL in
- *   `command` is.
+ * `term` is the value for the device's TERM env var (e.g.
+ *   "xterm-256color"); may be NULL or empty to omit it; ignored when
+ *   `pty` is false. A term holding ',' or ':' would rewrite the request
+ *   on the device, so it is refused with ADB_ERR_PROTOCOL before
+ *   anything is sent, as a NUL in `command` is.
  * `rows`, `cols` — if `pty` and at least one is non-zero, an initial
  *   WINDOW_SIZE_CHANGE frame is sent right after the channel opens, a
  *   write like any other (see the top of this file).
  *
- * `conn` must remain alive for as long as any shell handle opened
- * against it. Release the handle with adb_shell_free() (call
- * adb_shell_close() first to tear down the channel gracefully).
+ * On success *out_sh receives the handle. `conn` must remain alive for
+ * as long as any shell handle opened against it. Release the handle
+ * with adb_shell_free() (call adb_shell_close() first to tear down the
+ * channel gracefully).
  */
 adb_status_t adb_shell_open(
     adb_connection_t  *conn,
@@ -572,7 +604,9 @@ adb_status_t adb_shell_open(
     uint16_t           cols,
     adb_shell_t      **out_sh);
 
-/* Release a handle from adb_shell_open(). NULL is a no-op. */
+/* Release a handle from adb_shell_open(). NULL is a no-op. The channel
+ * is not closed automatically: call adb_shell_close() first to avoid
+ * leaking it on the device. */
 void adb_shell_free(adb_shell_t *sh);
 
 /*
@@ -589,7 +623,9 @@ void adb_shell_free(adb_shell_t *sh);
  *
  * Channel closure is reported as ADB_ERR_CHANNEL_CLOSED. As with
  * adb_read_channel(), everything that arrived comes back before any
- * error does, however the connection failed.
+ * error does, however the connection failed. After adb_shell_close()
+ * the call returns ADB_ERR_CHANNEL_CLOSED at once, and it is the one
+ * error that sets no adb_last_error() string.
  */
 adb_status_t adb_shell_read_frame(
     adb_shell_t *sh,
@@ -605,9 +641,9 @@ adb_status_t adb_shell_read_frame(
  *
  * The frame header and a payload go out as two WRTEs, and the second
  * can wait for the device: see the top of this file. A failure can
- * leave the header out and the payload not, and the device then takes
- * whatever comes next for that payload. After one the session's frame
- * stream cannot be trusted: close it. */
+ * leave the header sent and the payload not, and the device then reads
+ * whatever comes next as that payload. After a failure the session's
+ * frame stream cannot be trusted: close it. */
 adb_status_t adb_shell_write_stdin(
     adb_shell_t   *sh,
     const uint8_t *data,
@@ -617,18 +653,19 @@ adb_status_t adb_shell_write_stdin(
  *
  * A channel the device has already closed is not a failure: there is no
  * stdin left to close, and what the device wrote before closing stays
- * readable, so a command that finished first still gives up its output.
- * After adb_shell_close() this is ADB_ERR_CHANNEL_CLOSED, and on a
- * channel a fault closed it is that fault's status. */
+ * readable, so the output of a command that finished first is not lost.
+ * After adb_shell_close() this returns ADB_ERR_CHANNEL_CLOSED, and on a
+ * channel closed by a fault it returns that fault's status. */
 adb_status_t adb_shell_close_stdin(adb_shell_t *sh);
 
-/* Notify the device PTY of a terminal resize. */
+/* Notify the device PTY of a terminal resize (a WINDOW_SIZE_CHANGE frame). */
 adb_status_t adb_shell_set_window_size(
     adb_shell_t *sh,
     uint16_t     rows,
     uint16_t     cols);
 
-/* Close the underlying channel. Idempotent. */
+/* Close the underlying channel. Later reads and writes on this handle
+ * return ADB_ERR_CHANNEL_CLOSED. Idempotent. */
 adb_status_t adb_shell_close(adb_shell_t *sh);
 
 #ifdef __cplusplus
