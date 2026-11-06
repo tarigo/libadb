@@ -73,12 +73,17 @@ pub async fn open_exec<'a, S: Session>(
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell, and
 /// an empty one fails, as the [module docs](self) say.
-/// `rx` is used as a temporary read buffer (not retained after return).
+/// `rx` is used as a temporary read buffer (not retained after return);
+/// an empty one fails with [`Error::ReceiveBufferFull`] before anything
+/// is sent.
 pub async fn exec<S: Session>(
     session: &mut S,
     args: &[&str],
     rx: &mut [u8],
 ) -> Result<Vec<u8>, Error<S::IoError>> {
+    if rx.is_empty() {
+        return Err(Error::ReceiveBufferFull);
+    }
     open_exec(session, args)
         .await?
         .read_to_vec(rx, usize::MAX)
@@ -169,6 +174,14 @@ mod tests {
         let opened = now(open(&mut conn, &args, &mut rx)).map(drop);
         assert!(matches!(opened, Err(Error::Protocol(InvalidDestination))));
 
+        assert_eq!(conn.transport().sent().len(), 1, "the CNXN alone");
+    }
+
+    #[test]
+    fn exec_with_an_empty_buffer_fails_before_anything_is_sent() {
+        let mut conn = one_slot("abb_exec", &[]);
+        let err = now(exec(&mut conn, &["package", "list"], &mut [])).unwrap_err();
+        assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
         assert_eq!(conn.transport().sent().len(), 1, "the CNXN alone");
     }
 
