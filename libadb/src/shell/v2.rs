@@ -266,7 +266,11 @@ impl fmt::Debug for EncodedWindowSize {
 /// [`Shell::try_next_frame`].
 #[derive(Debug, Clone)]
 pub enum Frame {
+    /// `STDOUT` payload, or a chunk of one too large for the receive
+    /// buffer.
     Stdout(Vec<u8>),
+    /// `STDERR` payload, or a chunk of one too large for the receive
+    /// buffer.
     Stderr(Vec<u8>),
     /// `EXIT` payload — the device process exit code.
     Exit(u8),
@@ -284,8 +288,11 @@ pub enum Frame {
 /// Result of running a command to completion.
 #[derive(Debug, Clone, Default)]
 pub struct CommandOutput {
+    /// The `STDOUT` frames' payloads, joined in order.
     pub stdout: Vec<u8>,
+    /// The `STDERR` frames' payloads, joined in order.
     pub stderr: Vec<u8>,
+    /// The exit code the `EXIT` frame carried.
     pub exit_code: u8,
 }
 
