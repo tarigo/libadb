@@ -634,7 +634,10 @@ mod incoming {
         let incoming = now(conn.accept_incoming()).unwrap();
         drop(incoming);
 
-        let incoming = conn.try_accept_incoming().expect("request lost on drop");
+        let incoming = conn
+            .try_accept_incoming()
+            .unwrap()
+            .expect("request lost on drop");
         assert_eq!(incoming.destination(), b"tcp:2\0");
     }
 
@@ -659,9 +662,26 @@ mod incoming {
         assert_eq!((local, remote), (0, 3));
 
         // Undecided handles bounce back on drop, so resolve them.
-        now(conn.try_accept_incoming().unwrap().reject()).unwrap();
-        now(conn.try_accept_incoming().unwrap().reject()).unwrap();
-        assert!(conn.try_accept_incoming().is_none());
+        now(conn.try_accept_incoming().unwrap().unwrap().reject()).unwrap();
+        now(conn.try_accept_incoming().unwrap().unwrap().reject()).unwrap();
+        assert!(conn.try_accept_incoming().unwrap().is_none());
+    }
+
+    /// A request taken here could only fail its verdict with the desync
+    /// and go back to the queue, to be taken again.
+    #[test]
+    fn try_accept_incoming_fails_once_the_connection_is_desynchronized() {
+        let (mut conn, ch) = connected_with_channel(Some(1));
+        now(conn.dispatch(open_pkt(77, 0, b"tcp:80\0"))).unwrap();
+        abandon(conn.write_channel(ch, b"payload-that-never-made-it"));
+        let taken = conn.try_accept_incoming().map(|_| ());
+        assert!(matches!(taken, Err(Error::Desynchronized)), "got {taken:?}");
+    }
+
+    #[test]
+    fn try_accept_incoming_with_nothing_queued_is_none() {
+        let mut conn = connected(b"host::features=shell_v2", "shell_v2");
+        assert!(conn.try_accept_incoming().unwrap().is_none());
     }
 
     #[test]
@@ -669,7 +689,7 @@ mod incoming {
         let mut conn = connected(b"host::features=shell_v2", "shell_v2");
         now(conn.dispatch(open_pkt(55, 0, b"tcp:5\0"))).unwrap();
         now(conn.dispatch(withdraw(55))).unwrap();
-        assert!(conn.try_accept_incoming().is_none());
+        assert!(conn.try_accept_incoming().unwrap().is_none());
     }
 
     #[test]
@@ -679,7 +699,7 @@ mod incoming {
         // a queued one — it must close like any remote CLSE.
         let mut conn = connected(b"host::features=shell_v2", "shell_v2");
         now(conn.dispatch(open_pkt(90, 0, b"tcp:9\0"))).unwrap();
-        let ch = now(conn.try_accept_incoming().unwrap().accept()).unwrap();
+        let ch = now(conn.try_accept_incoming().unwrap().unwrap().accept()).unwrap();
 
         now(conn.dispatch(withdraw(90))).unwrap();
 
@@ -712,7 +732,7 @@ mod incoming {
 
         now(conn.dispatch(open_pkt(66, 0, b"tcp:6\0"))).unwrap();
         {
-            let incoming = conn.try_accept_incoming().unwrap();
+            let incoming = conn.try_accept_incoming().unwrap().unwrap();
             let mut fut = core::pin::pin!(incoming.accept());
             let mut cx = Context::from_waker(Waker::noop());
             // Poll once: the slot is reserved, the READY write stalls.
@@ -725,9 +745,7 @@ mod incoming {
             conn.table.in_use() == 0,
             "the reserved slot leaked past the cancel"
         );
-        // The request came back too: it is acceptable again.
-        let again = conn.try_accept_incoming().expect("request lost on cancel");
-        assert_eq!(again.destination(), b"tcp:6\0");
+        assert_eq!(conn.incoming.len(), 1, "request lost on cancel");
     }
 
     /// With the device gone nobody needs an answer, so the failed
@@ -829,7 +847,7 @@ mod incoming {
         .unwrap();
 
         now(conn.dispatch(open_pkt(7, 0, b"tcp:7\0"))).unwrap();
-        let incoming = conn.try_accept_incoming().unwrap();
+        let incoming = conn.try_accept_incoming().unwrap().unwrap();
         now(incoming.accept()).unwrap();
 
         let (cmd, _, _, payload) = conn.transport.sent().last().unwrap().clone();
@@ -853,7 +871,7 @@ mod incoming {
         let _busy = now(conn.open_channel(b"shell:\0")).unwrap();
 
         now(conn.dispatch(open_pkt(9, 0, b"tcp:9\0"))).unwrap();
-        let incoming = conn.try_accept_incoming().unwrap();
+        let incoming = conn.try_accept_incoming().unwrap().unwrap();
         let err = now(incoming.accept()).unwrap_err();
         assert!(matches!(err, Error::NoFreeChannels), "got {err:?}");
 

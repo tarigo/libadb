@@ -59,7 +59,10 @@ fn staged_with_followup(
         }
     };
     pump(&mut reader);
-    let inc = reader.try_accept_incoming().expect("the OPEN was queued");
+    let inc = reader
+        .try_accept_incoming()
+        .unwrap()
+        .expect("the OPEN was queued");
 
     for pkt in followup {
         seen.feed(pkt);
@@ -86,7 +89,7 @@ fn a_device_cancel_reaches_the_staged_request() {
         "READY must not answer a withdrawn OPEN"
     );
     // The dead request does not come back to the queue either.
-    assert!(reader.try_accept_incoming().is_none());
+    assert!(reader.try_accept_incoming().unwrap().is_none());
 }
 
 #[test]
@@ -168,10 +171,10 @@ fn held_holders_spend_the_open_storm_budget() {
     // touching the queue length.
     seen.feed(&open_pkt(60, b"tcp:60\0"));
     pump(&mut reader);
-    let held_a = reader.try_accept_incoming().unwrap();
+    let held_a = reader.try_accept_incoming().unwrap().unwrap();
     seen.feed(&open_pkt(61, b"tcp:61\0"));
     pump(&mut reader);
-    let held_b = reader.try_accept_incoming().unwrap();
+    let held_b = reader.try_accept_incoming().unwrap().unwrap();
     assert_eq!(reader.shared.lock_incoming().len(), 0);
 
     // The third OPEN must be refused on arrival: an application
@@ -185,7 +188,7 @@ fn held_holders_spend_the_open_storm_budget() {
         "the OPEN past the budget must be refused with CLSE"
     );
     assert!(
-        reader.try_accept_incoming().is_none(),
+        reader.try_accept_incoming().unwrap().is_none(),
         "nothing may be queued past the budget"
     );
 
@@ -326,7 +329,7 @@ fn a_cancelled_overflow_refusal_keeps_the_open_recoverable() {
         .expect("a cancelled refusal must not poison the connection");
 
     // The verdict machinery now answers it: adbd gets its CLSE.
-    let inc = reader.try_accept_incoming().unwrap();
+    let inc = reader.try_accept_incoming().unwrap().unwrap();
     assert_eq!(inc.destination(), b"tcp:72\0");
     now(inc.reject()).unwrap();
     let (cmd, _, arg1, _) = seen.sent().last().unwrap().clone();
@@ -1835,12 +1838,49 @@ mod send_queue_tests {
 
 mod incoming_tests {
     use crate::base::channel::ChannelId;
-    use crate::base::mock::{now, split_one_channel_delayed_ack, wrte};
+    use crate::base::mock::{
+        abandon, now, split_one_channel_delayed_ack, split_with_channel, wrte,
+    };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
+    use crate::error::Error;
 
     fn open_pkt(remote_id: u32, credit: u32, dest: &[u8]) -> Packet {
         Packet::new(Command::Open, remote_id, credit, dest.to_vec())
+    }
+
+    /// A request taken here could only fail its verdict with the desync
+    /// and go back to the queue, to be taken again.
+    #[test]
+    fn try_accept_incoming_fails_once_the_connection_is_desynchronized() {
+        let (mut reader, writer, ch) = split_with_channel(Some(1));
+        let seen = now(writer.shared.write_half.lock()).clone();
+        seen.feed(&open_pkt(77, 0, b"tcp:80\0"));
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+        let taken = reader.try_accept_incoming().map(|_| ());
+        assert!(matches!(taken, Err(Error::Desynchronized)), "got {taken:?}");
+    }
+
+    #[test]
+    fn a_request_queued_before_a_clean_end_is_still_handed_out() {
+        let opened = [open_pkt(77, 0, b"tcp:80\0")];
+        let (mut reader, _writer, _ch, _seen) = split_one_channel_delayed_ack(0, &opened);
+        now(reader.dispatch_one()).unwrap();
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+
+        let incoming = reader.try_accept_incoming().unwrap();
+        now(incoming.expect("queued before the end").reject()).unwrap();
+        let next = reader.try_accept_incoming().map(|_| ());
+        assert!(matches!(next, Err(Error::Disconnected)), "got {next:?}");
+    }
+
+    #[test]
+    fn try_accept_incoming_with_nothing_queued_is_none() {
+        let (mut reader, _writer, _ch, _seen) = split_one_channel_delayed_ack(0, &[]);
+        assert!(reader.try_accept_incoming().unwrap().is_none());
     }
 
     #[test]
@@ -2804,7 +2844,10 @@ mod driving_tests {
 
         now(reader.dispatch_one()).unwrap();
         assert!(closes(&seen).is_empty(), "the OPEN was refused");
-        let incoming = reader.try_accept_incoming().expect("the OPEN is queued");
+        let incoming = reader
+            .try_accept_incoming()
+            .unwrap()
+            .expect("the OPEN is queued");
         assert_eq!(incoming.destination(), b"tcp:80\0");
     }
 
