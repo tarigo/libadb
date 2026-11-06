@@ -1,3 +1,7 @@
+//! [`Connection`]: the handshake over a transport, and the channels
+//! either side opens on it afterwards. [`ConnectionConfig`] bounds what
+//! it may allocate, and [`HostBanner`] is the banner the host sends.
+
 mod accept;
 mod banner;
 mod config;

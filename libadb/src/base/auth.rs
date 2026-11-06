@@ -1,3 +1,6 @@
+//! [`Authenticator`], what answers the device's `AUTH` challenge: it
+//! signs the token and offers the host's public key.
+
 use alloc::vec::Vec;
 
 /// Trait for ADB authentication.
