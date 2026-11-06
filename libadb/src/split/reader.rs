@@ -177,7 +177,7 @@ where
                 Ok(Received::Interrupted(())) => {}
                 Err(e) => {
                     if ends_connection(&e) {
-                        self.shared.stop();
+                        self.shared.end_stream();
                     }
                     return Err(e);
                 }
@@ -486,9 +486,11 @@ where
         Ok(())
     }
 
-    /// Send CLSE and release the channel slot —
+    /// Release the channel slot and send CLSE —
     /// [`Writer::close_channel`] reachable from the read half, so an
     /// open-read-close service exchange can run on the `Reader` alone.
+    /// Nothing receives while this call waits for the write half, so
+    /// the end of the stream cannot reach it there.
     pub async fn close_channel(
         &self,
         ch: ChannelId,

@@ -35,9 +35,11 @@
 //! [`Error::Disconnected`] instead of waiting for packets nobody reads:
 //! opening a channel, reading one, waiting for send credit, accepting
 //! one the device opened. Calls that need no answer — a write the
-//! credit already covers, a close — still reach the transport. A read
-//! timeout is no such failure: it is the caller's to handle, and leaves
-//! the connection and everyone waiting on it as they were.
+//! credit already covers, a close — still reach the transport, with one
+//! exception: a close on a stream that has ended frees its slot without
+//! a CLSE. A read timeout is no such failure: it is the caller's to
+//! handle, and leaves the connection and everyone waiting on it as they
+//! were.
 //!
 //! What arrived stays readable however the connection fails: a read
 //! hands over what its channel has buffered first, and only then fails

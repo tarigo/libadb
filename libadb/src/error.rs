@@ -82,7 +82,7 @@ pub enum Error<E> {
     /// A split connection that had already ended stays
     /// [`Disconnected`](Self::Disconnected) for the calls waiting on the
     /// device, as when a read gives up on an acknowledgement at the end:
-    /// only a write can still meet this then.
+    /// only a write or a close can still meet this then.
     ///
     /// The judgement is deliberately conservative: it also covers a
     /// write that was polled and then dropped or failed before any byte

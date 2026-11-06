@@ -431,7 +431,11 @@ adb_status_t adb_write_channel(
     const uint8_t    *buf,
     size_t            buf_len);
 
-/* Close a channel. Subsequent ops on this id return ADB_ERR_CHANNEL_CLOSED. */
+/* Close a channel. Subsequent ops on this id return ADB_ERR_CHANNEL_CLOSED.
+ *
+ * Its slot comes back however the CLSE fares. With the device gone, or
+ * once the connection has ended, nobody is left to hear one and this is
+ * ADB_OK without it. */
 adb_status_t adb_close_channel(
     adb_connection_t *conn,
     adb_channel_id_t  id);

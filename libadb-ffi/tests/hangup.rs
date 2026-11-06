@@ -153,6 +153,21 @@ fn a_channel_read_gets_all_a_device_left_with_no_close_without_delayed_ack() {
     );
 }
 
+/// Nobody is left to hear a close, which gives the slot back all the
+/// same and has nothing to report.
+#[test]
+fn a_close_after_the_end_is_no_failure() {
+    let (conn, id) = channel_on_a_device_gone(DELAYED_ACK, Goes::Abruptly);
+    let (_, status) = read_until_it_fails(conn, id);
+    assert_eq!(status, adb::AdbStatus::Io);
+
+    let status = unsafe { adb::adb_close_channel(conn.get(), id) };
+    assert_eq!(status, adb::AdbStatus::Ok);
+    let status = unsafe { adb::adb_close_channel(conn.get(), id) };
+    assert_eq!(status, adb::AdbStatus::ChannelClosed);
+    unsafe { adb::adb_connection_free(conn.get()) };
+}
+
 /// Whatever comes after the end says so, opening a channel included,
 /// which would otherwise send an OPEN and wait for an answer.
 #[test]

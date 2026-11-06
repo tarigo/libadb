@@ -128,7 +128,8 @@ impl<S: Session> Channel<'_, S> {
         self.session.select_channel(self.id, buf, interrupt).await
     }
 
-    /// Close the channel, sending CLSE to the device and freeing the slot.
+    /// Close the channel, sending CLSE to the device and freeing the
+    /// slot, which comes back however the CLSE fares.
     ///
     /// Consumes the `Channel`.
     pub async fn close(self) -> Result<(), Error<S::IoError>> {

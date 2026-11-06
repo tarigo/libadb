@@ -11,16 +11,15 @@ use embedded_io::ErrorType;
 use embedded_io_async::Write;
 use event_listener::EventListener;
 
-use super::shared::{CreditGuard, QueueGuard, Shared, SlotGuard};
+use super::shared::{CreditGuard, Owed, QueueGuard, Shared, SlotGuard};
 use super::IncomingListener;
 use crate::base::channel::{ChannelId, SelectResult};
 use crate::base::connection::ConnectionConfig;
 use crate::base::ids::ChannelIds;
 use crate::base::negotiated::Negotiated;
 use crate::base::protocol::command::Command;
-use crate::base::protocol::Packet;
 use crate::base::slot::ChannelState;
-use crate::base::wire::{send_pkt, send_raw};
+use crate::base::wire::send_raw;
 use crate::device_banner::DeviceBanner;
 use crate::error::Error;
 
@@ -350,8 +349,31 @@ where
         !queue.is_empty() && !queue.is_sending()
     }
 
-    /// Send CLSE and release the channel slot. Any cloned `Writer`
-    /// parked on this channel observes `ChannelClosed` and unblocks.
+    /// Release the channel slot and send CLSE. Any cloned `Writer`
+    /// parked on this channel observes `ChannelClosed` and unblocks,
+    /// however the CLSE fares.
+    ///
+    /// The CLSE is owed from the moment the slot goes, so dropping this
+    /// call while it waits for the write half loses neither: the next
+    /// call that writes or receives sends it. Dropping it during the
+    /// write abandons the packet, which desynchronizes the connection,
+    /// as with any cancelled write.
+    ///
+    /// While it is owed nothing is received, on any channel, as with
+    /// anything the device is owed: a close behind a stalled writer
+    /// holds up reception until the write half comes free.
+    ///
+    /// A [`Reader`] that has gone stops none of this: the device can
+    /// still hear the CLSE, and this waits for the write half as ever.
+    /// With the device gone, or a stream a receive found over, nobody is
+    /// left to hear it, and this returns `Ok` without it. A close already
+    /// waiting ends with the stream, should a read still under way find
+    /// that out, which takes one that cannot be dropped.
+    ///
+    /// A write that fails any other way comes back as the error, with
+    /// the connection desynchronized. A connection already
+    /// desynchronized fails with [`Error::Desynchronized`] and frees
+    /// nothing: no call that wants a slot gets anywhere on it.
     ///
     /// A concurrent [`Reader::read_channel`] on the same channel is
     /// not woken directly — see the module-level note on close ↔ read
@@ -443,8 +465,9 @@ where
     }
 }
 
-/// Send CLSE for `ch` and free its slot: the close path shared by
-/// [`Writer::close_channel`] and [`Reader::close_channel`].
+/// Free `ch`'s slot, wake whoever waits on it, then owe its CLSE and pay
+/// that: the close path shared by [`Writer::close_channel`] and
+/// [`Reader::close_channel`].
 pub(super) async fn close_channel_via<WH>(
     shared: &Shared<WH>,
     ch: ChannelId,
@@ -453,20 +476,19 @@ where
     WH: Write,
 {
     shared.desync.check()?;
-    let ids = shared.lock_channels().ids(ch)?;
+    let ids = {
+        let mut chs = shared.lock_channels();
+        let ids = chs.ids(ch)?;
+        chs.free(ch);
+        ids
+    };
+    shared.signals[ch.slot].wake();
+    shared.owe(Owed::Close(ids));
+    match shared
+        .until(Shared::clse_called_off, shared.lock_write())
+        .await
     {
-        let mut wh = shared.lock_write().await?;
-        send_pkt(
-            &mut *wh,
-            &shared.desync,
-            &Packet::close(ids),
-            shared.negotiated.checksum(),
-        )
-        .await?;
+        Some(paid) => paid.map(drop),
+        None => shared.check_close(),
     }
-    shared.lock_channels().free(ch);
-    if let Some(signal) = shared.signals.get(ch.slot) {
-        signal.wake();
-    }
-    Ok(())
 }

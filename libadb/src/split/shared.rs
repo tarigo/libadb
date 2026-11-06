@@ -77,6 +77,10 @@ pub(crate) struct Shared<WH> {
     /// back or with the [`Reader`] gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
     stopped: AtomicBool,
+    /// Set once a receive found the stream over, on top of `stopped`,
+    /// which the [`Reader`] going sets too: that leaves nothing to read
+    /// the device, but the device is as likely as ever to hear a CLSE.
+    stream_over: AtomicBool,
     /// Whether the connection was still in step when `stopped` was set.
     /// A read gives up on its OKAY at the end, and the half packet that
     /// leaves says nothing about how the connection ended: see
@@ -94,9 +98,13 @@ pub(crate) struct Shared<WH> {
     /// What the device is owed, oldest first: see [`Owed`].
     ///
     /// Bounded by nothing being received until it is empty, so one
-    /// packet at most adds to it at a time, on top of the openers given
-    /// up on, which hold a slot each until they go: no more than
-    /// [`max_channels`](crate::ConnectionConfig::max_channels) + 1.
+    /// packet at most adds to it at a time, on top of a debt for each
+    /// channel given up here, by a close or an opener dropped once
+    /// answered. With nothing received the only channels to come after
+    /// the [`max_channels`](crate::ConnectionConfig::max_channels) there
+    /// are, an OPEN of ours paying the list first, are the requests
+    /// waiting by then: as many again, and the one a dropped refusal can
+    /// leave past the cap. No more than 2 × `max_channels` + 2.
     owed: Mutex<VecDeque<Owed>>,
 }
 
@@ -111,7 +119,7 @@ pub(super) enum Owed {
     /// The OKAY for data that arrived.
     Okay(PendingAck),
     /// The CLSE for an end the device holds open: an OPEN given up on as
-    /// it answered, or a channel broken by a fault.
+    /// it answered, a channel broken by a fault, or one closed here.
     Close(ChannelIds),
 }
 
@@ -135,6 +143,7 @@ impl<WH> Shared<WH> {
             incoming: Mutex::new(incoming),
             staged: Mutex::new(Vec::new()),
             stopped: AtomicBool::new(false),
+            stream_over: AtomicBool::new(false),
             ended_in_step: AtomicBool::new(false),
             listeners: AtomicUsize::new(0),
             incoming_signal: Event::new(),
@@ -172,7 +181,8 @@ impl<WH> Shared<WH> {
     /// Once it has ended nobody is left to hear it, and a call that only
     /// has to report that, or to hand over what arrived, must not wait
     /// for the write half on the way: what is owed then stays for a call
-    /// that writes anyway.
+    /// that writes anyway. Only the [`Reader`] comes here, so an end is
+    /// the stream's.
     pub(super) async fn pay(&self) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
@@ -297,18 +307,38 @@ impl<WH> Shared<WH> {
                     return slot.take_buffered(buf);
                 }
             }
-            // The OKAY first: the usual read has it out on this poll, and
-            // so never registers a listener.
-            let mut acknowledge = pin!(self.acknowledge_take(ch, buf.len()));
-            let mut ended = pin!(self.ended());
-            poll_fn(|cx| {
-                if acknowledge.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(());
-                }
-                ended.as_mut().poll(cx)
-            })
-            .await;
+            self.until(Self::has_ended, self.acknowledge_take(ch, buf.len()))
+                .await;
         }
+    }
+
+    /// Drive `work` until it is done or `over` holds, whichever comes
+    /// first, `None` saying `over` did. `work` goes where it stands then,
+    /// a packet part way out with it, as a dropped call leaves one:
+    /// nobody is left to hear it, and what waits for it must not stay
+    /// behind a writer or a transport that stalled.
+    ///
+    /// `over` is asked first, so that nothing is written for nobody, and
+    /// only then is `work` polled ahead of it: the usual call is done on
+    /// that poll, and so never registers a listener. Whatever makes
+    /// `over` hold has to wake `receive_signal`.
+    pub(super) async fn until<F: Future>(
+        &self,
+        over: impl Fn(&Self) -> bool,
+        work: F,
+    ) -> Option<F::Output> {
+        if over(self) {
+            return None;
+        }
+        let mut work = pin!(work);
+        let mut reached = pin!(self.once(over));
+        poll_fn(|cx| {
+            if let Poll::Ready(done) = work.as_mut().poll(cx) {
+                return Poll::Ready(Some(done));
+            }
+            reached.as_mut().poll(cx).map(|()| None)
+        })
+        .await
     }
 
     /// Settle a take of up to `want` bytes from `ch` and send the OKAY it
@@ -471,6 +501,12 @@ impl<WH> Shared<WH> {
         }
     }
 
+    /// Mark the stream over, which ends the connection.
+    pub(super) fn end_stream(&self) {
+        self.stream_over.store(true, Ordering::Release);
+        self.stop();
+    }
+
     /// Mark the connection ended and wake every waiter to see it.
     pub(super) fn stop(&self) {
         if !self.stopped.load(Ordering::Acquire) {
@@ -514,11 +550,11 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Resolve once [`check_live`](Self::check_live) fails.
-    async fn ended(&self) {
+    /// Resolve once `over` holds.
+    async fn once(&self, over: impl Fn(&Self) -> bool) {
         let mut listener: Option<EventListener> = None;
         loop {
-            if self.check_live::<Infallible>().is_err() {
+            if over(self) {
                 return;
             }
             // Register, then look once more before waiting, as reads do.
@@ -526,6 +562,31 @@ impl<WH> Shared<WH> {
                 Some(waiting) => waiting.await,
                 None => listener = Some(self.receive_signal.listen()),
             }
+        }
+    }
+
+    /// Whether [`check_live`](Self::check_live) fails.
+    fn has_ended(&self) -> bool {
+        self.check_live::<Infallible>().is_err()
+    }
+
+    /// Whether a CLSE is called off: the stream is over, which leaves
+    /// nobody to hear it, or the connection lost step, which leaves no
+    /// way to say it. The [`Reader`] going is neither, and a close then
+    /// goes on waiting for the write half.
+    pub(super) fn clse_called_off(&self) -> bool {
+        self.stream_over.load(Ordering::Acquire) || self.desync.check::<Infallible>().is_err()
+    }
+
+    /// What a close comes to with its CLSE
+    /// [called off](Self::clse_called_off): nothing to report with the
+    /// stream over, its own packet given up on included, unless the
+    /// connection had lost step by then.
+    pub(super) fn check_close<E>(&self) -> Result<(), Error<E>> {
+        if self.stream_over.load(Ordering::Acquire) {
+            self.check_in_step()
+        } else {
+            self.desync.check()
         }
     }
 

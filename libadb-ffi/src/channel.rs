@@ -164,6 +164,10 @@ pub unsafe extern "C" fn adb_write_channel(
 /// Close a channel. Subsequent reads/writes against this ID will fail
 /// with [`AdbStatus::ChannelClosed`].
 ///
+/// Its slot comes back however the CLSE fares. With the device gone, or
+/// once the connection has ended, nobody is left to hear one and this is
+/// [`AdbStatus::Ok`] without it.
+///
 /// # Safety
 /// `conn` must be a valid handle.
 #[unsafe(no_mangle)]

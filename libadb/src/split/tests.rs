@@ -2238,6 +2238,8 @@ mod end_tests {
         assert!(matches!(now(accept), Err(Error::Disconnected)));
         let err = now(writer.write_channel(ch, b"x")).unwrap_err();
         assert!(matches!(err, Error::Desynchronized), "write: {err:?}");
+        let err = now(writer.close_channel(ch)).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "close: {err:?}");
     }
 
     /// A device that closed the channel before it went said all it had
@@ -3062,6 +3064,7 @@ mod slot_tests {
             let output = collected(&writer, ch).unwrap();
             assert_eq!(output.stdout, b"out", "{kind:?}");
             assert_eq!(output.exit_code, 7, "{kind:?}");
+            assert_eq!(in_use(&writer), 0, "{kind:?}");
         }
     }
 
@@ -3225,5 +3228,630 @@ mod closed_channel_tests {
         now(reader.dispatch_one()).unwrap();
         now(sync.quit()).unwrap();
         assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    }
+}
+
+/// A close frees its slot from the start, and owes its CLSE like any
+/// other packet the device has coming.
+mod close_tests {
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
+    use alloc::vec::Vec;
+    use core::convert::Infallible;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::task::{Context, Poll, Waker};
+    use embedded_io::ErrorKind;
+
+    use crate::base::channel::{Channel, ChannelId};
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        abandon, cnxn, now, okay, shell_frame, split_one_channel_delayed_ack,
+        split_two_channels_delayed_ack, wrte, Mock, MockError, NoAuth, SharedMock, FAILED_WRITES,
+    };
+    use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
+    use crate::error::Error;
+    use crate::shell::v2::{FrameId, Shell};
+
+    use super::Writer;
+
+    fn poll_once<F: Future + ?Sized>(fut: Pin<&mut F>) -> Poll<F::Output> {
+        fut.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// Drop `fut` where its first poll leaves it, as a timeout would.
+    fn dropped_parked<F: Future>(fut: F) {
+        assert!(poll_once(Box::pin(fut).as_mut()).is_pending());
+    }
+
+    fn in_use(writer: &Writer<SharedMock>) -> usize {
+        writer.shared.lock_channels().in_use()
+    }
+
+    /// CLSEs the halves sent, as (our end, the device's end).
+    fn closes(seen: &SharedMock) -> Vec<(u32, u32)> {
+        seen.sent()
+            .into_iter()
+            .filter(|(cmd, ..)| *cmd == Command::Close)
+            .map(|(_, arg0, arg1, _)| (arg0, arg1))
+            .collect()
+    }
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The writer parked for credit on a channel that has none, and a
+    /// close that fails: the slot comes back and the writer hears of it,
+    /// which is all the close promises however the CLSE fares.
+    #[test]
+    fn a_close_that_fails_gives_the_slot_back_and_wakes_parked_writers() {
+        for (kind, left) in FAILED_WRITES {
+            let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(0, &[]);
+            let woken = Arc::new(Woken(AtomicBool::new(false)));
+            let waker = Waker::from(Arc::clone(&woken));
+            let mut parked = Box::pin(writer.write_channel(ch, b"x"));
+            assert!(parked
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending());
+
+            seen.fail_writes(kind);
+            let closed = now(writer.close_channel(ch));
+            if left == 0 {
+                closed.unwrap();
+            } else {
+                let err = closed.unwrap_err();
+                assert!(
+                    matches!(&err, Error::Io(e) if embedded_io::Error::kind(e) == kind),
+                    "{kind:?}: {err:?}"
+                );
+            }
+
+            assert_eq!(in_use(&writer), 0, "{kind:?}");
+            assert!(woken.0.load(Ordering::Relaxed), "{kind:?}");
+            assert!(matches!(
+                poll_once(parked.as_mut()),
+                Poll::Ready(Err(Error::ChannelClosed))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_close_dropped_behind_a_busy_writer_gives_the_slot_back_and_owes_its_clse() {
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(writer.close_channel(ch));
+        assert_eq!(in_use(&writer), 0);
+        assert!(closes(&seen).is_empty());
+        drop(busy);
+
+        let _ = now(reader.dispatch_one());
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// A receive in flight gives way to what falls due, so with the
+    /// close gone it is what pays.
+    #[test]
+    fn a_close_dropped_with_run_parked_gets_its_clse_out() {
+        let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.parks_when_drained();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(writer.close_channel(ch));
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert!(closes(&seen).is_empty());
+        drop(busy);
+
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// Past the end `pay` writes nothing, so a close has no write half
+    /// to wait for, and here nobody lets go of it.
+    #[test]
+    fn a_close_after_the_end_of_the_stream_leaves_the_write_half_alone() {
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+        let sent = seen.sent().len();
+
+        let busy = now(writer.shared.write_half.lock());
+        now(writer.close_channel(ch)).unwrap();
+        assert_eq!(in_use(&writer), 0);
+        drop(busy);
+        assert_eq!(seen.sent().len(), sent, "nobody is left to hear it");
+    }
+
+    #[test]
+    fn a_close_on_the_reader_after_the_end_leaves_the_write_half_alone() {
+        let (mut reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+
+        let busy = now(writer.shared.write_half.lock());
+        now(reader.close_channel(ch)).unwrap();
+        assert_eq!(in_use(&writer), 0);
+        drop(busy);
+        assert!(closes(&seen).is_empty());
+    }
+
+    /// The `Reader` going says nothing of the device, and at shutdown a
+    /// close may be all that is left to tell it.
+    #[test]
+    fn a_close_after_the_reader_went_puts_its_clse_on_the_wire() {
+        let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        drop(reader);
+        now(writer.close_channel(ch)).unwrap();
+        assert_eq!(in_use(&writer), 0);
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// What a close left unsent goes with a call that writes anyway.
+    #[test]
+    fn a_close_after_the_end_goes_out_with_a_write_that_goes_anyway() {
+        let (mut reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+
+        now(reader.close_channel(a)).unwrap();
+        assert!(closes(&seen).is_empty());
+
+        let writer = Writer::new(Arc::clone(&reader.shared));
+        now(writer.write_channel(b, b"x")).unwrap();
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// The `Reader` going calls nothing off: the CLSE goes out once the
+    /// write half comes free.
+    #[test]
+    fn a_close_behind_a_stalled_writer_outlasts_the_reader() {
+        let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        let busy = now(writer.shared.write_half.lock());
+        let mut close = Box::pin(writer.close_channel(ch));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        drop(reader);
+        assert!(poll_once(close.as_mut()).is_pending());
+        assert!(closes(&seen).is_empty());
+
+        drop(busy);
+        assert!(matches!(poll_once(close.as_mut()), Poll::Ready(Ok(()))));
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// With the `Reader` gone nothing receives, so what the dropped close
+    /// left owing goes with the next call that writes.
+    #[test]
+    fn a_close_dropped_past_the_reader_still_owes_its_clse() {
+        let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
+        let writer = Writer::new(Arc::clone(&reader.shared));
+        let busy = now(writer.shared.write_half.lock());
+        let mut close = Box::pin(writer.close_channel(a));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        drop(reader);
+        assert!(poll_once(close.as_mut()).is_pending());
+        drop(close);
+        assert_eq!(writer.shared.lock_owed().len(), 1);
+        drop(busy);
+
+        now(writer.write_channel(b, b"x")).unwrap();
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// The same with the CLSE on its way into a transport that takes
+    /// nothing: giving up on that packet is for the end of the stream.
+    #[test]
+    fn a_close_stalled_in_its_clse_outlasts_the_reader() {
+        let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.stall_writes();
+        let mut close = Box::pin(writer.close_channel(ch));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        drop(reader);
+        assert!(poll_once(close.as_mut()).is_pending());
+        assert!(writer.shared.desync.check::<Infallible>().is_ok());
+    }
+
+    /// `run` with a read under way that cannot be dropped, which is what
+    /// lets a packet, or the end of the stream, in behind a close.
+    #[allow(clippy::type_complexity)]
+    fn read_under_way() -> (
+        Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1)).loses_cancelled_reads();
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"shell:\0")).unwrap();
+        seen.parks_when_drained();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+        (run, writer, ch, seen)
+    }
+
+    #[test]
+    fn a_close_behind_a_stalled_writer_ends_with_a_read_that_meets_the_end() {
+        let (mut run, writer, ch, seen) = read_under_way();
+        let busy = now(writer.shared.write_half.lock());
+        let mut close = Box::pin(writer.close_channel(ch));
+        assert!(poll_once(close.as_mut()).is_pending());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        assert!(matches!(poll_once(close.as_mut()), Poll::Ready(Ok(()))));
+        drop(busy);
+    }
+
+    /// Giving up on the CLSE leaves half a packet, which says nothing
+    /// about how the stream ended, and the close has nothing to report.
+    #[test]
+    fn a_close_stalled_in_its_clse_ends_with_a_read_that_meets_the_end() {
+        let (mut run, writer, ch, seen) = read_under_way();
+        seen.stall_writes();
+        let mut close = Box::pin(writer.close_channel(ch));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        assert!(matches!(poll_once(close.as_mut()), Poll::Ready(Ok(()))));
+        assert!(writer.shared.desync.check::<Infallible>().is_err());
+    }
+
+    /// What `collect` read comes back once the stream ends behind the
+    /// close, rather than wait for a writer that may never let go.
+    #[test]
+    fn a_finished_commands_output_gets_past_a_stalled_writer_at_the_end() {
+        let (mut run, writer, ch, seen) = read_under_way();
+        seen.feed(&wrte(1, &shell_frame(FrameId::Stdout, b"out")));
+        seen.feed(&wrte(1, &shell_frame(FrameId::Exit, &[7])));
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        let busy = now(writer.shared.write_half.lock());
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut rx = [0u8; 64];
+        let mut collect = Box::pin(Shell::new(channel, &mut rx).collect());
+        assert!(poll_once(collect.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        let Poll::Ready(output) = poll_once(collect.as_mut()) else {
+            panic!("the output stayed behind the close");
+        };
+        let output = output.unwrap();
+        assert_eq!(
+            (output.stdout.as_slice(), output.exit_code),
+            (&b"out"[..], 7)
+        );
+        drop(busy);
+    }
+
+    #[test]
+    fn a_close_after_a_desync_fails_with_it() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.stall_writes();
+        abandon(writer.write_channel(ch, b"x"));
+
+        let err = now(writer.close_channel(ch)).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
+        assert_eq!(in_use(&writer), 1);
+    }
+
+    /// The desync comes up with the close parked, which the next to take
+    /// the write half keeps it from finding out by writing: its CLSE will
+    /// never go out, and it must not report that it did.
+    #[test]
+    fn a_close_parked_when_a_write_is_given_up_on_fails_with_the_desync() {
+        let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
+        let writer = Writer::new(Arc::clone(&reader.shared));
+        seen.stall_writes();
+        let mut write = Box::pin(writer.write_channel(a, b"x"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        let mut close = Box::pin(writer.close_channel(b));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        drop(write);
+        let busy = now(writer.shared.write_half.lock());
+        assert!(matches!(
+            poll_once(close.as_mut()),
+            Poll::Ready(Err(Error::Desynchronized))
+        ));
+        drop(busy);
+    }
+
+    /// With no end of the stream to go by, the desync is what the close
+    /// comes to, its CLSE never going out, however in step the connection
+    /// was when the `Reader` went.
+    #[test]
+    fn a_close_parked_past_the_reader_fails_with_a_later_desync() {
+        let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
+        let writer = Writer::new(Arc::clone(&reader.shared));
+        seen.stall_writes();
+        let mut write = Box::pin(writer.write_channel(a, b"x"));
+        assert!(poll_once(write.as_mut()).is_pending());
+        let mut close = Box::pin(writer.close_channel(b));
+        assert!(poll_once(close.as_mut()).is_pending());
+
+        drop(reader);
+        assert!(poll_once(close.as_mut()).is_pending());
+        drop(write);
+        let busy = now(writer.shared.write_half.lock());
+        assert!(matches!(
+            poll_once(close.as_mut()),
+            Poll::Ready(Err(Error::Desynchronized))
+        ));
+        drop(busy);
+    }
+
+    /// A stale handle names a channel that is gone, not the one that
+    /// took its slot, whose local id is another.
+    #[test]
+    fn a_stale_handle_closes_nothing_in_a_slot_taken_since() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1)).feed(&okay(2));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let stale = now(reader.open_channel(b"shell:\0")).unwrap();
+        now(writer.close_channel(stale)).unwrap();
+        let again = now(reader.open_channel(b"shell:\0")).unwrap();
+        assert_eq!(again.slot(), stale.slot());
+        assert_ne!(again.local_id(), stale.local_id());
+
+        let err = now(writer.close_channel(stale)).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+        assert_eq!(in_use(&writer), 1);
+        assert_eq!(closes(&seen).len(), 1);
+    }
+
+    /// The device hears of the old channel ahead of the OPEN that takes
+    /// its slot, and what it still sends for the old one lands nowhere.
+    #[test]
+    fn a_slot_taken_behind_a_dropped_close_hears_nothing_of_the_old_channel() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1)).feed(&okay(2));
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(1),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let old = now(reader.open_channel(b"shell:\0")).unwrap();
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(writer.close_channel(old));
+        drop(busy);
+
+        let new = now(reader.open_channel(b"shell:\0")).unwrap();
+        assert_eq!(new.slot(), old.slot());
+        let sent = seen.sent();
+        let tail: Vec<_> = sent[sent.len() - 2..]
+            .iter()
+            .map(|(cmd, arg0, arg1, _)| (*cmd, *arg0, *arg1))
+            .collect();
+        let local = new.local_id();
+        assert_eq!(tail[0], (Command::Close, 1, 42));
+        assert_eq!((tail[1].0, tail[1].1), (Command::Open, local));
+
+        seen.feed(&wrte(1, b"for the old channel"));
+        seen.feed(&wrte(local, b"for the new one"));
+        let mut buf = [0u8; 32];
+        let n = now(reader.read_channel(new, &mut buf)).unwrap();
+        assert_eq!(&buf[..n], b"for the new one");
+    }
+
+    /// A channel closed with a read that cannot be dropped under way,
+    /// which comes back with a packet for it behind the free and ahead
+    /// of the CLSE.
+    #[allow(clippy::type_complexity)]
+    fn closed_with_a_read_under_way() -> (
+        Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
+        Writer<SharedMock>,
+        SharedMock,
+    ) {
+        let (mut run, writer, ch, seen) = read_under_way();
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(writer.close_channel(ch));
+        assert!(poll_once(run.as_mut()).is_pending());
+        drop(busy);
+        (run, writer, seen)
+    }
+
+    /// The OKAY for a WRTE that crossed the close is a READY for no
+    /// channel, and gets a CLSE of its own, which adbd ignores.
+    #[test]
+    fn an_okay_behind_the_free_costs_a_second_clse() {
+        let (mut run, writer, seen) = closed_with_a_read_under_way();
+        seen.feed(&okay(1));
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert!(writer.shared.lock_owed().is_empty());
+        assert_eq!(closes(&seen), [(1, 42), (1, 42)]);
+    }
+
+    /// Data for a channel that is gone is nobody's, and owes no OKAY.
+    #[test]
+    fn a_write_behind_the_free_lands_nowhere() {
+        let (mut run, writer, seen) = closed_with_a_read_under_way();
+        seen.feed(&wrte(1, b"too late"));
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert!(writer.shared.lock_owed().is_empty());
+        assert_eq!(closes(&seen), [(1, 42)]);
+        assert!(seen.acks_for(1).is_empty());
+    }
+
+    /// With every close dropped behind a busy writer and a read that
+    /// cannot be dropped keeping one packet in hand, the list comes to
+    /// all there is: the channels there were, the requests that took
+    /// their slots, the one of those a dropped refusal left past the
+    /// cap, and that packet. Any OPEN of ours would pay it, so none
+    /// comes into it, and `run` is what does not refuse the request past
+    /// the cap on its way to the read.
+    #[test]
+    fn closes_owe_a_debt_for_every_channel_and_request_and_no_more() {
+        const MAX_CHANNELS: usize = 2;
+        let open_pkt = |remote: u32| Packet::new(Command::Open, remote, 0, b"tcp:80 ".to_vec());
+
+        let mut mock = Mock::new();
+        mock.feed(&cnxn()).feed(&okay(1)).feed(&okay(2));
+        for remote in 70..73 {
+            mock.feed(&open_pkt(remote));
+        }
+        mock.loses_cancelled_reads();
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Features(&[]),
+            ConnectionConfig::new().with_max_channels(MAX_CHANNELS),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let a = now(reader.open_channel(b"shell:a ")).unwrap();
+        let b = now(reader.open_channel(b"shell:b ")).unwrap();
+        let listener = writer.listen_incoming();
+        seen.parks_when_drained();
+
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(reader.dispatch_one());
+        drop(busy);
+        assert_eq!(writer.shared.lock_incoming().len(), MAX_CHANNELS + 1);
+
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        let dropped_close = |ch: ChannelId| {
+            let busy = now(writer.shared.write_half.lock());
+            dropped_parked(writer.close_channel(ch));
+            drop(busy);
+        };
+        dropped_close(a);
+        dropped_close(b);
+        for _ in 0..=MAX_CHANNELS {
+            let incoming = now(listener.accept()).unwrap();
+            dropped_close(now(incoming.accept()).unwrap());
+        }
+        assert_eq!(writer.shared.lock_owed().len(), 2 * MAX_CHANNELS + 1);
+
+        let busy = now(writer.shared.write_half.lock());
+        seen.feed(&Packet::new(Command::Ready, 43, 9, Vec::new()));
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert_eq!(writer.shared.lock_owed().len(), 2 * MAX_CHANNELS + 2);
+        drop(busy);
+
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert_eq!(closes(&seen).len(), 2 * MAX_CHANNELS + 2);
+        assert!(writer.shared.lock_owed().is_empty());
+    }
+
+    #[test]
+    fn a_channel_closes_once() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        now(writer.close_channel(ch)).unwrap();
+        let err = now(writer.close_channel(ch)).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+        assert_eq!(closes(&seen), [(1, 42)]);
+    }
+
+    /// `run` got to the write half first, by way of an older debt, and
+    /// paid the lot, which leaves the close nothing to do and nothing to
+    /// report.
+    #[test]
+    fn a_close_paid_by_run_has_nothing_left_to_do() {
+        let (reader, a, b, seen) = split_two_channels_delayed_ack(&[]);
+        let writer = Writer::new(Arc::clone(&reader.shared));
+        seen.parks_when_drained();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        let busy = now(writer.shared.write_half.lock());
+        dropped_parked(writer.close_channel(a));
+        assert!(poll_once(run.as_mut()).is_pending());
+        let mut close = Box::pin(writer.close_channel(b));
+        assert!(poll_once(close.as_mut()).is_pending());
+        drop(busy);
+
+        assert!(poll_once(run.as_mut()).is_pending());
+        assert_eq!(closes(&seen), [(1, 42), (2, 42)]);
+        assert!(matches!(poll_once(close.as_mut()), Poll::Ready(Ok(()))));
+        assert_eq!(closes(&seen), [(1, 42), (2, 42)]);
+    }
+
+    /// Whatever the write half does for the CLSE, a device that is gone
+    /// leaves the list empty and the close nothing to report.
+    #[test]
+    fn a_close_to_a_device_that_is_gone_owes_nothing() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.fail_writes(ErrorKind::BrokenPipe);
+        now(writer.close_channel(ch)).unwrap();
+        assert!(writer.shared.lock_owed().is_empty());
+        assert!(writer.shared.desync.check::<Infallible>().is_ok());
+    }
+
+    /// A close that fails on a live connection leaves the debt where it
+    /// is, as any payment does, behind the desync the failure raised.
+    #[test]
+    fn a_close_that_fails_keeps_what_it_owes() {
+        let (_reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[]);
+        seen.fail_writes(ErrorKind::Other);
+        let err = now(writer.close_channel(ch)).unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+        assert_eq!(writer.shared.lock_owed().len(), 1);
+        assert!(writer.shared.desync.check::<Infallible>().is_err());
+    }
+
+    #[test]
+    fn a_failed_channel_closes_like_any_other() {
+        let (mut reader, writer, ch, seen) =
+            split_one_channel_delayed_ack(64, &[Packet::new(Command::Ready, 42, 1, Vec::new())]);
+        now(reader.dispatch_one()).unwrap();
+        assert_eq!(closes(&seen), [(1, 42)]);
+
+        now(writer.close_channel(ch)).unwrap();
+        assert_eq!(in_use(&writer), 0);
+        assert_eq!(closes(&seen), [(1, 42), (1, 42)]);
     }
 }
