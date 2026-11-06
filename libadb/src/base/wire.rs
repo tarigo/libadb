@@ -156,7 +156,7 @@ impl DesyncFlag {
 
     /// Fail if a packet was already abandoned mid-write.
     pub(crate) fn check<E>(&self) -> Result<(), Error<E>> {
-        if self.0.load(Ordering::Relaxed) {
+        if self.0.load(Ordering::Acquire) {
             return Err(Error::Desynchronized);
         }
         Ok(())
@@ -179,7 +179,7 @@ impl ArmedWrite<'_> {
 impl Drop for ArmedWrite<'_> {
     fn drop(&mut self) {
         if let Some(flag) = self.0 {
-            flag.0.store(true, Ordering::Relaxed);
+            flag.0.store(true, Ordering::Release);
         }
     }
 }

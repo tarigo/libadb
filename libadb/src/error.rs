@@ -79,6 +79,11 @@ pub enum Error<E> {
     /// device reading the next bytes we send as the rest of the
     /// abandoned packet.
     ///
+    /// A split connection that had already ended stays
+    /// [`Disconnected`](Self::Disconnected) for the calls waiting on the
+    /// device, as when a read gives up on an acknowledgement at the end:
+    /// only a write can still meet this then.
+    ///
     /// The judgement is deliberately conservative: it also covers a
     /// write that was polled and then dropped or failed before any byte
     /// was acknowledged, because a transport that took bytes and then

@@ -1909,6 +1909,7 @@ mod incoming_tests {
 mod end_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
+    use core::convert::Infallible;
     use core::future::Future;
     use core::pin::Pin;
     use core::task::{Context, Poll, Waker};
@@ -1916,7 +1917,10 @@ mod end_tests {
 
     use crate::base::channel::ChannelId;
     use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
-    use crate::base::mock::{cnxn, now, okay, wrte, Mock, MockError, NoAuth, SharedMock};
+    use crate::base::mock::{
+        clse, cnxn, now, okay, split_one_channel_delayed_ack, wrte, Mock, MockError, NoAuth,
+        SharedMock,
+    };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
     use crate::error::{Error, ProtocolError};
@@ -2154,6 +2158,154 @@ mod end_tests {
         }
     }
 
+    /// A channel with bytes that owe an OKAY, and `run` waiting for the
+    /// packet behind them.
+    #[allow(clippy::type_complexity)]
+    fn bytes_owing_an_okay(
+        data: &[u8],
+    ) -> (
+        Pin<Box<impl Future<Output = Result<Infallible, Error<MockError>>>>>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let (reader, writer, ch, seen) = split_one_channel_delayed_ack(64, &[wrte(1, data)]);
+        seen.parks_when_drained();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+        (run, writer, ch, seen)
+    }
+
+    /// The end of the stream comes in with a read waiting for a write
+    /// half that a stalled writer holds. What the read is after has
+    /// arrived, and its OKAY has nobody left to go to.
+    #[test]
+    fn the_end_reaches_a_read_waiting_for_the_write_half() {
+        let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        let n = now(read).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        assert!(seen.acks_for(1).is_empty());
+
+        let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::Disconnected), "got {err:?}");
+        drop(busy);
+    }
+
+    /// The same with the OKAY itself on its way into a transport that
+    /// takes nothing. Giving it up keeps what it settled readable, with
+    /// the rest behind it. It leaves half a packet, which stops the
+    /// writes, but what ended the connection is what the calls waiting
+    /// on the device hear of.
+    #[test]
+    fn the_end_reaches_a_read_stalled_in_its_okay() {
+        let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello world");
+        let listener = writer.listen_incoming();
+        let mut accept = Box::pin(listener.accept());
+        assert!(poll_once(accept.as_mut()).is_pending());
+        let mut open = Box::pin(writer.open_channel(b"svc:\0"));
+        assert!(poll_once(open.as_mut()).is_pending());
+
+        seen.stall_writes();
+        let mut buf = [0u8; 5];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        assert_eq!(now(read).unwrap(), 5);
+        assert_eq!(&buf, b"hello");
+        let mut rest = [0u8; 16];
+        let n = now(writer.read_channel(ch, &mut rest)).unwrap();
+        assert_eq!(&rest[..n], b" world");
+
+        let err = now(writer.read_channel(ch, &mut rest)).unwrap_err();
+        assert!(matches!(err, Error::Disconnected), "read: {err:?}");
+        let err = now(open).unwrap_err();
+        assert!(matches!(err, Error::Disconnected), "open: {err:?}");
+        assert!(matches!(now(accept), Err(Error::Disconnected)));
+        let err = now(writer.write_channel(ch, b"x")).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "write: {err:?}");
+    }
+
+    /// A device that closed the channel before it went said all it had
+    /// to, and the OKAY given up on after that takes nothing from it.
+    #[test]
+    fn a_read_stalled_in_its_okay_still_hears_the_channel_close() {
+        let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
+        seen.stall_writes();
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        seen.feed(&clse(1));
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        let n = now(read).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    }
+
+    /// A request that cannot get a verdict out is not handed over: it
+    /// would only come back, for ever, to a listener that carries on.
+    #[test]
+    fn a_listener_gets_no_request_once_an_okay_was_given_up_on() {
+        let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
+        seen.feed(&Packet::new(Command::Open, 77, 0, b"tcp:80\0".to_vec()));
+        let listener = writer.listen_incoming();
+        assert!(poll_once(run.as_mut()).is_pending());
+
+        seen.stall_writes();
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        now(read).unwrap();
+
+        assert!(matches!(now(listener.accept()), Err(Error::Disconnected)));
+    }
+
+    /// A write half that comes free after the end finds nobody to send
+    /// the OKAY to, so it writes nothing that could stall.
+    #[test]
+    fn a_read_given_the_write_half_after_the_end_sends_no_okay() {
+        let (mut run, writer, ch, seen) = bytes_owing_an_okay(b"hello");
+        let busy = now(writer.shared.write_half.lock());
+        let mut buf = [0u8; 8];
+        let mut read = Box::pin(writer.read_channel(ch, &mut buf));
+        assert!(poll_once(read.as_mut()).is_pending());
+
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        drop(busy);
+        let n = now(read).unwrap();
+        assert_eq!(&buf[..n], b"hello");
+        assert!(seen.acks_for(1).is_empty());
+    }
+
     /// Once the end has come up nothing goes back to the transport for
     /// more, and no call writes a packet that could only wait for an
     /// answer.
@@ -2250,6 +2402,11 @@ mod give_up_tests {
 
         abandon(writer.write_channel(ch, b"cut short"));
         assert!(desynchronized(poll_once(run.as_mut())));
+
+        // That is what ended it, and stays what everyone hears.
+        let mut buf = [0u8; 8];
+        let err = now(writer.read_channel(ch, &mut buf)).unwrap_err();
+        assert!(matches!(err, Error::Desynchronized), "got {err:?}");
     }
 
     #[test]

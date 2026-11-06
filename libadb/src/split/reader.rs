@@ -335,7 +335,11 @@ where
     /// An acknowledgement that fails does not fail the read it belongs
     /// to; the next call reports the connection's failure. A write
     /// abandoned mid-packet ends the wait for a packet as it ends
-    /// [`run`](Self::run).
+    /// [`run`](Self::run), and the wait for an acknowledgement to go out.
+    /// Once the connection has ended a read waits for no write half, and
+    /// the bytes come without their acknowledgement. Nothing receives
+    /// while this call waits for the write half, though, so the end
+    /// cannot reach it there.
     ///
     /// A concurrent [`Writer::close_channel`] on the same channel does
     /// not wake this call directly — see the module-level note on

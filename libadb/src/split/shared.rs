@@ -4,7 +4,10 @@
 use alloc::sync::Arc;
 use async_lock::Mutex as AsyncMutex;
 use core::convert::Infallible;
+use core::future::{poll_fn, Future};
+use core::pin::pin;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::task::Poll;
 use embedded_io::ErrorType;
 use embedded_io_async::Write;
 use event_listener::{Event, EventListener};
@@ -74,13 +77,19 @@ pub(crate) struct Shared<WH> {
     /// back or with the [`Reader`] gone: nothing will dispatch packets
     /// any more, so waiting for one would never end.
     stopped: AtomicBool,
+    /// Whether the connection was still in step when `stopped` was set.
+    /// A read gives up on its OKAY at the end, and the half packet that
+    /// leaves says nothing about how the connection ended: see
+    /// [`check_in_step`](Self::check_in_step).
+    ended_in_step: AtomicBool,
     /// Live [`IncomingListener`]s. While there is one, [`Reader::run`]
     /// keeps device-initiated OPENs for it instead of refusing them.
     pub(super) listeners: AtomicUsize,
     /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(super) incoming_signal: Event,
-    /// Woken with everyone else and when something falls due, for a
-    /// receive in flight.
+    /// Woken with everyone else and when something falls due: for a
+    /// receive in flight, and for a read on its way to the OKAY it owes,
+    /// which only the end of the connection calls off.
     receive_signal: Event,
     /// What the device is owed, oldest first: see [`Owed`].
     ///
@@ -126,6 +135,7 @@ impl<WH> Shared<WH> {
             incoming: Mutex::new(incoming),
             staged: Mutex::new(Vec::new()),
             stopped: AtomicBool::new(false),
+            ended_in_step: AtomicBool::new(false),
             listeners: AtomicUsize::new(0),
             incoming_signal: Event::new(),
             receive_signal: Event::new(),
@@ -251,6 +261,13 @@ impl<WH> Shared<WH> {
     /// lock has taken nothing, and one dropped in the middle of the
     /// write leaves the bytes readable, with no gap in them.
     ///
+    /// The end of the connection ends both waits: nobody is left to hear
+    /// the OKAY, and what arrived must not stay behind a writer or a
+    /// transport that stalled. An OKAY given up on part way is a packet
+    /// abandoned like any other, so it raises the desync and leaves what
+    /// it settled readable, as a dropped call does, and the read goes
+    /// round to take that.
+    ///
     /// Nothing is held across those waits: settled bytes owe nothing
     /// more, so another read may take them on the way, and what lands in
     /// their place owes an OKAY of its own. So a read decides again
@@ -270,7 +287,7 @@ impl<WH> Shared<WH> {
             {
                 let mut chs = self.lock_channels();
                 if !chs.get(ch).is_some_and(ChannelSlot::has_data) {
-                    self.desync.check()?;
+                    self.check_in_step()?;
                 }
                 let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
                 // Nothing to take, nothing this take acknowledges, or
@@ -280,22 +297,40 @@ impl<WH> Shared<WH> {
                     return slot.take_buffered(buf);
                 }
             }
-            let mut wh = self.lock_write_half().await;
-            let ack = {
-                let mut chs = self.lock_channels();
-                let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-                slot.settle_take(buf.len())
-            };
-            if let Some(ack) = ack {
-                let _ = send_okay_to(
-                    &mut *wh,
-                    &self.desync,
-                    ack,
-                    self.negotiated.ack_mode(),
-                    self.negotiated.checksum(),
-                )
-                .await;
-            }
+            // The OKAY first: the usual read has it out on this poll, and
+            // so never registers a listener.
+            let mut acknowledge = pin!(self.acknowledge_take(ch, buf.len()));
+            let mut ended = pin!(self.ended());
+            poll_fn(|cx| {
+                if acknowledge.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                ended.as_mut().poll(cx)
+            })
+            .await;
+        }
+    }
+
+    /// Settle a take of up to `want` bytes from `ch` and send the OKAY it
+    /// owes, if that still stands by the time the write half comes free.
+    async fn acknowledge_take(&self, ch: ChannelId, want: usize)
+    where
+        WH: Write,
+    {
+        let mut wh = self.lock_write_half().await;
+        let ack = self.check_live::<Infallible>().ok().and_then(|()| {
+            let mut chs = self.lock_channels();
+            chs.get_mut(ch)?.settle_take(want)
+        });
+        if let Some(ack) = ack {
+            let _ = send_okay_to(
+                &mut *wh,
+                &self.desync,
+                ack,
+                self.negotiated.ack_mode(),
+                self.negotiated.checksum(),
+            )
+            .await;
         }
     }
 
@@ -438,6 +473,10 @@ impl<WH> Shared<WH> {
 
     /// Mark the connection ended and wake every waiter to see it.
     pub(super) fn stop(&self) {
+        if !self.stopped.load(Ordering::Acquire) {
+            let in_step = self.desync.check::<Infallible>().is_ok();
+            self.ended_in_step.store(in_step, Ordering::Release);
+        }
         self.stopped.store(true, Ordering::Release);
         self.wake_all();
     }
@@ -475,15 +514,45 @@ impl<WH> Shared<WH> {
         }
     }
 
+    /// Resolve once [`check_live`](Self::check_live) fails.
+    async fn ended(&self) {
+        let mut listener: Option<EventListener> = None;
+        loop {
+            if self.check_live::<Infallible>().is_err() {
+                return;
+            }
+            // Register, then look once more before waiting, as reads do.
+            match listener.take() {
+                Some(waiting) => waiting.await,
+                None => listener = Some(self.receive_signal.listen()),
+            }
+        }
+    }
+
     /// Fail once waiting can no longer end well: a write abandoned
     /// mid-packet desynchronized the connection, or it ended and nothing
     /// will be dispatched any more.
     pub(super) fn check_live<E>(&self) -> Result<(), Error<E>> {
-        self.desync.check()?;
+        self.check_in_step()?;
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Disconnected);
         }
         Ok(())
+    }
+
+    /// Fail if a packet was left half-written, for a call that waits on
+    /// the device rather than writes. Whichever came first, the desync or
+    /// the end of the connection, is what such a call goes by: a packet
+    /// left behind after the end, as a read gives up on its OKAY there,
+    /// changes nothing about how the connection ended.
+    pub(super) fn check_in_step<E>(&self) -> Result<(), Error<E>> {
+        // In this order: whoever sees a desync raised because of the end
+        // also sees what `stop` recorded before it.
+        let in_step = self.desync.check();
+        if in_step.is_err() && self.ended_in_step.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        in_step
     }
 
     /// Take the write half for the caller's own packet, and nothing

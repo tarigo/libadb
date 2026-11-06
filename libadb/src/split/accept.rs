@@ -3,6 +3,7 @@
 //! [`Reader::run`] dispatches.
 
 use alloc::sync::Arc;
+use core::convert::Infallible;
 use core::sync::atomic::{AtomicBool, Ordering};
 use embedded_io::ErrorType;
 use embedded_io_async::Write;
@@ -214,7 +215,9 @@ where
         loop {
             // A request taken now could get no verdict out: it would only
             // go back to the queue.
-            self.shared.desync.check()?;
+            if self.shared.desync.check::<Infallible>().is_err() {
+                self.shared.check_live()?;
+            }
             if let Some(incoming) = self.shared.take_incoming() {
                 return Ok(incoming);
             }

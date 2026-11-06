@@ -142,7 +142,7 @@ where
     ) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let signal = &self.shared.signals[ch.slot];
         loop {
-            self.shared.desync.check()?;
+            self.shared.check_in_step()?;
             let listener = signal.listen();
             {
                 let chs = self.shared.lock_channels();
@@ -181,7 +181,10 @@ where
     /// What arrived is handed over whatever has become of the connection
     /// since: only a read that finds nothing buffered fails with that.
     /// An acknowledgement that fails does not fail the read it belongs
-    /// to; the next call reports the connection's failure.
+    /// to; the next call reports the connection's failure. The end of
+    /// the connection ends the wait for the write lock and for an
+    /// acknowledgement on its way, and the bytes come without it, so a
+    /// stalled writer or transport cannot keep them back then.
     ///
     /// Cancellation-safe while it waits — for data, or for the write
     /// lock an acknowledgement needs: nothing has been taken then, and
