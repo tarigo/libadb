@@ -3731,7 +3731,7 @@ mod close_tests {
     #[test]
     fn closes_owe_a_debt_for_every_channel_and_request_and_no_more() {
         const MAX_CHANNELS: usize = 2;
-        let open_pkt = |remote: u32| Packet::new(Command::Open, remote, 0, b"tcp:80 ".to_vec());
+        let open_pkt = |remote: u32| Packet::new(Command::Open, remote, 0, b"tcp:80\0".to_vec());
 
         let mut mock = Mock::new();
         mock.feed(&cnxn()).feed(&okay(1)).feed(&okay(2));
@@ -3748,8 +3748,8 @@ mod close_tests {
         ))
         .unwrap();
         let (mut reader, writer) = conn.split().unwrap();
-        let a = now(reader.open_channel(b"shell:a ")).unwrap();
-        let b = now(reader.open_channel(b"shell:b ")).unwrap();
+        let a = now(reader.open_channel(b"shell:a\0")).unwrap();
+        let b = now(reader.open_channel(b"shell:b\0")).unwrap();
         let listener = writer.listen_incoming();
         seen.parks_when_drained();
 
