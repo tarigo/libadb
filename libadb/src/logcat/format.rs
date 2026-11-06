@@ -67,122 +67,119 @@ impl fmt::Display for Priority {
     }
 }
 
-/// Android log buffer identifier.
-///
-/// Matches the `log_id` values in AOSP
-/// (`system/logging/liblog/include/android/log.h`) as of Android 9.
-/// Android 7.0–8.1 had no stats buffer and numbered security 5 and
-/// kernel 6, so from those releases security entries come out as
-/// [`Stats`](Self::Stats) and kernel entries as
-/// [`Security`](Self::Security), with their payload left raw.
-///
-/// `LogId::from` turns a buffer number into its id, and `u32::from`
-/// gives the number back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum LogId {
-    /// Buffer 0.
-    Main,
-    /// Buffer 1.
-    Radio,
-    /// Buffer 2.
-    Events,
-    /// Buffer 3.
-    System,
-    /// Buffer 4.
-    Crash,
-    /// Buffer 5.
-    Stats,
-    /// Buffer 6.
-    Security,
-    /// Buffer 7.
-    Kernel,
-    /// A buffer this version of libadb does not know, such as one a
-    /// newer Android added. Compare `u32::from(id)` rather than this
-    /// variant: a later libadb may name the buffer.
+/// Defines [`LogId`] from one row per known buffer, so the enum and
+/// every conversion take a buffer's number, name and format from there.
+macro_rules! log_ids {
+    (@text text) => { true };
+    (@text binary) => { false };
+    (
+        $(#[$attr:meta])*
+        pub enum LogId {
+            $($variant:ident = $number:literal, $name:literal, $format:ident;)*
+            $(#[$unknown_attr:meta])*
+            Unknown(UnknownLogId),
+        }
+    ) => {
+        $(#[$attr])*
+        pub enum LogId {
+            $(
+                #[doc = concat!("Buffer ", stringify!($number), ", `", $name, "`.")]
+                $variant,
+            )*
+            $(#[$unknown_attr])*
+            Unknown(UnknownLogId),
+        }
+
+        impl LogId {
+            /// Whether this buffer's entries are `[priority][tag\0][message]`
+            /// text.
+            fn is_text(self) -> bool {
+                match self {
+                    $(Self::$variant => log_ids!(@text $format),)*
+                    Self::Unknown(_) => false,
+                }
+            }
+        }
+
+        impl From<u32> for LogId {
+            fn from(number: u32) -> Self {
+                match number {
+                    $($number => Self::$variant,)*
+                    _ => Self::Unknown(UnknownLogId(number)),
+                }
+            }
+        }
+
+        impl From<LogId> for u32 {
+            fn from(id: LogId) -> Self {
+                match id {
+                    $(LogId::$variant => $number,)*
+                    LogId::Unknown(UnknownLogId(other)) => other,
+                }
+            }
+        }
+
+        impl fmt::Display for LogId {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    $(Self::$variant => f.write_str($name),)*
+                    Self::Unknown(UnknownLogId(other)) => write!(f, "unknown({other})"),
+                }
+            }
+        }
+    };
+}
+
+log_ids! {
+    /// Android log buffer identifier.
     ///
-    /// ```
-    /// use libadb::logcat::LogId;
+    /// Matches the `log_id` values in AOSP
+    /// (`system/logging/liblog/include/android/log.h`) as of Android 9.
+    /// Android 7.0–8.1 had no stats buffer and numbered security 5 and
+    /// kernel 6, so from those releases security entries come out as
+    /// [`Stats`](Self::Stats) and kernel entries as
+    /// [`Security`](Self::Security), with their payload left raw.
     ///
-    /// let id = LogId::from(8);
-    /// assert!(matches!(id, LogId::Unknown(_)));
-    /// assert_eq!(u32::from(id), 8);
-    /// ```
-    ///
-    /// The number inside is private, so a known number cannot pose as an
-    /// unknown buffer, and no pattern can pick out one unknown number:
-    ///
-    /// ```compile_fail,E0423
-    /// use libadb::logcat::{LogId, UnknownLogId};
-    ///
-    /// let system = LogId::Unknown(UnknownLogId(3));
-    /// ```
-    Unknown(UnknownLogId),
+    /// `LogId::from` turns a buffer number into its id, and `u32::from`
+    /// gives the number back.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[non_exhaustive]
+    pub enum LogId {
+        Main = 0, "main", text;
+        Radio = 1, "radio", text;
+        Events = 2, "events", binary;
+        System = 3, "system", text;
+        Crash = 4, "crash", text;
+        Stats = 5, "stats", binary;
+        Security = 6, "security", binary;
+        Kernel = 7, "kernel", text;
+        /// A buffer this version of libadb does not know, such as one a
+        /// newer Android added. Compare `u32::from(id)` rather than this
+        /// variant: a later libadb may name the buffer.
+        ///
+        /// ```
+        /// use libadb::logcat::LogId;
+        ///
+        /// let id = LogId::from(8);
+        /// assert!(matches!(id, LogId::Unknown(_)));
+        /// assert_eq!(u32::from(id), 8);
+        /// ```
+        ///
+        /// The number inside is private, so a known number cannot pose as an
+        /// unknown buffer, and no pattern can pick out one unknown number:
+        ///
+        /// ```compile_fail,E0423
+        /// use libadb::logcat::{LogId, UnknownLogId};
+        ///
+        /// let system = LogId::Unknown(UnknownLogId(3));
+        /// ```
+        Unknown(UnknownLogId),
+    }
 }
 
 /// The number of a buffer behind [`LogId::Unknown`], kept private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UnknownLogId(u32);
-
-impl LogId {
-    /// Whether this buffer's entries are `[priority][tag\0][message]`
-    /// text. Every variant is listed, so a new one has to choose.
-    fn is_text(self) -> bool {
-        match self {
-            Self::Main | Self::Radio | Self::System | Self::Crash | Self::Kernel => true,
-            Self::Events | Self::Stats | Self::Security | Self::Unknown(_) => false,
-        }
-    }
-}
-
-impl From<u32> for LogId {
-    fn from(number: u32) -> Self {
-        match number {
-            0 => Self::Main,
-            1 => Self::Radio,
-            2 => Self::Events,
-            3 => Self::System,
-            4 => Self::Crash,
-            5 => Self::Stats,
-            6 => Self::Security,
-            7 => Self::Kernel,
-            _ => Self::Unknown(UnknownLogId(number)),
-        }
-    }
-}
-
-impl From<LogId> for u32 {
-    fn from(id: LogId) -> Self {
-        match id {
-            LogId::Main => 0,
-            LogId::Radio => 1,
-            LogId::Events => 2,
-            LogId::System => 3,
-            LogId::Crash => 4,
-            LogId::Stats => 5,
-            LogId::Security => 6,
-            LogId::Kernel => 7,
-            LogId::Unknown(UnknownLogId(other)) => other,
-        }
-    }
-}
-
-impl fmt::Display for LogId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Main => "main",
-            Self::Radio => "radio",
-            Self::Events => "events",
-            Self::System => "system",
-            Self::Crash => "crash",
-            Self::Stats => "stats",
-            Self::Security => "security",
-            Self::Kernel => "kernel",
-            Self::Unknown(UnknownLogId(other)) => return write!(f, "unknown({other})"),
-        };
-        f.write_str(name)
-    }
-}
 
 /// A parsed binary log entry.
 ///
