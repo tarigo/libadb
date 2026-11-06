@@ -114,10 +114,8 @@ impl<T: Splittable> Read for TlsReadHalf<T> {
 
 impl<T: Splittable> TlsWriteHalf<T> {
     /// Run `f` on the engine and queue every record it, and anything
-    /// before it, produced.
-    ///
-    /// Once the session has failed, `f` does not run: what gets queued
-    /// is the alert for the failure, and the failure is the answer.
+    /// before it, produced. On a failed session `f` does not run: the
+    /// alert for the failure is queued, and the failure is the answer.
     async fn queue<R>(
         &mut self,
         f: impl FnOnce(&mut ClientConnection) -> R,

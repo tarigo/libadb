@@ -37,13 +37,9 @@ pub struct adb_connection_t {
     pub(crate) writer: FfiWriter,
     /// Second handle to the TCP socket for timeouts; None over USB.
     pub(crate) tcp_socket: Option<std::net::TcpStream>,
-    /// The device-initiated OPEN that [`adb_accept_channel`] reported.
-    /// It stays here, and repeated calls report it again, until
-    /// [`adb_incoming_accept`] or [`adb_incoming_reject`] takes it out.
-    ///
-    /// [`adb_accept_channel`]: crate::adb_accept_channel
-    /// [`adb_incoming_accept`]: crate::adb_incoming_accept
-    /// [`adb_incoming_reject`]: crate::adb_incoming_reject
+    /// The device-initiated OPEN that
+    /// [`adb_accept_channel`](crate::adb_accept_channel) reported. It stays
+    /// here, and calls report it again, until a verdict takes it out.
     pub(crate) staged_incoming: Mutex<Option<FfiIncoming>>,
 }
 
@@ -164,8 +160,7 @@ pub unsafe extern "C" fn adb_connect_with_authenticator(
     unsafe { handshake(uri, out, |t| connect_plain(t, auth, banner_bytes)) }
 }
 
-/// Open `uri`, run `connect` over the transport, and box the split
-/// result into a handle.
+/// Open `uri`, run `connect` on it and box the split result in a handle.
 ///
 /// # Safety
 /// `out` must point to a writable `adb_connection_t*`.

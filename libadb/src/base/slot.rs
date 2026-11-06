@@ -90,10 +90,8 @@ pub(crate) struct ChannelSlot {
     /// acknowledged for yet — the backpressure the device feels.
     unacked: usize,
     /// How much of `rx_buf`, from its head, has its OKAY settled and is
-    /// yet to be taken. That OKAY lets the device send as much again,
-    /// which can land first, so these bytes no longer count against
-    /// what it may send; and what lands behind them owes an OKAY of its
-    /// own, so a take stops here.
+    /// yet to be taken. These bytes no longer count against the device's
+    /// window, and a take stops here: what lands behind owes its own OKAY.
     settled: usize,
     /// The order concurrent writers take the budget in.
     send_queue: SendQueue,

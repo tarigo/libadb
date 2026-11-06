@@ -172,11 +172,9 @@ pub(super) struct TlsSession<T> {
     pub(super) inner: T,
     pub(super) conn: Box<ClientConnection>,
     pub(super) inbound: Inbound,
-    /// Records sealed and not yet written, already advanced past
-    /// whatever the socket took, so a dropped call resumes here
-    /// instead of leaving half a record behind. They go out on a
-    /// flush, or with the next write once they come to `QUEUE_LIMIT`
-    /// bytes.
+    /// Records sealed and not yet written, advanced past what the socket
+    /// took, so a dropped call resumes here instead of leaving half a
+    /// record. A flush sends them, or a write once they reach `QUEUE_LIMIT`.
     pub(super) tx: BytesMut,
     /// The failure the session met, kept so that every later call
     /// reports it too; only a write after `shutdown` reports `Closed`

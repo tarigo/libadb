@@ -292,11 +292,8 @@ pub(super) const HEADER_V3_SIZE: usize = 24;
 pub(super) const HEADER_V4_SIZE: usize = 28;
 pub(super) const LOGGER_ENTRY_MAX_LEN: usize = 5 * 1024;
 
-/// Try to parse one binary `logger_entry` from `buf`.
-///
-/// Returns `Ok(Some((entry, consumed)))` when a complete entry was
-/// decoded, `Ok(None)` when the buffer does not yet contain enough
-/// bytes, or `Err` on an unrecoverable format error.
+/// Try to parse one binary `logger_entry` from `buf`: `Ok(None)` until
+/// it holds a whole entry, `Err` on an unrecoverable format error.
 pub(super) fn parse_entry(buf: &[u8]) -> Result<Option<(LogEntry, usize)>, LogcatError> {
     const HEADER_PREFIX: usize = 4;
     if buf.len() < HEADER_PREFIX {

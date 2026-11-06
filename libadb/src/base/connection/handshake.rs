@@ -88,11 +88,8 @@ impl Verdict {
     }
 }
 
-/// What a handshake carries from our CNXN to the device's.
-///
-/// Both entry points run one; the TLS one goes on with it inside the
-/// session. It ends in [`assemble`](Self::assemble), which hands its
-/// state on to the connection.
+/// What a handshake carries from our CNXN to the device's. Both entry
+/// points run one; the TLS one goes on with it inside the session.
 pub(super) struct Handshake<T, A> {
     pub(super) transport: T,
     auth: A,
@@ -128,11 +125,8 @@ where
     }
 
     /// The half of the handshake both entry points share: send our CNXN
-    /// and bring back the device's verdict.
-    ///
-    /// Authentication happens in here when the device asks for it. A
-    /// first answer that is none of CNXN, STLS and AUTH fails here, as a
-    /// protocol error.
+    /// and bring back the device's verdict, authenticating if it asks.
+    /// Any other first answer fails as a protocol error.
     pub(super) async fn open(&mut self) -> Result<Verdict, Error<<T as ErrorType>::Error>> {
         let hello = Packet::new(
             Command::Connect,
@@ -152,14 +146,9 @@ where
         }
     }
 
-    /// Answer the device's AUTH challenge.
-    ///
-    /// Returns the verdict the exchange ended on: CNXN once the key is
-    /// accepted, or STLS if the device switches to TLS midway. Any AUTH but
-    /// the one token that asks for the key is [`AuthError::Rejected`]; that
-    /// token is [`AuthError::KeyNotTrusted`] when the authenticator will not
-    /// offer the key; a command with no place in the handshake, such as
-    /// SYNC, fails as [`ProtocolError::UnexpectedCommand`].
+    /// Answer the device's AUTH challenge: the signature, then the key if
+    /// the device sends a second token. Returns the verdict the exchange
+    /// ended on: CNXN, or STLS if the device switches to TLS midway.
     pub(super) async fn do_auth(
         &mut self,
         token: Bytes,
@@ -203,10 +192,8 @@ where
     }
 
     /// Everything after the device's CNXN: negotiate, parse the banner
-    /// and build the connection.
-    ///
-    /// Split out so the TLS path, which reads its CNXN from inside the
-    /// session, ends the same way.
+    /// and build the connection. Split out so the TLS path, which reads
+    /// its CNXN from inside the session, ends the same way.
     pub(super) fn assemble(
         self,
         cnxn: Packet,

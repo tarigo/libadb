@@ -19,12 +19,9 @@ use super::protocol::{Checksum, MESSAGE_SIZE};
 use super::slot::PendingAck;
 use crate::error::{Error, ProtocolError};
 
-/// What a read asks for while the next header is incomplete, rather
-/// than the few bytes that header lacks: a stream transport hands over
-/// a whole packet, or several, in one go. USB loses nothing by it, as a
-/// header is a transfer of its own there and its short packet ends the
-/// read. Once the header is in, [`read_limit`] holds a read to the
-/// packet.
+/// What a read asks for while the next header is incomplete: a stream
+/// transport hands over a whole packet or several in one go, and on USB
+/// a header is a transfer of its own, whose short packet ends the read.
 pub(crate) const MIN_READ: usize = 4096;
 
 #[cfg(test)]
@@ -88,11 +85,9 @@ impl<'a> Staged<'a> {
         &self.buf[..self.keep]
     }
 
-    /// Whether to read into the same stretch again: the first packet is
-    /// still short, and all it lacks fits in what is left. Staging anew
-    /// for each read would zero the rest of a large packet every time,
-    /// and over TLS a read brings only one 16 KiB record. The next read
-    /// takes [`room`](Self::room), which may be less than is left.
+    /// Whether to read into the same stretch again, as the first packet
+    /// is short and all it lacks fits. Staging anew would zero the rest
+    /// of a large packet on every read, and TLS brings 16 KiB per read.
     pub(crate) fn wants_more(&mut self) -> bool {
         let missing = Packet::missing(self.committed());
         missing != 0 && missing <= self.spare().len()
@@ -105,14 +100,9 @@ impl Drop for Staged<'_> {
     }
 }
 
-/// Whether `e` says for certain that the other end is gone: nothing
-/// more can be sent to it, whereas what it sent before going can still
-/// be read.
-///
-/// A timeout is no such thing, and cannot be told from it by anything
-/// short of these kinds: on unix `SO_RCVTIMEO` comes back as
-/// `WouldBlock`, which `embedded_io` has no kind for but
-/// [`Other`](embedded_io::ErrorKind::Other).
+/// Whether `e` says for certain that the other end is gone. A timeout
+/// is no such thing: on unix `SO_RCVTIMEO` comes back as `WouldBlock`,
+/// which `embedded_io` has no kind for but `Other`.
 pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
     use embedded_io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
     matches!(e, Error::Io(e) if matches!(
@@ -121,14 +111,9 @@ pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
     ))
 }
 
-/// Whether a failed receive means nothing more will come in, which is
-/// to say what is certain: the stream ended, the transport says the
-/// other end is gone, or what came in does not parse, which leaves the
-/// bytes in place for every later read to fail on.
-///
-/// Everything else stays recoverable, a read timeout above all. So does
-/// a wrong checksum, the one failure of a packet that has been taken off
-/// the stream, which still has its place.
+/// Whether a failed receive ends the connection: the stream ended, the
+/// other end is gone, or what came in does not parse and would fail
+/// every later read. A read timeout and a wrong checksum do not.
 #[cfg(feature = "split")]
 pub(crate) fn ends_connection<E: embedded_io::Error>(e: &Error<E>) -> bool {
     match e {
@@ -224,19 +209,9 @@ pub(crate) enum Received<I> {
     Interrupted(I),
 }
 
-/// [`recv_pkt`], giving up once `interrupt` resolves while the packet
-/// still has to be read.
-///
-/// A packet already whole in `buf` wins over a ready interrupt. With
-/// `race`, every read is raced against `interrupt` and dropped when it
-/// loses, which only a transport whose reads are cancel-safe can
-/// afford. Without it, `interrupt` is asked once before each read, and
-/// a read once issued runs to completion. Bytes read before the
-/// interrupt stay in `buf` either way.
-///
-/// Every read keeps to [`read_limit`]. TCP keeps its header reads, which
-/// take in a whole packet or several, and TLS still stages a large
-/// packet once, however many records fill it.
+/// [`recv_pkt`], giving up once `interrupt` resolves, with what was
+/// read kept in `buf`. With `race`, for cancel-safe reads only, each
+/// read is raced against it; otherwise it is asked before each read.
 pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
     t: &mut T,
     buf: &mut BytesMut,

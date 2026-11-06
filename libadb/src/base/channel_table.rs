@@ -14,9 +14,7 @@ use crate::error::{Error, NoFreeChannels, RxOverflow};
 
 /// What a packet did to the channel table, and what is left for
 /// whoever dispatched it to do. The slot indices and a fault's ids are
-/// read only by `split::Reader`, which wakes a slot's waiters and
-/// closes a faulted channel; a [`Connection`](crate::Connection) has
-/// no one else to wake.
+/// read only by `split::Reader`.
 #[cfg_attr(not(feature = "split"), allow(dead_code))]
 pub(crate) enum DispatchOutcome {
     /// A WRTE was buffered and has to be acknowledged now.
@@ -37,11 +35,8 @@ pub(crate) enum DispatchOutcome {
     DataBuffered {
         idx: usize,
     },
-    /// The device opened a channel toward the host (`adb reverse`).
-    /// The host queues it for [`accept_incoming`] and answers READY on
-    /// accept or CLSE on refusal.
-    ///
-    /// [`accept_incoming`]: super::connection::Connection::accept_incoming
+    /// The device opened a channel toward the host (`adb reverse`), to be
+    /// queued for a verdict: READY on accept, CLSE on refusal.
     IncomingOpen {
         remote: RemoteId,
         /// The device's receive credit from OPEN `arg1`; our send

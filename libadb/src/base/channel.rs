@@ -156,19 +156,9 @@ pub(crate) trait ReadToEnd: Sized {
     /// Send CLSE and free the slot, as [`Channel::close`] does.
     async fn close(self) -> Result<(), Error<Self::IoError>>;
 
-    /// Read until the device closes the channel, filling `buf` from its
-    /// start, then close the channel. Returns the number of bytes read.
-    ///
-    /// The close goes out, best-effort, on every way out, because
-    /// nothing else frees the slot ([`Channel`] has no `Drop`) and a slot
-    /// left taken ends in [`Error::NoFreeChannels`]. The result of the
-    /// reads is returned, not the close's.
-    ///
-    /// Once `buf` is full, one more read into a scratch byte tells
-    /// whether the device has more. The device closing the channel then
-    /// returns `buf.len()`; data fails with
-    /// [`Error::ReceiveBufferFull`], with what was read left in `buf`
-    /// and the scratch byte lost; any other error is returned as it is.
+    /// Read into `buf` until the device closes the channel, and close it
+    /// on every way out: nothing else frees the slot. A one-byte read past
+    /// a full `buf` tells an exact fit from [`Error::ReceiveBufferFull`].
     async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>> {
         let mut tail = 0;
         let mut scratch = [0u8; 1];
@@ -190,14 +180,9 @@ pub(crate) trait ReadToEnd: Sized {
         read
     }
 
-    /// Read until the device closes the channel, appending each read to
-    /// a `Vec`, then close the channel — on every way out, as
-    /// [`read_to_end`](Self::read_to_end) does. `rx` is where each read
-    /// lands before it is appended.
-    ///
-    /// Past `cap` bytes in all it stops with `Ok(Err(Capped))`, found
-    /// before the read that crosses the cap is appended, so the `Vec`
-    /// never holds more. An `Err` is the channel's own error.
+    /// [`read_to_end`](Self::read_to_end) into a `Vec`, each read landing
+    /// in `rx` first. Past `cap` bytes it stops with `Ok(Err(Capped))`,
+    /// before the read that crosses the cap is appended.
     async fn read_to_vec(
         mut self,
         rx: &mut [u8],

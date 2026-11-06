@@ -45,11 +45,9 @@ where
     negotiated: Negotiated,
     recv_buf: BytesMut,
     pub(crate) desync: DesyncFlag,
-    /// Device-initiated OPENs awaiting [`accept_incoming`]. Bounded by
-    /// the size of the table; overflow is refused with CLSE on
-    /// arrival.
-    ///
-    /// [`accept_incoming`]: Self::accept_incoming
+    /// Device-initiated OPENs awaiting
+    /// [`accept_incoming`](Self::accept_incoming). Bounded by the size of
+    /// the table; overflow is refused with CLSE on arrival.
     incoming: IncomingQueue,
 }
 

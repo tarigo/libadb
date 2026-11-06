@@ -10,19 +10,12 @@ use alloc::string::String;
 use crate::transport::uri::UsbSelector;
 use crate::transport::{ADB_CLASS, ADB_PROTOCOL, ADB_SUBCLASS};
 
-/// What device selection needs to know about one enumerated device.
-///
-/// Each backend implements it for its own device type, so both pick a
-/// device by the rules of [`scan`], and a fake device lets the tests
-/// exercise those rules without a USB bus.
-///
-/// The lookups grow costlier down the list, and `scan` stops at the
-/// first one that rules a device out. The serial number comes last, and
-/// only under [`UsbSelector::Serial`], so no other selector opens a
-/// device it will not use: libusb can only read that string descriptor
-/// through an open handle, so [`serial`](Self::serial) takes `&mut self`,
-/// may open the device, fail doing so, and keep the handle for `scan`'s
-/// `open` step.
+/// What device selection needs to know about one enumerated device,
+/// so both backends and the tests' fake share the rules of [`scan`].
+/// `scan` stops at the first lookup that rules a device out.
+/// [`serial`](Self::serial) comes last, and only under
+/// [`UsbSelector::Serial`], as libusb needs an open handle for it: it
+/// may open the device, and the handle stays for `scan`'s `open` step.
 pub(super) trait Enumerated {
     /// The backend's connect error, which a failed lookup reports.
     type Error: ScanError;
@@ -65,21 +58,12 @@ pub(super) fn speaks_adb(class: u8, subclass: u8, protocol: u8) -> bool {
     (class, subclass, protocol) == (ADB_CLASS, ADB_SUBCLASS, ADB_PROTOCOL)
 }
 
-/// Walk `devices`, handing the first one the selector accepts to
-/// `open` along with its ADB interface, and keep walking if that one
-/// turns out unusable.
-///
-/// A VID:PID names one device, so its failures are reported as they
-/// happen. `Any` and a serial number describe a search: a device that
-/// speaks no ADB, cannot be looked into, or refuses to open, is passed
-/// over, and the first failure is only reported if nothing else works
-/// out. Without that, a hub or a webcam enumerated ahead of the phone
-/// ends the search.
-///
-/// A device whose IDs could not be read may be any device, the one a
-/// VID:PID names included, so every selector passes it over and keeps
-/// its failure. A VID:PID that then matches nothing reports that
-/// failure rather than [`not_found`](ScanError::not_found).
+/// Hand the first device the selector accepts to `open`, with its ADB
+/// interface, and walk on if that one turns out unusable. A VID:PID
+/// names one device, so its failures are reported as they happen. `Any`
+/// and a serial are searches, which a hub ahead of the phone must not
+/// end: a failing device is passed over, and the first failure reported
+/// only if nothing works out, as every selector does with unreadable IDs.
 pub(super) fn scan<D, T, F>(
     devices: impl IntoIterator<Item = Result<D, D::Error>>,
     selector: UsbSelector<'_>,

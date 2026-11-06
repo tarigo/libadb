@@ -128,10 +128,8 @@ where
     }
 
     /// Refuse queued OPENs past the cap, which a dropped refusal left
-    /// behind, before taking any new packet in. The intake loops that
-    /// can run with a full queue start here, so repeated cancellation
-    /// cannot grow the queue beyond one past the cap. (`accept_incoming`
-    /// needs no barrier: it only reads with the queue empty.)
+    /// behind, before taking any new packet in, so repeated cancellation
+    /// cannot grow the queue. `accept_incoming` reads only with it empty.
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
@@ -145,16 +143,9 @@ where
         Ok(())
     }
 
-    /// The next packet off the connection, once what is owed is out: the
-    /// device may be waiting for that, and receiving nothing until then
-    /// is what bounds the list.
-    ///
-    /// The call that sees the connection end gets the failure as it is,
-    /// and everyone waiting is told here, since nobody else can see it.
-    ///
-    /// A write abandoned or a debt falling due ends the wait for a
-    /// packet, as the device may send nothing until that is seen to: at
-    /// once if the read can be dropped, otherwise with the next packet.
+    /// The next packet, once what is owed is out: the device may be
+    /// waiting for that, and receiving nothing until then bounds the
+    /// list. Only this call sees the connection end, so it tells the rest.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
         loop {
             self.shared.check_live()?;

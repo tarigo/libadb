@@ -23,18 +23,9 @@ impl<E> From<DestinationError> for crate::error::Error<E> {
     }
 }
 
-/// Write `prefixes` followed by shell-quoted `args`, NUL-terminated.
-///
-/// The destination reaches the device as one string that `adbd` hands
-/// to `sh -c`, so an argument holding a space or a `;` would otherwise
-/// become several arguments, or a second command. Quoting keeps each
-/// element of `args` a single argument — the same guarantee
-/// [`build_nul_destination`] gives on the `abb` path, so a call means
-/// the same thing whichever service serves it.
-///
-/// `prefixes` are written verbatim: they carry the service name and,
-/// for the string-shaped APIs, a command the caller wrote as shell
-/// source on purpose.
+/// Write `prefixes` verbatim, then `args` shell-quoted, NUL-terminated:
+/// adbd hands the destination to `sh -c`, so quoting keeps each of `args`
+/// a single argument, as [`build_nul_destination`] does on the `abb` path.
 pub(crate) fn write_destination(
     buf: &mut [u8],
     prefixes: &[&[u8]],

@@ -643,12 +643,8 @@ pub(crate) fn write_argv_destination(
 }
 
 /// Open the channel [`write_argv_destination`] names, once the device
-/// is known to speak shell_v2: what the argv-shaped services run over
-/// when they go through the shell.
-///
-/// The destination is built in `buf`, so a `buf` too short for it is
-/// [`Error::ReceiveBufferFull`]. It is free again once this returns —
-/// opening copies the destination.
+/// is known to speak shell_v2. The destination is built in `buf`, so a
+/// `buf` too short for it is [`Error::ReceiveBufferFull`].
 pub(crate) async fn open_argv<'a, S: Session>(
     session: &'a mut S,
     prefix: &[u8],

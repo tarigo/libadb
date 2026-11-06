@@ -451,10 +451,8 @@ struct BulkEndpoints {
 }
 
 /// The first of the ADB interface settings, each given as its number
-/// and bulk endpoints, that has both endpoints.
-///
-/// A device whose every ADB setting lacks them is turned down for that
-/// rather than for speaking no ADB, and before it is opened or claimed.
+/// and bulk endpoints, that has both endpoints. A device with none is
+/// turned down for that, not for speaking no ADB, before it is opened.
 fn first_with_bulk_endpoints(
     settings: impl IntoIterator<Item = (u8, Option<BulkEndpoints>)>,
 ) -> Result<Option<AdbInterface>, UsbConnectError> {
