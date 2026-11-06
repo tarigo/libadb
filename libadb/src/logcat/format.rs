@@ -156,8 +156,10 @@ log_ids! {
         Security = 6, "security", binary;
         Kernel = 7, "kernel", text;
         /// A buffer this version of libadb does not know, such as one a
-        /// newer Android added. Compare [`number`](LogId::number) rather
-        /// than this variant: a later libadb may name the buffer.
+        /// newer Android added. Its entries are left raw, the whole payload
+        /// in [`LogEntry::message`]. A later libadb may name the buffer, so
+        /// compare [`number`](LogId::number) rather than this variant, and
+        /// may then split the same entries into priority, tag and message.
         ///
         /// ```
         /// use libadb::logcat::LogId;
