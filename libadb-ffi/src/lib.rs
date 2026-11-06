@@ -46,6 +46,7 @@
 #![no_std]
 #![allow(unsafe_code)]
 #![warn(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 extern crate alloc;
