@@ -80,8 +80,6 @@ impl Runtime for Inline {
         port: u16,
     ) -> impl Future<Output = Result<Self::Tcp, std::io::Error>> + Send {
         let host = alloc::string::String::from(host);
-        // Deferred like the other runtimes: a future nobody polls must
-        // not have dialled.
         async move {
             let stream = std::net::TcpStream::connect((host.as_str(), port))?;
             stream.set_nodelay(true)?;
@@ -94,8 +92,6 @@ impl Runtime for Inline {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        // Deferred like the other runtimes: a future nobody polls must
-        // not have run the closure.
         async move { Ok(f()) }
     }
 }
@@ -127,8 +123,6 @@ impl Runtime for Tokio {
         T: Send + 'static,
     {
         async move {
-            // Outside a tokio runtime `spawn_blocking` would panic — run
-            // inline instead, blocking the caller.
             let Ok(handle) = tokio::runtime::Handle::try_current() else {
                 return Ok(f());
             };
@@ -167,9 +161,6 @@ impl Runtime for Smol {
         T: Send + 'static,
     {
         async move {
-            // smol re-raises panics on await; catch them so a misbehaving
-            // backend maps to `BlockingError` instead of unwinding through
-            // the caller.
             match smol::unblock(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))).await
             {
                 Ok(t) => Ok(t),

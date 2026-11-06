@@ -1,6 +1,3 @@
-//! [`TlsError`], and how to tell from one that the device refused the
-//! key.
-
 /// Why a TLS transport failed.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -61,8 +58,6 @@ impl<E: embedded_io::Error> embedded_io::Error for TlsError<E> {
     fn kind(&self) -> embedded_io::ErrorKind {
         match self {
             Self::Io(e) => e.kind(),
-            // Nothing takes a failed session back: every later read and
-            // write gets the same failure.
             Self::Tls(_) => embedded_io::ErrorKind::ConnectionAborted,
             Self::HandshakeClosed => embedded_io::ErrorKind::Other,
             Self::WriteZero => embedded_io::ErrorKind::WriteZero,
@@ -72,15 +67,6 @@ impl<E: embedded_io::Error> embedded_io::Error for TlsError<E> {
     }
 }
 
-/// Alerts a device sends when it will not have the key.
-///
-/// adbd refuses from its certificate callback, which BoringSSL
-/// answers with `certificate_unknown`; the rest are the other
-/// certificate alerts a TLS stack might pick instead. Generic ones
-/// such as `handshake_failure` or `decrypt_error` stay out: they
-/// mean the handshake broke for some other reason, and calling that
-/// a refusal would send the user off to pair for nothing. So does
-/// `certificate_required`, which says no certificate arrived at all.
 fn alert_means_rejection(alert: rustls::AlertDescription) -> bool {
     use rustls::AlertDescription as A;
     matches!(
@@ -107,9 +93,6 @@ impl<E> TlsError<E> {
     pub fn is_key_rejected(&self) -> bool {
         match self {
             Self::Tls(rustls::Error::AlertReceived(a)) => alert_means_rejection(*a),
-            // Not `HandshakeClosed`: the key had not gone out yet. A
-            // device that refuses by just closing does so after the
-            // handshake, and the connect path names that on its own.
             _ => false,
         }
     }

@@ -88,7 +88,6 @@ where
     }
 }
 
-/// Owned form of [`UsbSelector`], so the blocking pool can take it.
 enum OwnedUsbSelector {
     Any,
     VidPid { vid: u16, pid: u16 },

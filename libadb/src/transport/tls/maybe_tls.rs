@@ -1,5 +1,3 @@
-//! [`MaybeTls`], a transport that is plain now and may be TLS later.
-
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
@@ -13,8 +11,6 @@ use crate::transport::ReadCancelSafety;
 pub(super) enum State<T: Read + Write> {
     Plain(T),
     Tls(TlsSession<T>),
-    /// Held while the upgrade runs, and kept for good if it failed or
-    /// was dropped part way: the socket goes with the session.
     Broken,
 }
 
@@ -152,9 +148,6 @@ impl<T: Read + Write> sealed::Sealed for MaybeTls<T> {}
 
 impl<T: Read + Write> StartTls for MaybeTls<T> {
     async fn start_tls(&mut self, config: &TlsClientConfig) -> Result<(), Self::Error> {
-        // `Broken` stands in while the value is out of `&mut self`, and
-        // stays if the handshake fails or this future is dropped.
-        // Anything else goes back untouched.
         let inner = match core::mem::replace(&mut self.state, State::Broken) {
             State::Plain(inner) => inner,
             other => {
@@ -209,7 +202,6 @@ where
                 .start_tls(config)
                 .await
                 .map_err(crate::transport::common::TransportError::Tcp),
-            // adbd never offers STLS over USB.
             Self::Usb(_) => Err(crate::transport::common::TransportError::Tcp(
                 TlsError::NotAvailable,
             )),

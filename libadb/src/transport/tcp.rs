@@ -40,9 +40,6 @@ mod blocking {
     use super::BlockingTcp;
     use crate::transport::{ReadCancelSafety, Splittable};
 
-    /// Make `call` again for as long as a signal cuts it short. A
-    /// handler with `SA_RESTART` does not spare us this: a socket that
-    /// has a timeout is left out of it, so the call fails all the same.
     pub(super) fn past_signals<T>(mut call: impl FnMut() -> io::Result<T>) -> io::Result<T> {
         loop {
             match call() {

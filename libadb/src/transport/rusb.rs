@@ -30,9 +30,6 @@ use crate::transport::usb::{ends_on_packet_boundary, scan, speaks_adb, Enumerate
 const NO_TIMEOUT: Duration = Duration::ZERO;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// The bits of `wMaxPacketSize` that hold the packet size. `rusb` hands
-/// over the raw field, and the bits above say how many transactions a
-/// high-speed periodic endpoint takes per microframe.
 const PACKET_SIZE_MASK: u16 = 0x07ff;
 
 /// USB transport wrapping a `rusb::DeviceHandle` with bulk endpoints.
@@ -60,8 +57,6 @@ pub struct UsbTransport<R> {
     handle: Arc<rusb::DeviceHandle<Context>>,
     endpoints: BulkEndpoints,
     runtime: core::marker::PhantomData<R>,
-    // Moved into each blocking call, which cannot borrow the caller's
-    // buffer, and back out, so the transfers share one allocation.
     buffer: Vec<u8>,
 }
 
@@ -165,8 +160,6 @@ fn bulk_write(
     let n = handle
         .write_bulk(ep, buf, NO_TIMEOUT)
         .map_err(UsbError::Transfer)?;
-    // A shorter count leaves the rest to the next write, whose length
-    // then decides.
     if n == buf.len() && ends_on_packet_boundary(n, endpoints.out_packet_size) {
         handle
             .write_bulk(ep, &[], NO_TIMEOUT)
@@ -350,7 +343,6 @@ pub fn connect_by_selector<R: Runtime>(
     })
 }
 
-/// One enumerated device, opened only once the scan needs a handle.
 struct Candidate {
     device: rusb::Device<Context>,
     descriptor: rusb::DeviceDescriptor,
@@ -358,7 +350,6 @@ struct Candidate {
 }
 
 impl Candidate {
-    /// The handle reading the serial opened, or a fresh one.
     fn open(self) -> Result<rusb::DeviceHandle<Context>, UsbConnectError> {
         match self.handle {
             Some(handle) => Ok(handle),
@@ -400,8 +391,6 @@ impl Enumerated for Candidate {
     }
 
     fn serial(&mut self) -> Result<Option<String>, UsbConnectError> {
-        // The device descriptor says whether there is a string to read,
-        // so a device without one is not opened to find out.
         if self.descriptor.serial_number_string_index().is_none() {
             return Ok(None);
         }
@@ -433,26 +422,18 @@ impl ScanError for UsbConnectError {
     }
 }
 
-/// An ADB interface with the bulk endpoints its descriptor lists, so
-/// that opening the device need not read the descriptor again.
 struct AdbInterface {
     number: u8,
     endpoints: BulkEndpoints,
 }
 
-/// The bulk endpoints of one interface setting.
 #[derive(Clone, Copy)]
 struct BulkEndpoints {
     ep_in: u8,
     ep_out: u8,
-    /// How large a packet `ep_out` takes, which is what tells a write
-    /// whether it needs a zero-length packet.
     out_packet_size: usize,
 }
 
-/// The first of the ADB interface settings, each given as its number
-/// and bulk endpoints, that has both endpoints. A device with none is
-/// turned down for that, not for speaking no ADB, before it is opened.
 fn first_with_bulk_endpoints(
     settings: impl IntoIterator<Item = (u8, Option<BulkEndpoints>)>,
 ) -> Result<Option<AdbInterface>, UsbConnectError> {
@@ -471,7 +452,6 @@ fn first_with_bulk_endpoints(
         .ok_or(UsbConnectError::NoBulkEndpoints)
 }
 
-/// The bulk IN and OUT endpoints of one interface setting.
 fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<BulkEndpoints> {
     pick_bulk_endpoints(desc.endpoint_descriptors().map(|ep| {
         (
@@ -483,8 +463,6 @@ fn bulk_endpoints(desc: &rusb::InterfaceDescriptor<'_>) -> Option<BulkEndpoints>
     }))
 }
 
-/// The bulk IN and OUT endpoints among `endpoints`, each given by the
-/// type, direction, address and `wMaxPacketSize` its descriptor lists.
 fn pick_bulk_endpoints(
     endpoints: impl IntoIterator<Item = (TransferType, Direction, u8, u16)>,
 ) -> Option<BulkEndpoints> {

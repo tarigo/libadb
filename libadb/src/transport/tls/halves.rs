@@ -1,6 +1,3 @@
-//! The halves a split [`MaybeTls`] becomes, plain or TLS, and the
-//! engine the TLS ones share.
-
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use std::sync::OnceLock;
@@ -17,17 +14,8 @@ use super::session::{
 };
 use crate::transport::{ReadCancelSafety, Splittable};
 
-/// What both halves of a split session share: the engine, and the
-/// failure it met.
-///
-/// Each half takes `conn` only while rustls works, never across a
-/// wait on the socket, so neither can hold the other up.
 struct TlsShared {
     conn: async_lock::Mutex<Box<ClientConnection>>,
-    /// The failure the session met, kept so that every later call
-    /// reports it too; only a write after `shutdown` reports `Closed`
-    /// instead. The reader sets it under `conn`, where a writer looks
-    /// before it hands rustls anything, so none slips past.
     failed: OnceLock<rustls::Error>,
 }
 
@@ -45,11 +33,7 @@ pub struct TlsReadHalf<T: Splittable> {
 /// leaves waits for its next write or flush.
 pub struct TlsWriteHalf<T: Splittable> {
     half: T::WriteHalf,
-    /// Records sealed and not yet written, advanced past whatever the
-    /// socket took, so a dropped call resumes where it stopped.
     pending: BytesMut,
-    /// Whether `shutdown` has been called. Writes are refused from
-    /// then on, as the `close_notify` may already be queued.
     closed: bool,
     shared: Arc<TlsShared>,
 }
@@ -68,7 +52,6 @@ impl<T: Splittable> Read for TlsReadHalf<T> {
             return Ok(0);
         }
         loop {
-            // Plaintext first.
             {
                 let mut conn = self.shared.conn.lock().await;
                 match take_plaintext(&mut conn, buf) {
@@ -77,29 +60,19 @@ impl<T: Splittable> Read for TlsReadHalf<T> {
                     Plain::Blocked => {}
                 }
             }
-            // What decrypted ahead of a failure is read before it.
             if let Some(e) = self.shared.failed.get() {
                 return Err(TlsError::Tls(e.clone()));
             }
 
-            // Decrypt what is in hand before going back to the socket, or
-            // the tail of a closed stream is lost as a clean end of file.
             if !self.inbound.rx.is_empty() {
                 let fed = {
                     let mut conn = self.shared.conn.lock().await;
-                    // Kept under `conn`, where the writer looks. The alert
-                    // rustls raises stays queued in the engine for the
-                    // writer to carry: nothing on the read side writes.
                     feed(&mut conn, &mut self.inbound.rx).inspect_err(|e| {
                         let _ = self.shared.failed.set(e.clone());
                     })
                 };
                 match fed {
-                    // A safeguard: `take_plaintext` above reports a
-                    // `close_notify` first.
                     Ok(0) => return Ok(0),
-                    // A failure is kept, and reported once what decrypted
-                    // ahead of it has been read.
                     Ok(_) | Err(_) => continue,
                 }
             }
@@ -113,9 +86,6 @@ impl<T: Splittable> Read for TlsReadHalf<T> {
 }
 
 impl<T: Splittable> TlsWriteHalf<T> {
-    /// Run `f` on the engine and queue every record it, and anything
-    /// before it, produced. On a failed session `f` does not run: the
-    /// alert for the failure is queued, and the failure is the answer.
     async fn queue<R>(
         &mut self,
         f: impl FnOnce(&mut ClientConnection) -> R,
@@ -129,16 +99,11 @@ impl<T: Splittable> TlsWriteHalf<T> {
         result
     }
 
-    /// Write out the queue and flush the half underneath, resuming
-    /// where a dropped call stopped.
     async fn drain(&mut self) -> Result<(), TlsError<T::Error>> {
         send_queue(&mut self.half, &mut self.pending).await?;
         self.half.flush().await.map_err(TlsError::Io)
     }
 
-    /// [`queue`](Self::queue) what `f` produces and send it all. A
-    /// failed session sends the alert for its failure, if the socket
-    /// takes it, and answers with the failure either way.
     async fn push_with<R>(
         &mut self,
         f: impl FnOnce(&mut ClientConnection) -> R,
@@ -153,8 +118,6 @@ impl<T: Splittable> TlsWriteHalf<T> {
 
     /// Send `close_notify` and push it out: see [`MaybeTls::shutdown`].
     pub async fn shutdown(&mut self) -> Result<(), TlsError<T::Error>> {
-        // Up front: a shutdown dropped part way may already have
-        // queued the `close_notify`, and nothing may follow it.
         self.closed = true;
         self.push_with(|conn| conn.send_close_notify()).await
     }
@@ -174,8 +137,6 @@ impl<T: Splittable> Write for TlsWriteHalf<T> {
         }
         match self.queue(|conn| write_plain(conn, buf)).await {
             Ok(written) => written,
-            // The alert for the failure is queued; it goes out now, if
-            // the socket takes it.
             Err(e) => {
                 let _ = self.drain().await;
                 Err(TlsError::Tls(e))

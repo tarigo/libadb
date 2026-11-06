@@ -1,5 +1,3 @@
-//! The certificate and key a host presents to a device over TLS.
-
 use alloc::vec;
 use alloc::vec::Vec;
 use std::time::SystemTime;
@@ -98,10 +96,6 @@ impl TlsIdentity {
         self.certificate.as_ref()
     }
 
-    /// The chain and key in the shape `rustls` asks for. `rustls` wipes
-    /// this copy of the key once it has parsed it, but the parsed key
-    /// lives in the `ClientConfig` for as long as that does, and nothing
-    /// wipes it.
     pub(crate) fn rustls_parts(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
         (
             vec![self.certificate.clone()],
@@ -121,9 +115,6 @@ impl core::fmt::Debug for TlsIdentity {
 
 impl Drop for TlsIdentity {
     fn drop(&mut self) {
-        // The key is copied out of the zeroizing document it was encoded
-        // into, and is the host's own: every device that trusts the host
-        // trusts this key. Nothing else would wipe the copy.
         zeroize::Zeroize::zeroize(&mut self.private_key);
     }
 }

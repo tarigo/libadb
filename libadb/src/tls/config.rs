@@ -1,5 +1,3 @@
-//! The `rustls` profile an ADB host connects with.
-
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -10,8 +8,6 @@ use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
 use super::TlsIdentity;
 
-/// The name rustls asks for. SNI is off, so the device never sees it,
-/// and `AcceptAnyDevice` checks the certificate against nothing.
 const PLACEHOLDER_SERVER_NAME: &str = "adb";
 
 /// Why a client profile could not be built.
@@ -81,8 +77,6 @@ impl TlsClientConfig {
     /// below 65537, which [`AdbKey`](crate::keys::AdbKey) accepts down to
     /// 3; the keys `adb` makes all use 65537.
     pub fn adb(identity: &TlsIdentity) -> Result<Self, TlsConfigError> {
-        // Spelled out, not defaulted: a feature-unified build may switch on
-        // `tls12` or another provider, and a default would follow it.
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let (chain, key) = identity.rustls_parts();
 
@@ -93,12 +87,7 @@ impl TlsClientConfig {
             .with_custom_certificate_verifier(Arc::new(AcceptAnyDevice { provider }))
             .with_client_auth_cert(chain, key)
             .map_err(TlsConfigError::Rustls)?;
-        // adbd ignores SNI; sending one would only differ from `adb`.
         inner.enable_sni = false;
-        // Nor does `adb` resume. Every device answers to the same
-        // placeholder name, so a ticket from one would go to the next,
-        // in the clear, and a resumed session carries no client
-        // certificate for the device to know the host by.
         inner.resumption = rustls::client::Resumption::disabled();
 
         Ok(Self {
@@ -141,10 +130,6 @@ impl TlsClientConfig {
     }
 }
 
-/// Takes any device certificate, the way AOSP's client does.
-///
-/// The signature check is kept: it costs nothing and proves the peer
-/// holds the private key for the certificate it sent.
 #[derive(Debug)]
 struct AcceptAnyDevice {
     provider: Arc<CryptoProvider>,
@@ -168,7 +153,6 @@ impl ServerCertVerifier for AcceptAnyDevice {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // Only TLS 1.3 was offered.
         Err(rustls::Error::PeerIncompatible(
             rustls::PeerIncompatible::Tls12NotOffered,
         ))
