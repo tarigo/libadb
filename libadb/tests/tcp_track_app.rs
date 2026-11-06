@@ -1,5 +1,8 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use libadb::track_app;
 use libadb::Error;
 
@@ -274,6 +277,46 @@ async fn track_app_invalid_hex_length_prefix_surfaces_decode_error() {
         ),
         "expected Decode(InvalidLengthPrefix), got {err:?}",
     );
+
+    tracker.close().await.unwrap();
+    rt::join(device).await;
+}
+}
+
+// The device holds the rest of the frame back until the first call is
+// gone, so that call is dropped waiting for the payload.
+rt_test! {
+async fn a_dropped_read_snapshot_loses_nothing() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let released = dropped.clone();
+    let dev = FakeDevice::new().banner(TRACK_APP_BANNER.to_vec());
+    let (mut conn, device) = session(dev, b"host::features=track_app", |mut s| async move {
+        let mut ch = s.accept_open(b"track-app\0").await;
+
+        let snapshot = track_app_snapshot(&[track_app_entry(7, true, b"arm64", None, &[])]);
+        let frame = track_app_frame(&snapshot);
+        let (head, tail) = frame.split_at(6);
+
+        ch.send_write(head).await;
+        ch.expect_ack().await;
+        while !released.load(Ordering::SeqCst) {
+            rt::sleep_ms(1).await;
+        }
+        ch.send_write(tail).await;
+        ch.expect_ack().await;
+        ch.expect_close().await;
+    })
+    .await;
+
+    let mut rx = [0u8; 256];
+    let mut tracker = track_app::open(&mut conn, &mut rx).await.unwrap();
+
+    assert!(rt::timeout_ms(50, tracker.read_snapshot()).await.is_none());
+    dropped.store(true, Ordering::SeqCst);
+
+    let entries = rt::within("the snapshot", tracker.read_snapshot()).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].pid, 7);
 
     tracker.close().await.unwrap();
     rt::join(device).await;

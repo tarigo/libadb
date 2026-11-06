@@ -164,7 +164,6 @@ impl Mock {
 
     /// Have a read with nothing to hand back wait for more, rather than
     /// report the end of the stream.
-    #[cfg(feature = "split")]
     pub(crate) fn parks_when_drained(&mut self) -> &mut Self {
         self.parks_when_drained = true;
         self

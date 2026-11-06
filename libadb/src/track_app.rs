@@ -82,8 +82,9 @@ pub struct TrackApp<'a, 'b, S> {
 impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
     /// Wrap an already-opened `track-app` channel.
     ///
-    /// `buf` is the caller-owned receive buffer, and a snapshot longer
-    /// than it fails [`read_snapshot`](Self::read_snapshot) with
+    /// `buf` is the caller-owned receive buffer. It must hold a snapshot
+    /// and its 4-byte length prefix at once: a frame longer than `buf`
+    /// fails [`read_snapshot`](Self::read_snapshot) with
     /// [`Error::ReceiveBufferFull`]. 8 KiB is a reasonable starting
     /// size — see [`open`].
     pub fn new(channel: Channel<'a, S>, buf: &'b mut [u8]) -> Self {
@@ -97,6 +98,19 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
     ///
     /// Blocks until a complete `[4-hex-len][protobuf]` message has been
     /// received, then decodes and returns the list of processes.
+    ///
+    /// A snapshot that does not decode fails with [`Error::Decode`] and
+    /// costs only itself: the next call reads the one after it. The
+    /// stream cannot go past two other failures, and every later call
+    /// fails the same: a frame longer than the buffer, with
+    /// [`Error::ReceiveBufferFull`], and a length prefix that does not
+    /// parse, with [`Error::Decode`].
+    ///
+    /// As safe to drop as the [`Channel`] read it waits in, which can
+    /// lose packet bytes on a transport whose reads are not cancel-safe:
+    /// see [`ReadCancelSafety`](crate::transport::ReadCancelSafety). The
+    /// call itself loses nothing, as what arrived stays in the buffer
+    /// for the next one.
     pub async fn read_snapshot(&mut self) -> Result<Vec<ProcessEntry>, Error<S::IoError>> {
         const HEX_LEN_PREFIX: usize = 4;
         self.rx
@@ -105,17 +119,13 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
         let payload_len = proto::parse_hex4(self.rx.peek(HEX_LEN_PREFIX))
             .ok_or(Error::Decode(DecodeError::InvalidLengthPrefix))?
             as usize;
-        self.rx.advance(HEX_LEN_PREFIX);
-
-        if payload_len == 0 {
-            return Ok(Vec::new());
-        }
-        self.rx
-            .fill_at_least(&mut self.channel, payload_len)
-            .await?;
-        let entries = decode_app_processes(self.rx.peek(payload_len)).map_err(Error::Decode)?;
-        self.rx.advance(payload_len);
-        Ok(entries)
+        // The prefix stays until the frame is in: a call dropped while
+        // waiting must leave the next one in front of a prefix.
+        let frame_len = HEX_LEN_PREFIX + payload_len;
+        self.rx.fill_at_least(&mut self.channel, frame_len).await?;
+        let entries = decode_app_processes(&self.rx.peek(frame_len)[HEX_LEN_PREFIX..]);
+        self.rx.advance(frame_len);
+        entries.map_err(Error::Decode)
     }
 
     /// Close the channel.
@@ -126,8 +136,9 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
 
 /// Open a `track-app` channel and return a [`TrackApp`] session.
 ///
-/// `buf` is the caller-owned receive buffer.  8 KiB is a reasonable
-/// starting size; increase if the device has many debuggable processes.
+/// `buf` is the caller-owned receive buffer, which must hold a snapshot
+/// and its 4-byte length prefix at once.  8 KiB is a reasonable starting
+/// size; increase if the device has many debuggable processes.
 pub async fn open<'a, 'b, S: Session>(
     session: &'a mut S,
     buf: &'b mut [u8],
@@ -207,6 +218,8 @@ fn decode_process_entry(buf: &[u8]) -> Result<ProcessEntry, DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::mock::{abandon, now, one_slot, wrte};
+    use alloc::format;
     use alloc::vec;
 
     const FIELD_PID: u64 = 1;
@@ -250,6 +263,101 @@ mod tests {
         let mut msg = Vec::new();
         write_string_field(&mut msg, FIELD_PROCESS_ENTRY, entry);
         msg
+    }
+
+    /// A frame as the device writes it.
+    fn frame(payload: &[u8]) -> Vec<u8> {
+        let mut out = format!("{:04x}", payload.len()).into_bytes();
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// The frame of a snapshot listing one process.
+    fn snapshot(pid: u64) -> Vec<u8> {
+        let mut entry = Vec::new();
+        write_varint_field(&mut entry, FIELD_PID, pid);
+        frame(&wrap_as_app_processes(&entry))
+    }
+
+    fn pids(entries: &[ProcessEntry]) -> Vec<i64> {
+        entries.iter().map(|e| e.pid).collect()
+    }
+
+    #[test]
+    fn a_snapshot_that_fails_to_decode_costs_only_that_snapshot() {
+        // Field 1 claims more bytes than the message holds.
+        let mut stream = frame(&[0x0A, 0x7F]);
+        stream.extend(snapshot(7));
+        let mut conn = one_slot("track_app", &[wrte(1, &stream)]);
+        let mut rx = [0u8; 256];
+        let mut tracker = now(open(&mut conn, &mut rx)).unwrap();
+
+        let err = now(tracker.read_snapshot()).unwrap_err();
+        assert!(
+            matches!(err, Error::Decode(DecodeError::InvalidProtobuf)),
+            "got {err:?}"
+        );
+        assert_eq!(pids(&now(tracker.read_snapshot()).unwrap()), [7]);
+    }
+
+    #[test]
+    fn a_call_dropped_anywhere_in_a_frame_costs_nothing() {
+        let stream = snapshot(7);
+        for cut in 0..stream.len() {
+            let mut conn = one_slot("track_app", &[]);
+            let mut rx = [0u8; 256];
+            let mut tracker = now(open(&mut conn, &mut rx)).unwrap();
+            let device = tracker.channel.session.transport_mut();
+            device.parks_when_drained();
+            if cut > 0 {
+                device.feed(&wrte(1, &stream[..cut]));
+            }
+
+            abandon(tracker.read_snapshot());
+
+            let device = tracker.channel.session.transport_mut();
+            device.feed(&wrte(1, &stream[cut..]));
+            let entries = now(tracker.read_snapshot()).unwrap();
+            assert_eq!(pids(&entries), [7], "dropped {cut} bytes in");
+        }
+    }
+
+    #[test]
+    fn a_frame_fits_a_buffer_of_exactly_its_length() {
+        let stream = snapshot(7);
+        let mut conn = one_slot("track_app", &[wrte(1, &stream)]);
+        let mut rx = vec![0u8; stream.len()];
+        let mut tracker = now(open(&mut conn, &mut rx)).unwrap();
+
+        assert_eq!(pids(&now(tracker.read_snapshot()).unwrap()), [7]);
+    }
+
+    #[test]
+    fn a_frame_a_byte_too_long_for_the_buffer_fails_every_call() {
+        let stream = snapshot(7);
+        let mut conn = one_slot("track_app", &[wrte(1, &stream)]);
+        let mut rx = vec![0u8; stream.len() - 1];
+        let mut tracker = now(open(&mut conn, &mut rx)).unwrap();
+
+        for _ in 0..2 {
+            let err = now(tracker.read_snapshot()).unwrap_err();
+            assert!(matches!(err, Error::ReceiveBufferFull), "got {err:?}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_that_does_not_parse_fails_every_call() {
+        let mut conn = one_slot("track_app", &[wrte(1, b"ZZZZ")]);
+        let mut rx = [0u8; 256];
+        let mut tracker = now(open(&mut conn, &mut rx)).unwrap();
+
+        for _ in 0..2 {
+            let err = now(tracker.read_snapshot()).unwrap_err();
+            assert!(
+                matches!(err, Error::Decode(DecodeError::InvalidLengthPrefix)),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
