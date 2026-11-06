@@ -4,7 +4,8 @@
 //!
 //! * `tcp://HOST:PORT` — `HOST` may be IPv4, a hostname, or a bracketed
 //!   IPv6 address (`tcp://[::1]:5555`). Bare (unbracketed) IPv6 is
-//!   rejected to keep the grammar unambiguous.
+//!   rejected to keep the grammar unambiguous. `PORT` is decimal digits
+//!   alone, with no sign.
 //! * `usb://` — any ADB-capable USB device.
 //! * `usb://VID:PID` — USB device matching VID and PID as 4 hex digits
 //!   each (case-insensitive).
@@ -96,7 +97,7 @@ fn parse_tcp(rest: &str) -> Result<Uri<'_>, UriError> {
             return Err(UriError::InvalidHost);
         }
         let port_str = after.strip_prefix(':').ok_or(UriError::InvalidPort)?;
-        let port = port_str.parse::<u16>().map_err(|_| UriError::InvalidPort)?;
+        let port = parse_port(port_str)?;
         Ok(Uri::Tcp { host, port })
     } else {
         let (host, port_str) = rest.rsplit_once(':').ok_or(UriError::InvalidPort)?;
@@ -106,9 +107,16 @@ fn parse_tcp(rest: &str) -> Result<Uri<'_>, UriError> {
         if host.contains(':') {
             return Err(UriError::InvalidHost);
         }
-        let port = port_str.parse::<u16>().map_err(|_| UriError::InvalidPort)?;
+        let port = parse_port(port_str)?;
         Ok(Uri::Tcp { host, port })
     }
+}
+
+fn parse_port(port: &str) -> Result<u16, UriError> {
+    if !port.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(UriError::InvalidPort);
+    }
+    port.parse().map_err(|_| UriError::InvalidPort)
 }
 
 fn parse_usb(rest: &str) -> Result<Uri<'_>, UriError> {
@@ -122,10 +130,14 @@ fn parse_usb(rest: &str) -> Result<Uri<'_>, UriError> {
         return Ok(Uri::Usb(UsbSelector::Serial(serial)));
     }
     let (vid_s, pid_s) = rest.split_once(':').ok_or(UriError::InvalidUsbSelector)?;
-    if vid_s.len() != 4 || pid_s.len() != 4 {
+    let vid = parse_usb_id(vid_s)?;
+    let pid = parse_usb_id(pid_s)?;
+    Ok(Uri::Usb(UsbSelector::VidPid { vid, pid }))
+}
+
+fn parse_usb_id(id: &str) -> Result<u16, UriError> {
+    if id.len() != 4 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(UriError::InvalidUsbSelector);
     }
-    let vid = u16::from_str_radix(vid_s, 16).map_err(|_| UriError::InvalidUsbSelector)?;
-    let pid = u16::from_str_radix(pid_s, 16).map_err(|_| UriError::InvalidUsbSelector)?;
-    Ok(Uri::Usb(UsbSelector::VidPid { vid, pid }))
+    u16::from_str_radix(id, 16).map_err(|_| UriError::InvalidUsbSelector)
 }
