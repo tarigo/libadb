@@ -11,8 +11,11 @@
 //! # Dump last 50 entries and exit:
 //! cargo run --example logcat --features tokio,host-keys -- 127.0.0.1:5555 -d -t 50
 //!
-//! # Filter by tag:
-//! cargo run --example logcat --features tokio,host-keys -- 127.0.0.1:5555 -s ActivityManager:I
+//! # Only one process's entries:
+//! cargo run --example logcat --features tokio,host-keys -- 127.0.0.1:5555 --pid=1234
+//!
+//! # Only one tag's entries, matched here since logcat filters no tags under -B:
+//! cargo run --example logcat --features tokio,host-keys -- 127.0.0.1:5555 --tag=ActivityManager
 //! ```
 //!
 //! Reuses `~/.android/adbkey`; if there is none, a key is generated
@@ -57,7 +60,15 @@ async fn run(addr: &str, extra_args: &[String]) -> Result<(), Box<dyn std::error
 
     eprintln!("[*] connected, device: {:?}", conn.device_banner());
 
-    let args: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
+    // `--tag=NAME` is ours, not logcat's: under -B logcat filters no tags.
+    let mut tags = Vec::new();
+    let mut args = Vec::new();
+    for arg in extra_args {
+        match arg.strip_prefix("--tag=") {
+            Some(tag) => tags.push(tag.as_bytes()),
+            None => args.push(arg.as_str()),
+        }
+    }
 
     let mut rx = [0u8; 64 * 1024];
     let mut session = logcat::open(&mut conn, &args, &mut rx)
@@ -68,6 +79,7 @@ async fn run(addr: &str, extra_args: &[String]) -> Result<(), Box<dyn std::error
 
     loop {
         match session.read_entry().await {
+            Ok(entry) if !tags.is_empty() && !tags.contains(&entry.tag.as_slice()) => {}
             Ok(entry) => {
                 let res = writeln!(
                     io::stdout(),
@@ -113,6 +125,9 @@ async fn async_main() {
         eprintln!();
         eprintln!("  Dump last 50 entries:");
         eprintln!("    {} 127.0.0.1:5555 -d -t 50", args[0]);
+        eprintln!();
+        eprintln!("  Only one tag's entries (matched here, not by logcat):");
+        eprintln!("    {} 127.0.0.1:5555 --tag=ActivityManager", args[0]);
         process::exit(2);
     }
 

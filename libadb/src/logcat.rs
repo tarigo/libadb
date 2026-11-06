@@ -278,12 +278,16 @@ fn shift(buf: &mut [u8], from: core::ops::Range<usize>, to: usize) {
 /// implicit `-B` flag.  Common choices:
 ///
 /// * `&["-b", "main,system"]` — limit to specific buffers
-/// * `&["-s", "MyTag:D"]` — filter by tag / priority
 /// * `&["--pid=1234"]` — filter by PID
 /// * `&["-T", "100"]` — start from the last 100 entries, then stream
 ///
-/// Each element is one argument to `logcat`, so a filter expression may
-/// hold spaces or shell metacharacters without being split or executed.
+/// `-s`, filterspecs such as `MyTag:D`, `-e` and `-m` have no effect
+/// under `-B`, as logcat applies them only to its text output: filter by
+/// tag and priority on the returned [`LogEntry`] values instead. `-b`
+/// and `--pid` do apply, as they choose what logcat reads.
+///
+/// Each element is one argument to `logcat`, so an argument may hold
+/// spaces or shell metacharacters without being split or executed.
 ///
 /// `buf` is the caller-owned buffer used both for channel IO and for
 /// accumulating binary stdout data.  It must be at least 4 bytes longer
