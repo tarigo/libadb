@@ -3263,7 +3263,7 @@ mod close_tests {
 
     /// A writer is parked for credit on a channel that has none when
     /// the close fails. The slot comes back and the writer is woken,
-    /// which is all a close promises however its CLSE fares.
+    /// which is all a close promises if its CLSE fails.
     #[test]
     fn a_close_that_fails_gives_the_slot_back_and_wakes_parked_writers() {
         for (kind, left) in FAILED_WRITES {
