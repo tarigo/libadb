@@ -4,6 +4,9 @@ use super::format::{HEADER_V3_SIZE, HEADER_V4_SIZE, LOGGER_ENTRY_MAX_LEN};
 use super::*;
 use alloc::{format, vec};
 use core::cell::Cell;
+use core::future::Future;
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
 
 use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
 use crate::base::mock::{clse, cnxn, now, okay, wrte, Mock, MockError, NoAuth};
@@ -590,6 +593,56 @@ fn a_transport_that_ends_is_not_taken_for_a_closed_channel() {
     let (got, _) = read_to_end(&mut conn, &mut buf);
 
     assert!(matches!(got, Err(Error::UnexpectedEof)), "got {got:?}");
+}
+
+/// `fut`'s output, or `None` if it is still waiting after a few polls.
+fn poll_briefly<F: Future>(fut: F) -> Option<F::Output> {
+    let mut fut = pin!(fut);
+    let mut cx = Context::from_waker(Waker::noop());
+    (0..8).find_map(|_| match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(out) => Some(out),
+        Poll::Pending => None,
+    })
+}
+
+#[test]
+fn a_call_dropped_anywhere_in_the_stream_costs_nothing() {
+    // The second entry starts in one stdout frame and ends in another,
+    // with a stderr frame between them.
+    let stdout = entries(2, HEADER_V4_SIZE);
+    let mut wire = frame(FrameId::Stdout, &stdout[..HEADER_V4_SIZE + 3]);
+    wire.extend_from_slice(&frame(FrameId::Stderr, b"warning\n"));
+    wire.extend_from_slice(&frame(FrameId::Stdout, &stdout[HEADER_V4_SIZE + 3..]));
+    wire.extend_from_slice(&frame(FrameId::Exit, &[0]));
+    for cut in 0..wire.len() {
+        let mut conn = device_sending(&[]);
+        let mut buf = [0u8; 128];
+        let mut logcat = now(open(&mut conn, &[], &mut buf)).unwrap();
+        let device = logcat.channel.session.transport_mut();
+        device.parks_when_drained();
+        if cut > 0 {
+            device.feed(&wrte(1, &wire[..cut]));
+        }
+
+        let mut pids = Vec::new();
+        while let Some(entry) = poll_briefly(logcat.read_entry()) {
+            pids.push(entry.unwrap().pid);
+        }
+
+        let device = logcat.channel.session.transport_mut();
+        device.feed(&wrte(1, &wire[cut..]));
+        let end = loop {
+            match now(logcat.read_entry()) {
+                Ok(entry) => pids.push(entry.pid),
+                end => break end,
+            }
+        };
+        assert!(
+            matches!(end, Err(Error::ChannelClosed)),
+            "dropped {cut} bytes in: {end:?}"
+        );
+        assert_eq!(pids, [0, 1], "dropped {cut} bytes in");
+    }
 }
 
 #[test]

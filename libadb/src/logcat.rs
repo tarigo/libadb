@@ -178,6 +178,12 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     /// [`Error::ReceiveBufferFull`] when an entry is too long for the
     /// buffer passed to [`open`].
     ///
+    /// As safe to drop as the [`Channel`] read it waits in, which can lose
+    /// packet bytes on a transport whose reads are not cancel-safe: see
+    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety). The call
+    /// itself loses nothing, as what arrived stays in the buffer for the
+    /// next one.
+    ///
     /// The only heap allocations are the `tag` and `message` fields
     /// inside the returned [`LogEntry`], and the stderr text it keeps.
     pub async fn read_entry(&mut self) -> Result<LogEntry, Error<S::IoError>> {
