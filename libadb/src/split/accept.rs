@@ -1,7 +1,3 @@
-//! Channels the device opens: [`SplitIncoming`], one request awaiting a
-//! verdict, and [`IncomingListener`], which waits for them while
-//! [`Reader::run`] dispatches.
-
 use alloc::sync::Arc;
 use core::convert::Infallible;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -32,11 +28,7 @@ where
 {
     pub(super) shared: Arc<Shared<WH>>,
     pub(super) pending: Option<PendingOpen>,
-    /// A slot reserved by `accept` before READY is on the wire. `Drop`
-    /// frees it if the future is dropped or fails before that.
     pub(super) reserved: Option<ChannelId>,
-    /// Set by the reader when the device withdraws this OPEN (a CLSE
-    /// naming no local id) while the request is staged here.
     pub(super) cancelled: Arc<AtomicBool>,
 }
 
@@ -74,9 +66,6 @@ where
 
         let reserved = {
             let mut chs = shared.lock_channels();
-            // Under the channels lock, where withdrawals are handled: the
-            // flag is set by now, or the withdrawal comes after the slot
-            // below exists and closes it like a remote CLSE.
             if self.cancelled.load(Ordering::Relaxed) {
                 self.pending.take();
                 return Err(Error::ChannelClosed);
@@ -86,11 +75,9 @@ where
             })
         };
         let Some(ch) = reserved else {
-            // No slot to give: refuse, and consume the request.
             self.answer(&Packet::refuse(remote)).await?;
             return Err(Error::NoFreeChannels);
         };
-        // Armed for rollback until READY is committed.
         self.reserved = Some(ch);
 
         let payload = match shared.negotiated.advertised_credit() {
@@ -105,7 +92,6 @@ where
         ))
         .await?;
 
-        // READY is out: the slot is committed.
         self.reserved = None;
         Ok(ch)
     }
@@ -132,9 +118,6 @@ where
         self.answer(&Packet::refuse(remote)).await
     }
 
-    /// Send `verdict`. That settles the request, as does finding the
-    /// device gone, since it needs no answer then. Any other failure
-    /// leaves the request undecided, for `Drop` to put back.
     async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<WH as ErrorType>::Error>> {
         let mut wh = self.shared.lock_write_half().await;
         let sent = send_pkt(
@@ -156,20 +139,13 @@ where
     WH: Write,
 {
     fn drop(&mut self) {
-        // A slot reserved but never confirmed by READY: release it.
         if let Some(ch) = self.reserved.take() {
             self.shared.lock_channels().free(ch);
         }
-        // Unregister and requeue under both locks at once, in the same
-        // staged-then-incoming order `Shared::withdraw_open` takes: a
-        // withdrawal must find the request in one collection or the
-        // other, never in the gap between them.
         let mut staged = self.shared.lock_staged();
         let mut incoming = self.shared.lock_incoming();
         staged.retain(|(_, flag)| !Arc::ptr_eq(flag, &self.cancelled));
         if let Some(pending) = self.pending.take() {
-            // A withdrawn request is dead; anything else goes back, to
-            // a listener that may already be waiting for one.
             if !self.cancelled.load(Ordering::Relaxed) {
                 incoming.push_front(pending);
                 self.shared.incoming_signal.notify(usize::MAX);
@@ -203,8 +179,6 @@ where
     pub async fn accept(&self) -> Result<SplitIncoming<WH>, Error<<WH as ErrorType>::Error>> {
         let mut listener: Option<EventListener> = None;
         loop {
-            // A request taken now could get no verdict out: it would only
-            // go back to the queue.
             if self.shared.desync.check::<Infallible>().is_err() {
                 self.shared.check_live()?;
             }
@@ -212,7 +186,6 @@ where
                 return Ok(incoming);
             }
             self.shared.check_live()?;
-            // Register, then look once more before waiting, as reads do.
             match listener.take() {
                 Some(waiting) => waiting.await,
                 None => listener = Some(self.shared.incoming_signal.listen()),

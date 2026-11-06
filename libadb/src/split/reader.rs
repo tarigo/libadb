@@ -1,6 +1,3 @@
-//! [`Reader`], the half that receives packets and dispatches them to
-//! the channels they are for.
-
 use alloc::sync::Arc;
 use bytes::BytesMut;
 use core::convert::Infallible;
@@ -29,15 +26,9 @@ use crate::transport::ReadCancelSafety;
 #[cfg(doc)]
 use super::{IncomingListener, Writer};
 
-/// What a fault confined to one channel — data past its receive cap, a
-/// READY it cannot take — costs the call that dispatched it.
 #[derive(Clone, Copy)]
 enum OnFault {
-    /// Fail the call, whichever channel it is on, as on a
-    /// [`Connection`](crate::Connection): the reader-driven contract.
     FailCall,
-    /// Close that channel alone and carry on: what [`Reader::run`]
-    /// does, since its failing would take every channel down.
     CloseChannel,
 }
 
@@ -127,15 +118,10 @@ where
         self.await_open_ack(ch, &mut guard).await
     }
 
-    /// Refuse queued OPENs past the cap, which a dropped refusal left
-    /// behind, before taking any new packet in, so repeated cancellation
-    /// cannot grow the queue. `accept_incoming` reads only with it empty.
     async fn drain_overflow(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
         let cap = self.shared.negotiated.config.max_channels();
         while let Some(excess) = self.shared.take_incoming_past(cap) {
             match excess.reject().await {
-                // The device is gone, but what it sent can still be
-                // received.
                 Err(e) if connection_gone(&e) => {}
                 refused => refused?,
             }
@@ -143,9 +129,6 @@ where
         Ok(())
     }
 
-    /// The next packet, once what is owed is out: the device may be
-    /// waiting for that, and receiving nothing until then bounds the
-    /// list. Only this call sees the connection end, so it tells the rest.
     async fn recv(&mut self) -> Result<Packet, Error<<RH as ErrorType>::Error>> {
         loop {
             self.shared.check_live()?;
@@ -191,7 +174,6 @@ where
                         }
                     };
                     if let Err(e) = accepted {
-                        // The device holds an end it takes for open.
                         let fault = ChannelFault::Protocol(e);
                         let ids = ChannelIds {
                             local: ch.local,
@@ -250,15 +232,9 @@ where
     pub async fn run(mut self) -> Result<Infallible, Error<<RH as ErrorType>::Error>> {
         self.shared.check_live()?;
         loop {
-            // Before every receive, the first included, so nothing left
-            // over — from before `run` or by the last packet — waits for
-            // traffic that may never come: requests nobody listens for
-            // are refused, and `recv` pays what is owed.
             if self.shared.listeners.load(Ordering::Acquire) == 0 {
                 while let Some(refused) = self.shared.take_incoming() {
                     match refused.reject().await {
-                        // The device is gone, but what it sent can still
-                        // be received.
                         Err(e) if connection_gone(&e) => {}
                         refused => refused?,
                     }
@@ -320,9 +296,6 @@ where
         ch: ChannelId,
         buf: &mut [u8],
     ) -> Result<usize, Error<<RH as ErrorType>::Error>> {
-        // Here too: a read that has its data waits for no packet, and
-        // the device, owed an OKAY, may never send one. A failure here is
-        // a desync, reported once nothing is left to hand over.
         let _ = self.shared.pay().await;
         if let Some(n) = self.shared.take_buffered(ch, buf).await? {
             return Ok(n);
@@ -333,8 +306,6 @@ where
         self.drain_overflow().await?;
         loop {
             let pkt = self.recv().await?;
-            // What the packet left for this channel goes first: what
-            // failed along the way is the next call's to report.
             let dispatched = self.dispatch(pkt, OnFault::FailCall).await;
             match (self.shared.take_buffered(ch, buf).await, dispatched) {
                 (Ok(Some(n)), _) => return Ok(n),
@@ -379,8 +350,6 @@ where
         self.shared.take_incoming()
     }
 
-    /// Act on `pkt`, ignoring a failed answer if the device is gone:
-    /// there is nobody to answer, and what it sent can still be received.
     async fn dispatch(
         &mut self,
         pkt: Packet,
@@ -435,9 +404,6 @@ where
                 opening,
                 fault,
             } => {
-                // An opener waits on its slot whoever drives the
-                // connection, and the device holds an end it takes for
-                // open: under either policy both have to hear of it.
                 if opening || matches!(on_fault, OnFault::CloseChannel) {
                     self.shared.fail_channel(idx, ids, fault).await?;
                 }

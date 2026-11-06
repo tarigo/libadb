@@ -1,6 +1,3 @@
-//! What the [`Reader`] and every [`Writer`] of one connection share,
-//! and the guards that tidy up after a call dropped halfway.
-
 use alloc::sync::Arc;
 use async_lock::Mutex as AsyncMutex;
 use core::convert::Infallible;
@@ -46,71 +43,35 @@ impl FlowSignal {
         self.event.listen()
     }
 
-    /// Wake every writer parked on this channel. Only a prompt to look
-    /// again: the slot's send queue decides who goes, under the channels
-    /// mutex, so a missed or stolen wake cannot lose credit.
     pub(super) fn wake(&self) {
         self.event.notify(usize::MAX);
     }
 }
 
-/// What the [`Reader`] and every [`Writer`] of one connection share.
 pub(crate) struct Shared<WH> {
     pub(super) write_half: AsyncMutex<WH>,
     channels: Mutex<ChannelTable>,
-    /// One per slot of `channels`.
     pub(super) signals: Box<[FlowSignal]>,
     pub(super) negotiated: Negotiated,
     pub(super) desync: DesyncFlag,
-    /// Device-initiated OPENs awaiting [`Reader::accept_incoming`] or
-    /// [`IncomingListener::accept`], which take from the same queue.
     incoming: Mutex<IncomingQueue>,
-    /// Requests staged out of the queue in an owned [`SplitIncoming`],
-    /// by remote id — the only place a device cancellation can still
-    /// reach them once they have left `incoming`.
     staged: Mutex<Vec<(RemoteId, Arc<AtomicBool>)>>,
-    /// Set once the connection has ended: a receive failed for good or
-    /// the [`Reader`] went. Nothing dispatches packets after that, so
-    /// waiting for one would never end.
     stopped: AtomicBool,
-    /// Set with `stopped` when a receive finds the stream over. The
-    /// [`Reader`] going sets only `stopped`: nothing reads the device
-    /// then, but the device can still hear a CLSE.
     stream_over: AtomicBool,
-    /// Whether the connection was still in step when `stopped` was set.
-    /// A read gives up on its OKAY at the end, and the half packet that
-    /// leaves says nothing about how the connection ended: see
-    /// [`check_in_step`](Self::check_in_step).
     ended_in_step: AtomicBool,
-    /// Live [`IncomingListener`]s. While there is one, [`Reader::run`]
-    /// keeps device-initiated OPENs for it instead of refusing them.
     pub(super) listeners: AtomicUsize,
-    /// Woken when an OPEN is queued, for [`IncomingListener::accept`].
     pub(super) incoming_signal: Event,
-    /// Woken when a debt is noted and by [`wake_all`](Self::wake_all).
-    /// A receive in flight listens here, and so does
-    /// [`until`](Self::until).
     receive_signal: Event,
-    /// What the device is owed, oldest first: see [`Owed`]. Nothing is
-    /// received until this is empty, so it holds one packet's debt and a
-    /// CLSE per slot and per queued request, up to 2 × `max_channels` + 2.
     owed: Mutex<VecDeque<Owed>>,
 }
 
-/// A packet the device is owed, noted before any wait, since a call can
-/// be dropped there and `Drop` cannot send. The next write, open, close
-/// or receive sends it: see [`lock_write`](Shared::lock_write).
 #[derive(Clone, Copy)]
 pub(super) enum Owed {
-    /// The OKAY for data that arrived.
     Okay(PendingAck),
-    /// The CLSE for an end the device holds open: an OPEN given up on as
-    /// it answered, a channel broken by a fault, or one closed here.
     Close(ChannelIds),
 }
 
 impl<WH> Shared<WH> {
-    /// The shared half of a connection being split.
     pub(crate) fn new(
         write_half: WH,
         negotiated: Negotiated,
@@ -154,17 +115,11 @@ impl<WH> Shared<WH> {
         self.owed.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Note a packet the device is owed. The caller has awaited nothing
-    /// yet, so from here no dropped future can lose it.
     pub(super) fn owe(&self, debt: Owed) {
         self.lock_owed().push_back(debt);
         self.receive_signal.notify(usize::MAX);
     }
 
-    /// Send what is owed, if anything is and the connection is live.
-    /// Once it is not, a call that only reports that, or hands over what
-    /// arrived, must not wait for the write half: what is owed stays for
-    /// the next write, open or close.
     pub(super) async fn pay(&self) -> Result<(), Error<<WH as ErrorType>::Error>>
     where
         WH: Write,
@@ -175,9 +130,6 @@ impl<WH> Shared<WH> {
         Ok(())
     }
 
-    /// Reserve a free slot and send OPEN for `destination` — the start
-    /// both openers share. The guard frees the slot unless the opener
-    /// disarms it once the device answers.
     pub(super) async fn send_open(
         self: &Arc<Self>,
         destination: &[u8],
@@ -209,9 +161,6 @@ impl<WH> Shared<WH> {
         Ok((ch, guard))
     }
 
-    /// Close a channel a packet broke on its own: its calls fail with
-    /// `fault`. The CLSE goes out even once the slot is gone, as the
-    /// device still holds its end, and adbd ignores a second CLSE.
     pub(super) async fn fail_channel(
         &self,
         idx: usize,
@@ -236,14 +185,6 @@ impl<WH> Shared<WH> {
         self.pay().await
     }
 
-    /// Take what `ch` has buffered into `buf`, sending the OKAY it owes
-    /// first: `Ok(None)` while an open channel has nothing buffered.
-    ///
-    /// Bytes leave the slot only once their OKAY is sent, so a call
-    /// dropped at any wait has taken nothing. A failed OKAY is the next
-    /// call's to report, and the end of the connection calls it off. The
-    /// loop decides again after each wait: another read may have taken
-    /// the settled bytes.
     pub(super) async fn take_buffered(
         &self,
         ch: ChannelId,
@@ -259,9 +200,6 @@ impl<WH> Shared<WH> {
                     self.check_in_step()?;
                 }
                 let slot = chs.get_mut(ch).ok_or(Error::ChannelClosed)?;
-                // Nothing to take, nothing this take acknowledges, or
-                // no connection to send it on: no OKAY, so no write half
-                // to wait for.
                 if self.check_live::<Infallible>().is_err() || !slot.take_acks(buf.len()) {
                     return slot.take_buffered(buf);
                 }
@@ -271,9 +209,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Drive `work` until it is done, or drop it where it stands once
-    /// `over` holds and return `None`. `over` is asked before the first
-    /// poll; whatever makes it hold has to wake `receive_signal`.
     pub(super) async fn until<F: Future>(
         &self,
         over: impl Fn(&Self) -> bool,
@@ -293,8 +228,6 @@ impl<WH> Shared<WH> {
         .await
     }
 
-    /// Settle a take of up to `want` bytes from `ch` and send the OKAY it
-    /// owes, if that still stands by the time the write half comes free.
     async fn acknowledge_take(&self, ch: ChannelId, want: usize)
     where
         WH: Write,
@@ -316,9 +249,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Wrap a request that never reached the queue in its owned
-    /// holder, registering it so a device cancellation can still find
-    /// it.
     pub(super) fn stage_incoming(self: &Arc<Self>, pending: PendingOpen) -> SplitIncoming<WH>
     where
         WH: Write,
@@ -326,8 +256,6 @@ impl<WH> Shared<WH> {
         self.hold_incoming(pending, &mut self.lock_staged())
     }
 
-    /// Take the oldest queued device-initiated OPEN into its owned
-    /// holder.
     pub(super) fn take_incoming(self: &Arc<Self>) -> Option<SplitIncoming<WH>>
     where
         WH: Write,
@@ -335,12 +263,6 @@ impl<WH> Shared<WH> {
         self.take_incoming_past(0)
     }
 
-    /// [`take_incoming`](Self::take_incoming), but only while queued
-    /// and staged requests together exceed `cap`.
-    ///
-    /// Holds both locks at once, staged then incoming, the order `Drop`
-    /// and [`withdraw_open`](Self::withdraw_open) take them, so a racing
-    /// withdrawal finds the request in one place or the other.
     pub(super) fn take_incoming_past(self: &Arc<Self>, cap: usize) -> Option<SplitIncoming<WH>>
     where
         WH: Write,
@@ -372,9 +294,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Queue a device-initiated OPEN, or refuse it once queued and staged
-    /// requests fill the channel table. The refusal goes through
-    /// [`SplitIncoming::reject`], so a dropped call puts the request back.
     pub(super) async fn queue_or_refuse(
         self: &Arc<Self>,
         pending: PendingOpen,
@@ -401,13 +320,6 @@ impl<WH> Shared<WH> {
         Ok(())
     }
 
-    /// Act on the device withdrawing an OPEN (a CLSE that names no local
-    /// id), wherever the request has got to.
-    ///
-    /// Holds channels, staged and incoming at once, in that order, the
-    /// one accept and `Drop` take, so the withdrawal cannot miss the
-    /// request. The slot is looked for again because a racing accept may
-    /// have installed it after this packet was classified.
     pub(super) fn withdraw_open(&self, remote: RemoteId) {
         let mut chs = self.lock_channels();
         let staged = self.lock_staged();
@@ -415,8 +327,6 @@ impl<WH> Shared<WH> {
         let closed = chs.close_remote(remote);
         if closed.is_none() {
             incoming.withdraw(remote);
-            // A request staged out of the queue is cancelled
-            // through its flag: the verdict observes it.
             for (id, flag) in staged.iter() {
                 if *id == remote {
                     flag.store(true, Ordering::Relaxed);
@@ -433,13 +343,11 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Mark the stream over, which ends the connection.
     pub(super) fn end_stream(&self) {
         self.stream_over.store(true, Ordering::Release);
         self.stop();
     }
 
-    /// Mark the connection ended and wake every waiter to see it.
     pub(super) fn stop(&self) {
         if !self.stopped.load(Ordering::Acquire) {
             let in_step = self.desync.check::<Infallible>().is_ok();
@@ -457,9 +365,6 @@ impl<WH> Shared<WH> {
         self.receive_signal.notify(usize::MAX);
     }
 
-    /// Resolve once a receive in flight has to give way: a write was
-    /// abandoned mid-packet, or the device is owed a packet nothing else
-    /// may send. Unless `raced`, this is only polled before each read.
     pub(super) async fn receive_interrupted(&self, raced: bool) {
         let mut listener: Option<EventListener> = None;
         loop {
@@ -469,7 +374,6 @@ impl<WH> Shared<WH> {
             if !raced {
                 core::future::pending::<()>().await;
             }
-            // Register, then look once more before waiting, as reads do.
             match listener.take() {
                 Some(waiting) => waiting.await,
                 None => listener = Some(self.receive_signal.listen()),
@@ -477,14 +381,12 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Resolve once `over` holds.
     async fn once(&self, over: impl Fn(&Self) -> bool) {
         let mut listener: Option<EventListener> = None;
         loop {
             if over(self) {
                 return;
             }
-            // Register, then look once more before waiting, as reads do.
             match listener.take() {
                 Some(waiting) => waiting.await,
                 None => listener = Some(self.receive_signal.listen()),
@@ -492,22 +394,14 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Whether [`check_live`](Self::check_live) fails.
     fn has_ended(&self) -> bool {
         self.check_live::<Infallible>().is_err()
     }
 
-    /// Whether a CLSE is called off: the stream is over, so the device
-    /// cannot hear it, or the connection lost step, so it cannot be sent.
-    /// The [`Reader`] going is neither: a close then goes on waiting.
     pub(super) fn clse_called_off(&self) -> bool {
         self.stream_over.load(Ordering::Acquire) || self.desync.check::<Infallible>().is_err()
     }
 
-    /// The result of a close whose CLSE was
-    /// [called off](Self::clse_called_off): `Ok` with the stream over,
-    /// even for its own packet given up part way, unless the connection
-    /// had lost step by then.
     pub(super) fn check_close<E>(&self) -> Result<(), Error<E>> {
         if self.stream_over.load(Ordering::Acquire) {
             self.check_in_step()
@@ -516,9 +410,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Fail once waiting can no longer end well: a write abandoned
-    /// mid-packet desynchronized the connection, or it ended and nothing
-    /// will be dispatched any more.
     pub(super) fn check_live<E>(&self) -> Result<(), Error<E>> {
         self.check_in_step()?;
         if self.stopped.load(Ordering::Acquire) {
@@ -527,13 +418,7 @@ impl<WH> Shared<WH> {
         Ok(())
     }
 
-    /// Fail if a packet was left half-written, for a call that waits on
-    /// the device rather than writes. Such a call goes by whichever came
-    /// first: a packet left behind after the end of the connection, as
-    /// by a read giving up on its OKAY, changes nothing.
     pub(super) fn check_in_step<E>(&self) -> Result<(), Error<E>> {
-        // In this order: whoever sees a desync raised because of the end
-        // also sees what `stop` recorded before it.
         let in_step = self.desync.check();
         if in_step.is_err() && self.ended_in_step.load(Ordering::Acquire) {
             return Ok(());
@@ -541,10 +426,6 @@ impl<WH> Shared<WH> {
         in_step
     }
 
-    /// Take the write half for the caller's own packet, sending nothing
-    /// that is owed: for a call that promises its wait is safe to drop,
-    /// which it would not be if it could be caught writing someone
-    /// else's packet.
     pub(super) async fn lock_write_half(&self) -> WriteLock<'_, WH> {
         WriteLock {
             guard: self.write_half.lock().await,
@@ -552,9 +433,6 @@ impl<WH> Shared<WH> {
         }
     }
 
-    /// Take the write half for one packet, once what is owed is out. A
-    /// debt leaves the list only once it is on the wire, so a call
-    /// dropped on its way there has lost nothing.
     pub(super) async fn lock_write(
         &self,
     ) -> Result<WriteLock<'_, WH>, Error<<WH as ErrorType>::Error>>
@@ -590,8 +468,6 @@ impl<WH> Shared<WH> {
             };
             match paid {
                 Ok(()) => drop(self.lock_owed().pop_front()),
-                // The device is gone, so it is owed nothing, and what it
-                // sent can still be received.
                 Err(e) if connection_gone(&e) => {
                     self.lock_owed().clear();
                     return Ok(lock);
@@ -602,10 +478,6 @@ impl<WH> Shared<WH> {
     }
 }
 
-/// The write half, held for one packet. Letting go of it after a packet
-/// was abandoned, by a dropped future or a transport failing mid-write,
-/// wakes every waiter to see that rather than wait for traffic that
-/// cannot come.
 pub(super) struct WriteLock<'a, WH> {
     guard: async_lock::MutexGuard<'a, WH>,
     shared: &'a Shared<WH>,
@@ -662,8 +534,6 @@ impl<WH> Drop for SlotGuard<WH> {
         let Some(slot) = chs.free(self.ch) else {
             return;
         };
-        // The device accepted before the opener gave up: its end is
-        // open, and the CLSE for it is owed to whoever writes next.
         if let Some(ids) = slot.ids().filter(|_| !slot.is_failed()) {
             self.shared.owe(Owed::Close(ids));
         }
@@ -712,9 +582,6 @@ impl<WH> Drop for CreditGuard<'_, WH> {
     }
 }
 
-/// A place in a channel's send queue. Leaving without being served —
-/// the write future was dropped mid-wait — gives the turn up, so the
-/// queue keeps moving.
 pub(super) struct QueueGuard<'a, WH> {
     pub(super) shared: &'a Shared<WH>,
     pub(super) ch: ChannelId,

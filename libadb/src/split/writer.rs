@@ -1,6 +1,3 @@
-//! [`Writer`], the cloneable half every channel operation can go
-//! through, and the close path it shares with the [`Reader`].
-
 use alloc::sync::Arc;
 use core::convert::Infallible;
 use core::future::{poll_fn, Future};
@@ -92,7 +89,6 @@ where
         &self.shared.negotiated.device_banner
     }
 
-    /// Everything the handshake settled, for the crate's own helpers.
     pub(crate) fn negotiated(&self) -> &Negotiated {
         &self.shared.negotiated
     }
@@ -129,8 +125,6 @@ where
         self.await_open_ack(ch, &mut guard).await
     }
 
-    /// Wait for [`Reader::run`] to dispatch the device's answer to the
-    /// OPEN `ch` was reserved for.
     async fn await_open_ack(
         &self,
         ch: ChannelId,
@@ -145,11 +139,6 @@ where
                 match chs.get(ch) {
                     Some(slot) => match slot.state() {
                         ChannelState::Opening => {}
-                        // A remote id comes only with a READY the slot
-                        // took: without one the device refused the OPEN,
-                        // or answered it with a READY that failed the
-                        // slot. With one the channel was opened, even if
-                        // it has been closed since.
                         ChannelState::Closed if slot.ids().is_none() => {
                             return Err(slot.closed_error())
                         }
@@ -219,9 +208,6 @@ where
                 return Ok(SelectResult::Data(n));
             }
             self.shared.check_live()?;
-            // Register, then look once more before waiting: data that
-            // lands in between still wakes us, and a read that finds
-            // data at once never registers at all.
             let Some(waiting) = listener.as_mut() else {
                 listener = Some(signal.listen());
                 continue;
@@ -365,10 +351,6 @@ where
             return Err(Error::ChannelClosed);
         };
 
-        // Take a place in the send queue. Only its head may reserve, so
-        // concurrent writers are served in arrival order: a writer that
-        // loops straight back after sending queues behind the ones
-        // already waiting and cannot drain a grant past them.
         let place = {
             let mut chs = self.shared.lock_channels();
             let Some(slot) = chs.get_mut(ch) else {
@@ -391,8 +373,6 @@ where
             match self.try_reserve(ch, want, place) {
                 Some(Ok((n, more))) => {
                     queue.served = true;
-                    // Budget survived the reservation: prompt the next
-                    // writer in line to take its share.
                     if more {
                         signal.wake();
                     }
@@ -407,7 +387,6 @@ where
         }
     }
 
-    /// Reserve send credit if it is `place`'s turn and budget allows.
     #[allow(clippy::type_complexity)]
     fn try_reserve(
         &self,
@@ -432,9 +411,6 @@ where
     }
 }
 
-/// Free `ch`'s slot, wake whoever waits on it, then owe its CLSE and pay
-/// that: the close path shared by [`Writer::close_channel`] and
-/// [`Reader::close_channel`].
 pub(super) async fn close_channel_via<WH>(
     shared: &Shared<WH>,
     ch: ChannelId,
