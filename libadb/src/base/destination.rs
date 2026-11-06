@@ -5,12 +5,9 @@ use alloc::vec::Vec;
 
 use crate::error::ProtocolError;
 
-/// Why a destination could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DestinationError {
-    /// The destination does not fit the buffer the caller provided.
     TooLong,
-    /// A NUL byte would have cut the destination short on the device.
     Nul,
 }
 
@@ -23,18 +20,11 @@ impl<E> From<DestinationError> for crate::error::Error<E> {
     }
 }
 
-/// Write `prefixes` verbatim, then `args` shell-quoted, NUL-terminated:
-/// adbd hands the destination to `sh -c`, so quoting keeps each of `args`
-/// a single argument, as [`build_nul_destination`] does on the `abb` path.
 pub(crate) fn write_destination(
     buf: &mut [u8],
     prefixes: &[&[u8]],
     args: &[&str],
 ) -> Result<usize, DestinationError> {
-    // Checked up front, not as each piece is written: a buffer that
-    // runs out early would otherwise report `TooLong` for input the
-    // `abb` path rejects outright, and the two services would disagree
-    // over the same call again.
     if prefixes.iter().any(|p| p.contains(&0)) || args.iter().any(|a| a.as_bytes().contains(&0)) {
         return Err(DestinationError::Nul);
     }
@@ -60,9 +50,6 @@ fn write_bytes(buf: &mut [u8], len: usize, src: &[u8]) -> Result<usize, Destinat
     Ok(end)
 }
 
-/// Characters every POSIX shell passes through untouched — the set
-/// `shlex.quote` uses. An argument built only from these is written as
-/// it stands, which keeps ordinary destinations readable in logs.
 fn is_shell_safe(b: u8) -> bool {
     b.is_ascii_alphanumeric()
         || matches!(
@@ -75,8 +62,6 @@ fn write_quoted(buf: &mut [u8], len: usize, arg: &[u8]) -> Result<usize, Destina
     if !arg.is_empty() && arg.iter().all(|&b| is_shell_safe(b)) {
         return write_bytes(buf, len, arg);
     }
-    // Single quotes suspend every shell expansion, and the one thing
-    // they cannot hold is a single quote: close, escape it, reopen.
     let mut len = write_bytes(buf, len, b"'")?;
     for &b in arg {
         len = if b == b'\'' {
@@ -88,9 +73,6 @@ fn write_quoted(buf: &mut [u8], len: usize, arg: &[u8]) -> Result<usize, Destina
     write_bytes(buf, len, b"'")
 }
 
-/// `service`, then each of `args` NUL-terminated, for the `abb` services.
-/// adbd drops an empty argument, which would run a different command, so
-/// one is refused as a NUL is.
 pub(crate) fn build_nul_destination(
     service: &str,
     args: &[&str],

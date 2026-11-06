@@ -40,31 +40,20 @@ where
     T: Read + Write,
 {
     transport: T,
-    /// [`ConnectionConfig::max_channels`] slots, allocated up front.
     table: ChannelTable,
     negotiated: Negotiated,
     recv_buf: BytesMut,
     pub(crate) desync: DesyncFlag,
-    /// Device-initiated OPENs awaiting
-    /// [`accept_incoming`](Self::accept_incoming). Bounded by the size of
-    /// the table; overflow is refused with CLSE on arrival.
     incoming: IncomingQueue,
 }
 
-/// What a connection is made of, handed over whole when it is split.
 #[cfg(feature = "split")]
 pub(crate) struct SplitParts<T> {
-    /// The transport, still in one piece.
     pub(crate) transport: T,
-    /// Whatever of a packet was read and not decoded yet.
     pub(crate) recv_buf: BytesMut,
-    /// What the handshake settled.
     pub(crate) negotiated: Negotiated,
-    /// The channels, open or opening.
     pub(crate) table: ChannelTable,
-    /// Device-initiated OPENs still waiting for a verdict.
     pub(crate) incoming: IncomingQueue,
-    /// Whether a packet was already abandoned mid-write.
     pub(crate) desync: DesyncFlag,
 }
 
@@ -120,7 +109,6 @@ where
         self.negotiated.delayed_ack
     }
 
-    /// Everything the handshake settled, for the crate's own helpers.
     pub(crate) fn negotiated(&self) -> &Negotiated {
         &self.negotiated
     }
@@ -237,10 +225,6 @@ where
         destination: &[u8],
     ) -> Result<ChannelId, Error<<T as ErrorType>::Error>> {
         self.desync.check()?;
-        // The slot stays free until the device answers: an opener given
-        // up on leaves nothing behind, and its READY, should it come,
-        // finds no channel and is answered with CLSE. Nothing takes the
-        // slot meanwhile, since dispatch only touches slots in use.
         let ch = self.table.allocate()?;
         let credit = self.negotiated.advertised_credit().unwrap_or(0);
         let checksum = self.negotiated.checksum();
@@ -274,8 +258,6 @@ where
                     let slot = self.table.insert_opening(ch);
                     if let Err(e) = slot.accept_open_ready(remote, &pkt.data) {
                         self.table.free(ch);
-                        // The device holds an end it takes for open:
-                        // close it by its id.
                         let checksum = self.negotiated.checksum();
                         let ids = ChannelIds {
                             local: ch.local,
@@ -506,8 +488,6 @@ where
         self.recv_data(ch, buf, interrupt, race).await
     }
 
-    /// Buffered data first, then packets off the wire until one is for
-    /// `ch`, with `interrupt` and `race` as in [`recv_pkt_or`].
     async fn recv_data<F: Future>(
         &mut self,
         ch: ChannelId,
@@ -536,9 +516,6 @@ where
                 Received::Interrupted(val) => return Ok(SelectResult::Interrupted(val)),
             };
             match pkt.command {
-                // Straight to the caller, but only whole: if the call
-                // were dropped during the OKAY, what stayed in the slot
-                // would read as if no bytes came before it.
                 Command::Write if pkt.arg1 == ids.local.raw() && pkt.data.len() <= buf.len() => {
                     let n = pkt.data.len();
                     buf[..n].copy_from_slice(&pkt.data);
@@ -555,9 +532,6 @@ where
                     return Err(Error::ChannelClosed);
                 }
                 _ => {
-                    // What the packet left for this channel goes first:
-                    // what failed along the way is the next call's to
-                    // report.
                     let dispatched = self.dispatch(pkt).await;
                     match (self.take_buffered(ch, buf).await, dispatched) {
                         (Ok(Some(n)), _) => return Ok(SelectResult::Data(n)),
@@ -569,10 +543,6 @@ where
         }
     }
 
-    /// Take what `ch` has buffered into `buf`, sending the OKAY it owes
-    /// first: `Ok(None)` while an open channel has nothing buffered. The
-    /// OKAY goes first so that a call dropped during it leaves the bytes
-    /// readable. A failed OKAY is the next call's to report.
     async fn take_buffered(
         &mut self,
         ch: ChannelId,
@@ -600,8 +570,6 @@ where
         send_okay_to(&mut self.transport, &self.desync, ack, mode, checksum).await
     }
 
-    /// Act on `pkt`, ignoring a failed answer if the device is gone:
-    /// there is nobody to answer, and what it sent can still be received.
     async fn dispatch(&mut self, pkt: Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         match self.act_on(pkt).await {
             Err(e) if connection_gone(&e) => Ok(()),
@@ -618,8 +586,6 @@ where
                 credit,
                 destination,
             } => {
-                // The queue is bounded by the channel table: past that, an
-                // OPEN storm is refused on arrival rather than remembered.
                 if self.incoming.len() >= self.table.len() {
                     let refusal = Packet::refuse(remote);
                     send_pkt(&mut self.transport, &self.desync, &refusal, checksum).await?;
@@ -636,8 +602,6 @@ where
                 let close = Packet::close(ids);
                 send_pkt(&mut self.transport, &self.desync, &close, checksum).await?;
             }
-            // The fault surfaces on whichever call is driving the
-            // connection, and the channel itself stays as it was.
             DispatchOutcome::ChannelFault { fault, .. } => return Err(fault.error()),
             _ => {}
         }

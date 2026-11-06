@@ -1,6 +1,3 @@
-//! [`Incoming`]: a channel the device opened, awaiting a verdict on a
-//! connection that is not split.
-
 use embedded_io::ErrorType;
 use embedded_io_async::{Read, Write};
 
@@ -23,8 +20,6 @@ where
 {
     pub(super) conn: &'c mut Connection<T>,
     pub(super) pending: Option<PendingOpen>,
-    /// A slot reserved by `accept` before READY is on the wire. `Drop`
-    /// frees it if the future is dropped or fails before that.
     pub(super) reserved: Option<ChannelId>,
 }
 
@@ -64,7 +59,6 @@ where
             return Err(Error::NoFreeChannels);
         };
         self.conn.table.insert_accepted(ch, remote, credit);
-        // Armed for rollback until READY is committed.
         self.reserved = Some(ch);
 
         let payload = match self.conn.negotiated.advertised_credit() {
@@ -79,7 +73,6 @@ where
         ))
         .await?;
 
-        // READY is out: the slot is committed.
         self.reserved = None;
         Ok(ch)
     }
@@ -101,9 +94,6 @@ where
         self.answer(&Packet::refuse(remote)).await
     }
 
-    /// Send `verdict`. That settles the request, as does finding the
-    /// device gone, since it needs no answer then. Any other failure
-    /// leaves the request undecided, for `Drop` to put back.
     async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<T as ErrorType>::Error>> {
         let checksum = self.conn.negotiated.checksum();
         let sent = send_pkt(
@@ -125,7 +115,6 @@ where
     T: Read + Write,
 {
     fn drop(&mut self) {
-        // A slot reserved but never confirmed by READY: release it.
         if let Some(ch) = self.reserved.take() {
             self.conn.table.free(ch);
         }

@@ -1,23 +1,14 @@
-//! [`RecvBuf`]: a caller's byte slice used as a receive buffer, read
-//! into from a channel until a reply of known size is in.
-
 use super::channel::Channel;
 use super::session::Session;
 use crate::error::Error;
 
-/// The receive buffer of a service that parses replies in place:
-/// `buf[head..tail]` is what arrived and has not been consumed.
 pub(crate) struct RecvBuf<'b> {
-    /// The caller's buffer.
     buf: &'b mut [u8],
-    /// Where the bytes not consumed yet start.
     head: usize,
-    /// One past the last byte read in.
     tail: usize,
 }
 
 impl<'b> RecvBuf<'b> {
-    /// An empty receive buffer over `buf`.
     pub fn new(buf: &'b mut [u8]) -> Self {
         Self {
             buf,
@@ -26,42 +17,28 @@ impl<'b> RecvBuf<'b> {
         }
     }
 
-    /// How many bytes the buffer holds in all: the longest reply
-    /// [`fill_at_least`](Self::fill_at_least) can wait for.
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }
 
-    /// The first `n` bytes not consumed yet, left in place. Panics if
-    /// fewer than `n` are buffered: fill first.
     pub fn peek(&self, n: usize) -> &[u8] {
         &self.buf[self.head..self.tail][..n]
     }
 
-    /// Consume the first `n` bytes not consumed yet and return them.
-    /// They stay valid until the next call that reads into the buffer.
-    /// Panics if fewer than `n` are buffered.
     pub fn take(&mut self, n: usize) -> &[u8] {
         let start = self.head;
         self.head += self.peek(n).len();
         &self.buf[start..self.head]
     }
 
-    /// Consume the first `n` bytes not consumed yet. Panics if fewer
-    /// than `n` are buffered.
     pub fn advance(&mut self, n: usize) {
         self.take(n);
     }
 
-    /// The free space past the buffered bytes, for a caller to build an
-    /// outgoing message in without allocating. [`compact`](Self::compact)
-    /// first to make it as large as it gets.
     pub fn window(&mut self) -> &mut [u8] {
         &mut self.buf[self.tail..]
     }
 
-    /// Move the bytes not consumed yet to the front of `buf`, freeing
-    /// what lay before them for the next read.
     pub fn compact(&mut self) {
         if self.head > 0 {
             self.buf.copy_within(self.head..self.tail, 0);
@@ -70,11 +47,6 @@ impl<'b> RecvBuf<'b> {
         }
     }
 
-    /// Read from `channel` until at least `n` bytes not consumed yet are
-    /// buffered, compacting once the end of `buf` is reached.
-    ///
-    /// Fails with [`Error::ReceiveBufferFull`] when `buf` is shorter
-    /// than `n`, and with whatever the read fails with.
     pub async fn fill_at_least<S: Session>(
         &mut self,
         channel: &mut Channel<'_, S>,

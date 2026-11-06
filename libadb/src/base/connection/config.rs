@@ -247,8 +247,6 @@ impl ConnectionConfig {
         }
     }
 
-    /// Per-channel buffering cap actually enforced: never smaller than
-    /// one full payload.
     pub(crate) const fn rx_cap(&self) -> usize {
         if self.max_rx_per_channel < self.max_payload as usize {
             self.max_payload as usize
@@ -257,20 +255,13 @@ impl ConnectionConfig {
         }
     }
 
-    /// The largest safe watermark or credit: one byte short of either, a
-    /// device may send a full packet, and that has to fit under `rx_cap`.
-    /// Never 0, which as credit would have adbd close the OPEN.
     const fn rx_ceiling(&self) -> usize {
         self.rx_cap() - self.max_payload as usize + 1
     }
 
-    /// Delayed-ACK credit OPEN actually advertises:
-    /// [`initial_ack_bytes`](Self::initial_ack_bytes) clamped to
-    /// [`rx_ceiling`](Self::rx_ceiling).
     pub(crate) const fn advertised_ack_bytes(&self) -> u32 {
         let ceiling = self.rx_ceiling();
         if self.initial_ack_bytes as usize > ceiling {
-            // `ceiling` fits: it is below a u32 here.
             ceiling as u32
         } else {
             self.initial_ack_bytes

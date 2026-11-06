@@ -206,11 +206,6 @@ impl DeviceBanner {
     }
 
     fn str_at(&self, range: &Range<usize>) -> &str {
-        // The ranges come from `range_of()` over substrings that
-        // `str::split*` produced on this same buffer, so they sit on
-        // code-point boundaries of text `parse_inner` validated; a
-        // banner is a few hundred bytes read a handful of times, so
-        // checking again costs nothing.
         core::str::from_utf8(&self.raw[range.clone()]).expect("banner ranges index validated UTF-8")
     }
 }

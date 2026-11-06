@@ -137,28 +137,15 @@ impl<S: Session> Channel<'_, S> {
     }
 }
 
-/// What [`ReadToEnd::read_to_vec`] stops with once the device has sent
-/// more than its cap. It is not an [`Error`], so a caller can tell its
-/// own cap from anything the channel fails with.
 pub(crate) struct Capped;
 
-/// A channel to read until the device closes it, then close: what a
-/// one-shot service does with the channel it opens. [`Channel`] is one,
-/// and so is the reverse service's connection paired with the id of the
-/// channel it opened.
 pub(crate) trait ReadToEnd: Sized {
-    /// Transport error carried by the channel's [`Error`].
     type IoError;
 
-    /// Read what the device sent into `buf`, as [`Channel::read`] does.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>>;
 
-    /// Send CLSE and free the slot, as [`Channel::close`] does.
     async fn close(self) -> Result<(), Error<Self::IoError>>;
 
-    /// Read into `buf` until the device closes the channel, and close it
-    /// on every way out: nothing else frees the slot. A one-byte read past
-    /// a full `buf` tells an exact fit from [`Error::ReceiveBufferFull`].
     async fn read_to_end(mut self, buf: &mut [u8]) -> Result<usize, Error<Self::IoError>> {
         let mut tail = 0;
         let mut scratch = [0u8; 1];
@@ -180,9 +167,6 @@ pub(crate) trait ReadToEnd: Sized {
         read
     }
 
-    /// [`read_to_end`](Self::read_to_end) into a `Vec`, each read landing
-    /// in `rx` first. Past `cap` bytes it stops with `Ok(Err(Capped))`,
-    /// before the read that crosses the cap is appended.
     async fn read_to_vec(
         mut self,
         rx: &mut [u8],

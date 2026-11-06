@@ -1,7 +1,3 @@
-//! A `u32` in ASCII decimal, written without `core::fmt`: the numbers
-//! sync and shell v2 send as text.
-
-/// `n` in ASCII decimal: the tail of `out`, which ten digits always fit.
 pub(crate) fn format_u32(mut n: u32, out: &mut [u8; 10]) -> &[u8] {
     if n == 0 {
         out[9] = b'0';

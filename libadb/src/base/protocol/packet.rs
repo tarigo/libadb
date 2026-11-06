@@ -45,7 +45,6 @@ impl Packet {
         }
     }
 
-    /// CLSE for the channel `ids` names.
     pub(crate) fn close(ids: ChannelIds) -> Self {
         Self::new(
             Command::Close,
@@ -55,8 +54,6 @@ impl Packet {
         )
     }
 
-    /// CLSE refusing the OPEN the device sent from `remote`: there is
-    /// no end of ours to name, so `arg0` stays zero.
     pub(crate) fn refuse(remote: RemoteId) -> Self {
         Self::new(Command::Close, 0, remote.raw(), Bytes::new())
     }

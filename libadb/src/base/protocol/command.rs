@@ -108,19 +108,14 @@ pub const AUTH_RSAPUBLICKEY: u32 = 3;
 /// Length of the token adbd asks the host to sign: a SHA-1 prehash.
 pub const AUTH_TOKEN_LEN: usize = 20;
 
-/// What an AUTH packet carries, as its `arg0` says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub(crate) enum AuthKind {
-    /// The device's token for the host to sign.
     Token = AUTH_TOKEN,
-    /// The host's signature of that token.
     Signature = AUTH_SIGNATURE,
-    /// The host's public key, for the device to ask its user about.
     PublicKey = AUTH_RSAPUBLICKEY,
 }
 
-/// An `arg0` that names none of the three comes back as it was.
 impl TryFrom<u32> for AuthKind {
     type Error = u32;
     fn try_from(v: u32) -> Result<Self, u32> {

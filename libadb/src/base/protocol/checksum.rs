@@ -1,6 +1,5 @@
 use super::constant::ADB_VERSION_SKIP_CHECKSUM;
 
-/// The `data_check` of `payload`: its bytes summed, wrapping.
 pub(crate) fn payload_checksum(payload: &[u8]) -> u32 {
     let mut sum = 0u32;
     for &b in payload {

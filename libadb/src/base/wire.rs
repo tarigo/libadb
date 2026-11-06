@@ -19,22 +19,11 @@ use super::protocol::{Checksum, MESSAGE_SIZE};
 use super::slot::PendingAck;
 use crate::error::{Error, ProtocolError};
 
-/// What a read asks for while the next header is incomplete: a stream
-/// transport hands over a whole packet or several in one go, and on USB
-/// a header is a transfer of its own, whose short packet ends the read.
 pub(crate) const MIN_READ: usize = 4096;
 
 #[cfg(test)]
 pub(crate) use tests::ZEROED;
 
-/// How much the next read may ask for when `buf` starts with an
-/// unfinished packet: [`MIN_READ`] until the header is in, and from then
-/// on what the packet still lacks.
-///
-/// USB is why a read stops at the packet. A bulk IN transfer ends at a
-/// short packet or when the request is full, and adbd sends no
-/// zero-length packet, so a request that reaches past a payload filling
-/// its last USB packet stays open until the device next sends something.
 fn read_limit(buf: &[u8]) -> usize {
     if buf.len() < MESSAGE_SIZE {
         MIN_READ
@@ -43,9 +32,6 @@ fn read_limit(buf: &[u8]) -> usize {
     }
 }
 
-/// Grows `buf` by its [`read_limit`] and hands out that tail to be read
-/// into, cutting the buffer back to whatever was committed when dropped
-/// — so a failed or cancelled read leaves no placeholder bytes behind.
 pub(crate) struct Staged<'a> {
     buf: &'a mut BytesMut,
     keep: usize,
@@ -65,9 +51,6 @@ impl<'a> Staged<'a> {
         &mut self.buf[self.keep..]
     }
 
-    /// What the next read gets to fill: the stretch that is left, up to
-    /// [`read_limit`]. What was staged for a header can run past the
-    /// packet that header announces.
     pub(crate) fn room(&mut self) -> &mut [u8] {
         let limit = read_limit(self.committed());
         let spare = self.spare();
@@ -79,15 +62,10 @@ impl<'a> Staged<'a> {
         self.keep += n;
     }
 
-    /// Everything committed so far: what was there before, and what has
-    /// been read in since.
     pub(crate) fn committed(&self) -> &[u8] {
         &self.buf[..self.keep]
     }
 
-    /// Whether to read into the same stretch again, as the first packet
-    /// is short and all it lacks fits. Staging anew would zero the rest
-    /// of a large packet on every read, and TLS brings 16 KiB per read.
     pub(crate) fn wants_more(&mut self) -> bool {
         let missing = Packet::missing(self.committed());
         missing != 0 && missing <= self.spare().len()
@@ -100,9 +78,6 @@ impl Drop for Staged<'_> {
     }
 }
 
-/// Whether `e` says for certain that the other end is gone. A timeout
-/// is no such thing: on unix `SO_RCVTIMEO` comes back as `WouldBlock`,
-/// which `embedded_io` has no kind for but `Other`.
 pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
     use embedded_io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected};
     matches!(e, Error::Io(e) if matches!(
@@ -111,9 +86,6 @@ pub(crate) fn connection_gone<E: embedded_io::Error>(e: &Error<E>) -> bool {
     ))
 }
 
-/// Whether a failed receive ends the connection: the stream ended, the
-/// other end is gone, or what came in does not parse and would fail
-/// every later read. A read timeout and a wrong checksum do not.
 #[cfg(feature = "split")]
 pub(crate) fn ends_connection<E: embedded_io::Error>(e: &Error<E>) -> bool {
     match e {
@@ -123,9 +95,6 @@ pub(crate) fn ends_connection<E: embedded_io::Error>(e: &Error<E>) -> bool {
     }
 }
 
-/// Tracks whether a packet was left half-written. One-way, as nothing
-/// on this side can put the framing back: see
-/// [`Error::Desynchronized`].
 pub(crate) struct DesyncFlag(AtomicBool);
 
 impl DesyncFlag {
@@ -133,7 +102,6 @@ impl DesyncFlag {
         Self(AtomicBool::new(false))
     }
 
-    /// Fail if a packet was already abandoned mid-write.
     pub(crate) fn check<E>(&self) -> Result<(), Error<E>> {
         if self.0.load(Ordering::Acquire) {
             return Err(Error::Desynchronized);
@@ -146,7 +114,6 @@ impl DesyncFlag {
     }
 }
 
-/// Raises its flag if dropped before the packet is fully written.
 struct ArmedWrite<'a>(Option<&'a DesyncFlag>);
 
 impl ArmedWrite<'_> {
@@ -175,11 +142,6 @@ pub(crate) async fn write_all<T: Write>(t: &mut T, buf: &[u8]) -> Result<(), Err
     Ok(())
 }
 
-/// Send a packet as a header write followed by a payload write.
-///
-/// The split is required, not cosmetic: adbd reads the 24-byte header
-/// with an exact-size read, so on USB a single transfer carrying both
-/// overflows its endpoint and knocks the device off the bus.
 pub(crate) async fn send_pkt<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
@@ -191,7 +153,6 @@ pub(crate) async fn send_pkt<T: Write>(
     send_frame(t, desync, &header, &pkt.data).await
 }
 
-/// Rejects any packet whose announced payload exceeds `max_payload`.
 pub(crate) async fn recv_pkt<T: Read>(
     t: &mut T,
     buf: &mut BytesMut,
@@ -203,15 +164,11 @@ pub(crate) async fn recv_pkt<T: Read>(
     }
 }
 
-/// What [`recv_pkt_or`] came back with.
 pub(crate) enum Received<I> {
     Packet(Packet),
     Interrupted(I),
 }
 
-/// [`recv_pkt`], giving up once `interrupt` resolves, with what was
-/// read kept in `buf`. With `race`, for cancel-safe reads only, each
-/// read is raced against it; otherwise it is asked before each read.
 pub(crate) async fn recv_pkt_or<T: Read, F: Future>(
     t: &mut T,
     buf: &mut BytesMut,
@@ -282,8 +239,6 @@ fn encode_header(
     Ok(h)
 }
 
-/// [`send_pkt`] for a packet on the channel `ids` names, its payload
-/// borrowed rather than built into a [`Packet`].
 pub(crate) async fn send_raw<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
@@ -303,9 +258,6 @@ pub(crate) async fn send_raw<T: Write>(
     send_frame(t, desync, &header, payload).await
 }
 
-/// [`send_pkt`] for OPEN from our end `local` to `destination`, which
-/// is borrowed rather than copied into a [`Packet`]. `credit` is the
-/// receive credit `arg1` advertises: zero without delayed ACK.
 pub(crate) async fn send_open<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
@@ -319,10 +271,6 @@ pub(crate) async fn send_open<T: Write>(
     send_frame(t, desync, &header, destination).await
 }
 
-/// Put an encoded header and its payload on the wire, raising `desync`
-/// if the packet does not get out whole, unless the other end is gone:
-/// no stream is left to fall out of step with then, and the flag would
-/// only stop reads short of what it had sent.
 async fn send_frame<T: Write>(
     t: &mut T,
     desync: &DesyncFlag,
@@ -346,14 +294,9 @@ async fn write_frame<T: Write>(
     if !payload.is_empty() {
         write_all(t, payload).await?;
     }
-    // A transport that buffers, as TLS does, may still hold part of the
-    // packet, and only the flush puts all of it on the wire; the rest
-    // have nothing to flush. So it stays inside the armed stretch.
     t.flush().await.map_err(Error::Io)
 }
 
-/// Send the OKAY `ack` stands for. Under delayed ACK it carries the
-/// bytes acknowledged, as credit; the classic OKAY carries nothing.
 pub(crate) async fn send_okay_to<T: Write>(
     transport: &mut T,
     desync: &DesyncFlag,

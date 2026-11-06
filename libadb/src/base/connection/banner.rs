@@ -45,7 +45,6 @@ impl Default for HostBanner<'_> {
 }
 
 impl HostBanner<'_> {
-    /// The CNXN payload this banner stands for.
     pub(crate) fn to_bytes(self) -> Bytes {
         match self {
             Self::Features(features) => {
