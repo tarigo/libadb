@@ -6,8 +6,9 @@
 Low-level ADB (Android Debug Bridge) wire-protocol library for Rust.
 
 Talks to a device directly over TCP or USB — no `adbd` fork/exec, no
-`adb` binary, no platform-tools dependency. `no_std + alloc` core with
-optional async runtimes; a separate `libadb-ffi` crate exposes a C ABI.
+`adb` binary, no platform-tools dependency. Supports devices running
+Android 9 or later. `no_std + alloc` core with optional async runtimes;
+a separate `libadb-ffi` crate exposes a C ABI.
 
 **Status:** pre-1.0 — the public API may change in semver-breaking ways before 1.0.
 

@@ -1,7 +1,8 @@
 //! Low-level ADB (Android Debug Bridge) wire-protocol library.
 //!
 //! Talks to a device directly over TCP or USB — no `adbd` fork/exec,
-//! no `adb` binary, no platform-tools dependency.
+//! no `adb` binary, no platform-tools dependency. Supports devices
+//! running Android 9 or later.
 //!
 //! The core protocol layer is `no_std + alloc`. Any runtime feature
 //! (`tokio`, `smol`, `nusb`, `rusb`) implicitly enables `std` — the

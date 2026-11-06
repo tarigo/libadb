@@ -135,13 +135,8 @@ macro_rules! log_ids {
 log_ids! {
     /// Android log buffer identifier.
     ///
-    /// Matches the `log_id` values in AOSP
-    /// (`system/logging/liblog/include/android/log.h`) as of Android 9.
-    /// Android 7.0–8.1 had no stats buffer and numbered security 5 and
-    /// kernel 6, so from those releases security entries come out as
-    /// [`Stats`](Self::Stats) and kernel entries as
-    /// [`Security`](Self::Security), with their payload left raw.
-    ///
+    /// Buffers are numbered as on Android 9, the oldest release libadb
+    /// supports: the `log_id_t` values of liblog's `android/log.h`.
     /// `LogId::from` turns a buffer number into its id, and
     /// [`number`](Self::number) gives the number back.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
