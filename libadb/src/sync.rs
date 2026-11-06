@@ -580,10 +580,22 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.send_done(mtime).await
     }
 
-    /// Send `QUIT` and close the underlying channel.
+    /// Send `QUIT` and close the underlying channel. The close goes on
+    /// every way out, since nothing else frees the slot ([`Channel`] has
+    /// no `Drop`).
+    ///
+    /// A channel the device has already closed is not a failure: a
+    /// transfer that fails ends the sync service on the device, so after
+    /// one there is nothing left to quit. A channel a fault closed fails
+    /// all the same, with that fault's error, such as
+    /// [`Error::ChannelRxOverflow`].
     pub async fn quit(mut self) -> Result<(), Error<S::IoError>> {
-        self.write_header(SyncId::Quit, 0).await?;
-        self.channel.close().await
+        let sent = match self.write_header(SyncId::Quit, 0).await {
+            Err(Error::ChannelClosed) => Ok(()),
+            sent => sent,
+        };
+        let closed = self.channel.close().await;
+        sent.and(closed)
     }
 }
 

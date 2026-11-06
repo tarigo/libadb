@@ -2949,6 +2949,7 @@ mod slot_tests {
     use crate::base::protocol::Packet;
     use crate::error::{Error, ProtocolError};
     use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell, WindowSize};
+    use crate::sync::SyncSession;
     use crate::{cmd, logcat};
 
     use super::{Reader, Writer};
@@ -3144,6 +3145,35 @@ mod slot_tests {
         let size = Some(WindowSize { rows: 24, cols: 80 });
         let opened = shell_v2::open_interactive(&mut writer, "", None, size, &mut rx);
         let err = driven(&mut run, async { opened.await.map(drop) }).unwrap_err();
+        assert!(
+            matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
+            "got {err:?}"
+        );
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    /// `quit` on a sync session over `ch`, going through `writer`.
+    fn quit(writer: &Writer<SharedMock>, ch: ChannelId) -> Result<(), Error<MockError>> {
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut buf = [0u8; 64];
+        now(SyncSession::new(channel, &mut buf).quit())
+    }
+
+    #[test]
+    fn quit_on_a_channel_the_device_closed_is_no_failure() {
+        let (_reader, writer, ch, _seen) = channel_with(&[clse(1)]);
+        quit(&writer, ch).unwrap();
+        assert_eq!(in_use(&writer), 0);
+    }
+
+    #[test]
+    fn quit_on_a_channel_a_fault_closed_fails_with_the_fault() {
+        let (_reader, writer, ch, _seen) = channel_with(&[fault()]);
+        let err = quit(&writer, ch).unwrap_err();
         assert!(
             matches!(err, Error::Protocol(ProtocolError::ShortReadyPayload)),
             "got {err:?}"

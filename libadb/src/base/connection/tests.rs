@@ -963,7 +963,7 @@ mod slot_tests {
     use super::*;
     use crate::base::mock::{one_slot, shell_frame, FAILED_WRITES};
     use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell, WindowSize};
-    use crate::{cmd, logcat};
+    use crate::{cmd, logcat, sync};
     use embedded_io::ErrorKind;
 
     /// The first write past the handshake and one OPEN, each of which
@@ -1078,6 +1078,32 @@ mod slot_tests {
             let size = Some(WindowSize { rows: 24, cols: 80 });
             let opened = shell_v2::open_interactive(&mut conn, "", None, size, &mut rx);
             let err = now(opened).map(drop).unwrap_err();
+            assert_failed_with(&err, kind, conn.table.in_use(), left);
+        }
+    }
+
+    /// With the device's CLSE in, and its OKAY for our last write never
+    /// coming, `QUIT` has nowhere to go.
+    #[test]
+    fn quit_on_a_channel_the_device_closed_is_no_failure() {
+        let mut conn = one_slot("", &[clse(1)]);
+        let mut buf = [0u8; 64];
+        let mut session = now(sync::open(&mut conn, &mut buf)).unwrap();
+        let err = now(session.stat("/x")).unwrap_err();
+        assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+
+        now(session.quit()).unwrap();
+        assert_eq!(conn.table.in_use(), 0);
+    }
+
+    #[test]
+    fn quit_gives_the_slot_back_when_its_write_fails() {
+        for (kind, left) in FAILED_WRITES {
+            let mut conn = one_slot("", &[]);
+            conn.transport.fail_write(FIRST_WRITE, kind);
+            let mut buf = [0u8; 64];
+            let session = now(sync::open(&mut conn, &mut buf)).unwrap();
+            let err = now(session.quit()).unwrap_err();
             assert_failed_with(&err, kind, conn.table.in_use(), left);
         }
     }
