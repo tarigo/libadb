@@ -116,13 +116,10 @@ where
     ///
     /// **Not cancellation-safe.** Dropping the future after OPEN went
     /// out gives the channel up before the device answers. Should it
-    /// accept after all, `run` answers its READY with CLSE; if `run`
-    /// took that READY before the drop, it sends the CLSE then. On a
-    /// transport whose reads cannot be dropped that has to wait for the
-    /// next packet `run` receives, or the next write, open or close on
-    /// the connection, whichever comes first. Either way the device's
-    /// end does not stay open for long — unless the [`Reader`] is gone,
-    /// and with it whatever would read the READY.
+    /// accept after all, the device gets a CLSE, at the latest with the
+    /// next packet `run` receives or the next write, open or close on
+    /// the connection. So the device's end does not stay open for long,
+    /// unless the [`Reader`] is gone and nothing reads the READY.
     pub async fn open_channel(
         &self,
         destination: &[u8],
@@ -175,22 +172,15 @@ where
     ///
     /// Returns at once with whatever is buffered, otherwise waits for
     /// the next WRTE on `ch`. A channel the device closed fails with
-    /// [`Error::ChannelClosed`] once its buffered data is read.
+    /// [`Error::ChannelClosed`] once its buffered data is read. For how
+    /// a read fails on a failing connection, see
+    /// [What arrived stays readable](crate::split#what-arrived-stays-readable).
     ///
-    /// What arrived is handed over whatever has become of the connection
-    /// since: only a read that finds nothing buffered fails with that.
-    /// An acknowledgement that fails does not fail the read it belongs
-    /// to; the next call reports the connection's failure. The end of
-    /// the connection ends the wait for the write lock and for an
-    /// acknowledgement on its way, and the bytes come without it, so a
-    /// stalled writer or transport cannot keep them back then.
-    ///
-    /// Cancellation-safe while it waits — for data, or for the write
-    /// lock an acknowledgement needs: nothing has been taken then, and
-    /// the data stays buffered for the next call. Dropping the future
-    /// while that acknowledgement is written desynchronizes the
-    /// connection, as with any cancelled write, and has taken nothing
-    /// either.
+    /// Cancellation-safe while it waits, for data or for the write half
+    /// an OKAY needs: nothing has been taken then, and the data stays
+    /// buffered for the next call. Dropping it while that OKAY is
+    /// written has taken nothing either, but
+    /// [abandons the packet](crate::split#dropping-a-call).
     pub async fn read_channel(
         &self,
         ch: ChannelId,
@@ -255,7 +245,7 @@ where
     /// Splits `data` into chunks bounded by `max_payload` and the
     /// currently-granted send budget. Concurrent writers on the same
     /// channel never consume the same credit, and credit is granted in
-    /// arrival order — a writer looping back for its next chunk queues
+    /// arrival order: a writer looping back for its next chunk queues
     /// behind the ones already waiting.
     ///
     /// The bytes of one call go out in order; concurrent calls on the
@@ -264,21 +254,9 @@ where
     /// needs whole messages on the wire serializes the calls itself,
     /// as the FFI shell does around each frame.
     ///
-    /// **Not cancellation-safe.** Reserved-but-unsent credit is
-    /// refunded when the future is dropped, but a packet goes out as a
-    /// header write followed by a payload write, and dropping the
-    /// future between them leaves the device reading whatever we send
-    /// next as the rest of that packet. The connection is marked
-    /// desynchronized instead: this and every other operation on it
-    /// then fails with [`Error::Desynchronized`], including on the
-    /// paired [`Reader`] and calls already waiting on a `Writer`, reads
-    /// once they have handed over what had already arrived. Close it
-    /// and open a new one.
-    ///
-    /// The mark goes up from the moment the header write is first
-    /// polled, not only between the two writes — a transport that took
-    /// bytes before returning `Pending` looks no different from one
-    /// that took none.
+    /// **Not cancellation-safe**: see
+    /// [Dropping a call](crate::split#dropping-a-call). Credit reserved
+    /// and not yet sent is refunded when the future is dropped.
     pub async fn write_channel(
         &self,
         ch: ChannelId,
@@ -322,17 +300,16 @@ where
     /// the device: one is parked for credit the channel does not have,
     /// and none is still sending.
     ///
-    /// For a caller with no task to give [`Reader::run`], which has to
-    /// decide for itself when a pending
-    /// [`write_channel`](Self::write_channel) needs packets taken off the
-    /// connection with [`Reader::dispatch_one`]. That a write is pending
-    /// says little: on USB one is through every transfer, and a read
-    /// begun then could wait for a packet that never comes, since the
-    /// device may owe nothing yet.
+    /// For a caller with no task to give [`Reader::run`], to decide when
+    /// a pending [`write_channel`](Self::write_channel) needs packets
+    /// taken off the connection with [`Reader::dispatch_one`]. That a
+    /// write is pending says little: on USB one is pending through every
+    /// transfer, and a read begun then could wait for a packet that
+    /// never comes, since the device may owe nothing yet.
     ///
-    /// A writer still sending rules it out even with another parked
-    /// behind it: its packet has to go out before the device can answer
-    /// it, so its future has to be polled, not left for a read to finish.
+    /// A writer still sending answers `false` even with another parked
+    /// behind it: its future has to be polled, not left for a read to
+    /// finish.
     ///
     /// A closed or freed channel answers `false`: its writers have been
     /// woken to fail. A `true` lasts until the next packet is dispatched,
@@ -353,31 +330,21 @@ where
     /// parked on this channel observes `ChannelClosed` and unblocks,
     /// however the CLSE fares.
     ///
-    /// The CLSE is owed from the moment the slot goes, so dropping this
-    /// call while it waits for the write half loses neither: the next
-    /// call that writes or receives sends it. Dropping it during the
-    /// write abandons the packet, which desynchronizes the connection,
-    /// as with any cancelled write.
+    /// The CLSE is [owed](crate::split#what-the-device-is-owed) from the
+    /// moment the slot goes. With the device gone or the stream over
+    /// this returns `Ok` without it. A write that fails any other way
+    /// comes back as the error, with the connection desynchronized. A
+    /// connection already desynchronized fails with
+    /// [`Error::Desynchronized`] and frees nothing: no call that wants a
+    /// slot gets anywhere on it.
     ///
-    /// While it is owed nothing is received, on any channel, as with
-    /// anything the device is owed: a close behind a stalled writer
-    /// holds up reception until the write half comes free.
+    /// Safe to drop while it waits for the write half: the next call
+    /// that writes or receives sends the CLSE. Dropping it during the
+    /// write [abandons the packet](crate::split#dropping-a-call).
     ///
-    /// A [`Reader`] that has gone stops none of this: the device can
-    /// still hear the CLSE, and this waits for the write half as ever.
-    /// With the device gone, or a stream a receive found over, nobody is
-    /// left to hear it, and this returns `Ok` without it. A close already
-    /// waiting ends with the stream, should a read still under way find
-    /// that out, which takes one that cannot be dropped.
-    ///
-    /// A write that fails any other way comes back as the error, with
-    /// the connection desynchronized. A connection already
-    /// desynchronized fails with [`Error::Desynchronized`] and frees
-    /// nothing: no call that wants a slot gets anywhere on it.
-    ///
-    /// A concurrent [`Reader::read_channel`] on the same channel is
-    /// not woken directly — see the module-level note on close ↔ read
-    /// coordination.
+    /// A concurrent [`Reader::read_channel`] on the same channel is not
+    /// woken: see
+    /// [Closing while a read waits](crate::split#closing-while-a-read-waits).
     pub async fn close_channel(
         &self,
         ch: ChannelId,

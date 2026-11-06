@@ -231,29 +231,25 @@ where
     /// and waiters on the `Writer` get [`Error::Disconnected`].
     ///
     /// A write abandoned mid-packet ends it too, with
-    /// [`Error::Desynchronized`]: the device is left waiting for the
-    /// rest of that packet, so there may never be another to read. That
-    /// is at once on a transport whose reads can be dropped. On one
-    /// whose reads cannot, as
+    /// [`Error::Desynchronized`], as the device may never send another
+    /// packet: at once on a transport whose reads can be dropped, and at
+    /// the next packet on one whose reads cannot, as
     /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) reports
-    /// of USB, it is at the next packet, the best a read that has to
-    /// finish allows.
+    /// of USB.
     ///
     /// Channels the device opens toward the host (`adb reverse`) wait
     /// for an [`IncomingListener`] while one is alive, and are refused
-    /// otherwise: nobody would accept them. Requests still queued when
-    /// the last listener goes are refused once the next packet arrives.
+    /// otherwise. Requests still queued when the last listener goes are
+    /// refused once the next packet arrives.
     ///
-    /// A packet that breaks one channel alone — data past its receive
-    /// cap, a READY it cannot take — closes that channel: the device
-    /// gets its CLSE, and the channel's calls fail with that error
-    /// (once what it buffered before is read) rather than end
-    /// reception for every channel.
+    /// A packet that breaks one channel alone, with data past its
+    /// receive cap or a READY it cannot take, closes that channel: the
+    /// device gets its CLSE, and the channel's calls fail with that
+    /// error once what it buffered before is read.
     ///
     /// Without delayed ACK, data is acknowledged from here as it
-    /// arrives, so the acknowledgement may reach the device after
-    /// packets a task sends in response to that data. The protocol
-    /// allows either order.
+    /// arrives, so the OKAY may reach the device after packets a task
+    /// sends in response to that data. The protocol allows either order.
     ///
     /// A read that is not cancel-safe (USB) is never cancelled from
     /// within, so this is also the way to read such a transport from
@@ -291,16 +287,12 @@ where
     /// under way; [`Writer::waits_for_credit`] says when that is.
     ///
     /// It waits for a packet, however long one takes. On a transport
-    /// whose reads are not cancel-safe, as
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) reports,
-    /// the future must not be dropped: run it to completion rather than
-    /// race it, or the middle of a packet can be lost. What a call
-    /// dropped earlier left owing the device goes out first.
+    /// whose reads are not cancel-safe the future must not be dropped:
+    /// see [Dropping a call](crate::split#dropping-a-call).
     ///
     /// A packet that breaks one channel alone closes that channel, as
-    /// under [`run`](Self::run), and is not this call's failure: the
-    /// caller may have nothing to do with that channel. Unlike `run`,
-    /// this leaves a channel the device opens queued for
+    /// under [`run`](Self::run), and is not this call's failure. Unlike
+    /// `run`, this leaves a channel the device opens queued for
     /// [`accept_incoming`](Self::accept_incoming), with or without an
     /// [`IncomingListener`] alive.
     pub async fn dispatch_one(&mut self) -> Result<(), Error<<RH as ErrorType>::Error>> {
@@ -317,29 +309,21 @@ where
     /// for other channels in the meantime). A zero-length WRTE delivers
     /// nothing and is read past, so `Ok(0)` only answers an empty `buf`.
     ///
-    /// What the device sent stays in the channel until it can be taken,
-    /// and bytes that owe an acknowledgement are taken only once that
-    /// has been sent: a call dropped while it waits for the write half
-    /// has taken nothing, and the next read gets them. What such a call
-    /// left owing the device goes out first, unless the connection has
-    /// ended: nobody is left to hear it then. Dropping the call while it
-    /// waits for a packet is another matter: the wait is a transport
-    /// read, as under [`accept_incoming`](Self::accept_incoming).
+    /// What is buffered is handed over first, however the connection
+    /// fails: see [What arrived stays readable](crate::split#what-arrived-stays-readable).
+    /// A write abandoned mid-packet ends the wait for a packet, as it
+    /// ends [`run`](Self::run). Nothing receives while this call waits
+    /// for the write half, so the end of the stream cannot reach it
+    /// there.
     ///
-    /// What arrived is handed over whatever has become of the connection
-    /// since: only a read that finds nothing buffered fails with that.
-    /// An acknowledgement that fails does not fail the read it belongs
-    /// to; the next call reports the connection's failure. A write
-    /// abandoned mid-packet ends the wait for a packet as it ends
-    /// [`run`](Self::run), and the wait for an acknowledgement to go out.
-    /// Once the connection has ended a read waits for no write half, and
-    /// the bytes come without their acknowledgement. Nothing receives
-    /// while this call waits for the write half, though, so the end
-    /// cannot reach it there.
+    /// Safe to drop while it waits for the write half: nothing has been
+    /// taken, and the next read gets the bytes. Dropped while it waits
+    /// for a packet, it drops a transport read: see
+    /// [Dropping a call](crate::split#dropping-a-call).
     ///
     /// A concurrent [`Writer::close_channel`] on the same channel does
-    /// not wake this call directly — see the module-level note on
-    /// close ↔ read coordination.
+    /// not wake this call: see
+    /// [Closing while a read waits](crate::split#closing-while-a-read-waits).
     pub async fn read_channel(
         &mut self,
         ch: ChannelId,
@@ -377,19 +361,13 @@ where
     /// the like) and hand it over for a verdict.
     ///
     /// Packets for other channels keep being dispatched while waiting.
-    /// The returned [`SplitIncoming`] owns the request — it does not
-    /// borrow the reader, so it can be held across other calls until
-    /// [`accept`](SplitIncoming::accept) or
-    /// [`reject`](SplitIncoming::reject) resolves it; dropping it
+    /// The returned [`SplitIncoming`] owns the request, so it can be
+    /// held across other calls until [`accept`](SplitIncoming::accept)
+    /// or [`reject`](SplitIncoming::reject) resolves it; dropping it
     /// undecided puts the request back at the head of the queue.
     ///
-    /// Dropping the future while it still *waits* for a packet is
-    /// another matter: the wait is a transport read, so cancelling it
-    /// inherits the transport's
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety) — where
-    /// reads are not cancel-safe (USB), an abandoned in-flight read can
-    /// lose packet bytes, exactly as with a cancelled
-    /// [`read_channel`](Self::read_channel).
+    /// Dropped while it waits for a packet, it drops a transport read:
+    /// see [Dropping a call](crate::split#dropping-a-call).
     pub async fn accept_incoming(
         &mut self,
     ) -> Result<SplitIncoming<WH>, Error<<RH as ErrorType>::Error>> {
@@ -481,11 +459,11 @@ where
         Ok(())
     }
 
-    /// Release the channel slot and send CLSE —
-    /// [`Writer::close_channel`] reachable from the read half, so an
-    /// open-read-close service exchange can run on the `Reader` alone.
-    /// Nothing receives while this call waits for the write half, so
-    /// the end of the stream cannot reach it there.
+    /// Release the channel slot and send CLSE:
+    /// [`Writer::close_channel`] on the read half, so an open-read-close
+    /// service exchange can run on the `Reader` alone. Nothing receives
+    /// while this call waits for the write half, so the end of the
+    /// stream cannot reach it there.
     pub async fn close_channel(
         &self,
         ch: ChannelId,

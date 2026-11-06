@@ -1,12 +1,16 @@
 //! Full-duplex Reader/Writer pair for a Connection whose transport is
 //! [`Splittable`](crate::Splittable).
 //!
-//! `Reader` owns the read half and drives packet reception; `Writer`
-//! owns a cheap handle to the shared write-half + channel table and can
-//! be cloned for use from other threads/tasks. Read-path and write-path
-//! never hold the same mutex concurrently, so a thread blocked in
-//! [`Reader::read_channel`] does not prevent another thread from calling
-//! [`Writer::write_channel`] or [`Writer::close_channel`].
+//! `Reader` owns the read half and drives packet reception. `Writer` is
+//! a cheap handle to the shared write half and channel table, and can
+//! be cloned for use from other threads and tasks. A thread blocked in
+//! [`Reader::read_channel`] does not prevent another thread from
+//! calling [`Writer::write_channel`] or [`Writer::close_channel`].
+//!
+//! Available under the `split` feature (implied by every runtime
+//! feature: `tokio`, `smol`, `nusb`, `rusb`). Pulls `std` into the
+//! build for its sync primitives; a pure `no_std` variant would need a
+//! no_std Mutex implementation and is not yet provided.
 //!
 //! # Driving the connection
 //!
@@ -29,31 +33,70 @@
 //!   Channels the device opens (`adb reverse`) are taken through an
 //!   [`IncomingListener`] from [`Writer::listen_incoming`].
 //!
-//! Once the connection has ended — `run` returned, the `Reader` was
-//! dropped, or a receive failed for good on a reader-driven connection
-//! — every `Writer` call that waits on the device fails with
+//! # When the connection ends
+//!
+//! The connection has ended once `run` returned, the `Reader` was
+//! dropped, or a receive failed for good on a reader-driven connection.
+//! Every `Writer` call that waits on the device then fails with
 //! [`Error::Disconnected`] instead of waiting for packets nobody reads:
 //! opening a channel, reading one, waiting for send credit, accepting
-//! one the device opened. Calls that need no answer — a write the
-//! credit already covers, a close — still reach the transport, with one
-//! exception: a close on a stream that has ended frees its slot without
-//! a CLSE. A read timeout is no such failure: it is the caller's to
-//! handle, and leaves the connection and everyone waiting on it as they
-//! were.
+//! one the device opened. Calls that need no answer, a write the credit
+//! already covers or a close, still reach the transport, except that a
+//! close on a stream that has ended frees its slot without a CLSE.
 //!
-//! What arrived stays readable however the connection fails: a read
-//! hands over what its channel has buffered first, and only then fails
-//! with [`Error::Disconnected`] or [`Error::Desynchronized`]. Every
-//! other call on a desynchronized connection fails at once.
+//! A read timeout is no such failure: it is the caller's to handle, and
+//! leaves the connection and everyone waiting on it as they were.
 //!
-//! Available under the `split` feature (implied by every runtime
-//! feature: `tokio`, `smol`, `nusb`, `rusb`). Pulls `std` into the
-//! build for its sync primitives; a pure `no_std` variant would need a
-//! no_std Mutex implementation and is not yet provided.
+//! # What arrived stays readable
 //!
-//! # Close ↔ read coordination
+//! However the connection fails, a read first hands over what its
+//! channel has buffered, and only then fails with
+//! [`Error::Disconnected`] or [`Error::Desynchronized`]. Every other
+//! call on a desynchronized connection fails at once.
 //!
-//! Because only the `Reader` drives packet reception, calling
+//! A read does not depend on its OKAY. One that fails does not fail the
+//! read: the next call reports the failure. Once the connection has
+//! ended, or a write was abandoned mid-packet, a read sends no OKAY and
+//! does not wait for the write half, and a read already waiting to send
+//! one stops. The bytes then come without their OKAY, so a stalled
+//! writer or transport cannot keep them back.
+//!
+//! # What the device is owed
+//!
+//! The OKAY for data that arrived and the CLSE for a channel closed
+//! here are recorded before any wait. The next call that writes or
+//! receives sends them before anything else, so a call dropped while it
+//! waits for the write half loses neither. Once the connection has
+//! ended only a call that writes still sends them. While anything is
+//! owed nothing is received, on any channel: a close behind a stalled
+//! writer holds up reception until the write half comes free.
+//!
+//! No CLSE is sent to a device that is gone. Once a write found it gone
+//! or a receive found the stream over, [`Writer::close_channel`]
+//! returns `Ok` without one, and a close already waiting gives up if a
+//! read still under way finds the stream over. A dropped `Reader` is
+//! different: the device can still hear the CLSE, and a close waits for
+//! the write half as usual.
+//!
+//! # Dropping a call
+//!
+//! Each call says whether it is safe to drop. Waiting for the write
+//! half always is. Two other waits are not:
+//!
+//! * **Writing a packet.** From the moment a packet's write is first
+//!   polled, a drop abandons the packet and desynchronizes the
+//!   connection: see [`Error::Desynchronized`]. Every call on the
+//!   `Reader` and on any `Writer` then fails with that error, calls
+//!   already waiting included, and reads once they have handed over
+//!   what had already arrived. Close the connection and open a new one.
+//! * **Reading a packet.** A call on the `Reader` waits for a packet in
+//!   a transport read. Where reads are not cancel-safe (USB), dropping
+//!   it can lose packet bytes: see
+//!   [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+//!
+//! # Closing while a read waits
+//!
+//! Only the `Reader` drives packet reception, so
 //! [`Writer::close_channel`] does not by itself wake a concurrent
 //! [`Reader::read_channel`] parked on the same channel: the reader
 //! unblocks only once it receives the device's echoed `CLSE` packet.

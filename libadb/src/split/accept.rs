@@ -53,25 +53,20 @@ where
     /// receive credit when delayed ack is on) and returns the channel.
     ///
     /// With every slot in use the request is refused with CLSE and
-    /// [`Error::NoFreeChannels`] comes back.
+    /// [`Error::NoFreeChannels`] comes back. A request the device has
+    /// withdrawn in the meantime (a CLSE for its OPEN) is not taken: no
+    /// READY is sent and [`Error::ChannelClosed`] comes back.
     ///
     /// A READY or CLSE that fails comes back as the error, with the slot
-    /// released and the request back in the queue, unless the device is
-    /// gone: nobody is left to answer then, so the request is consumed,
-    /// and the next [`IncomingListener::accept`] or
-    /// [`Reader::accept_incoming`] goes on to whatever comes after it.
+    /// released and the request back in the queue. If the device is gone
+    /// the request is consumed instead, and the next
+    /// [`IncomingListener::accept`] or [`Reader::accept_incoming`] goes
+    /// on to whatever comes after it.
     ///
     /// Dropping this future never loses the request: the reserved slot
-    /// is released and the request returns to the queue. The connection
-    /// itself survives only a drop that lands before the READY write is
-    /// first polled — waiting for the shared write lock included; from
-    /// that poll on, a drop abandons a packet mid-write and the
-    /// connection is marked desynchronized, as with any cancelled
-    /// write.
-    ///
-    /// A request the device has withdrawn in the meantime (a CLSE for
-    /// its OPEN) is not taken: no READY is sent and
-    /// [`Error::ChannelClosed`] comes back.
+    /// is released and the request returns to the queue. A drop after
+    /// the READY's write was first polled still
+    /// [desynchronizes the connection](crate::split#dropping-a-call).
     pub async fn accept(mut self) -> Result<ChannelId, Error<<WH as ErrorType>::Error>> {
         let pending = self.pending.as_ref().expect("undecided");
         let (remote, credit) = (pending.remote, pending.credit);
@@ -118,18 +113,16 @@ where
     /// Refuse the channel: answers CLSE and frees nothing, since
     /// nothing was allocated.
     ///
-    /// Dropping this future never loses the request — it returns to the
-    /// queue. The connection itself survives only a drop that lands
-    /// before the CLSE write is first polled, waiting for the shared
-    /// write lock included; after that it is marked desynchronized, as
-    /// with any cancelled write.
-    ///
-    /// A CLSE that fails comes back as the error, and the request
-    /// returns to the queue, unless the device is gone: nobody is left
-    /// to refuse then, and the request is consumed.
-    ///
     /// A request the device has withdrawn in the meantime is consumed
     /// silently: it no longer expects an answer.
+    ///
+    /// A CLSE that fails comes back as the error, with the request back
+    /// in the queue. If the device is gone the request is consumed
+    /// instead.
+    ///
+    /// Dropping this future never loses the request: it returns to the
+    /// queue. A drop after the CLSE's write was first polled still
+    /// [desynchronizes the connection](crate::split#dropping-a-call).
     pub async fn reject(mut self) -> Result<(), Error<<WH as ErrorType>::Error>> {
         if self.cancelled.load(Ordering::Relaxed) {
             self.pending.take();
