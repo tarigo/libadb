@@ -54,7 +54,8 @@ pub unsafe extern "C" fn adb_reverse_forward(
     AdbStatus::Ok
 }
 
-/// Remove the reverse rule listening on `device_spec`.
+/// Remove the reverse rule listening on `device_spec`, whichever
+/// connection established it.
 ///
 /// # Safety
 /// `conn` must be a valid handle; `device_spec` a NUL-terminated C string.
@@ -77,7 +78,8 @@ pub unsafe extern "C" fn adb_reverse_remove(
     AdbStatus::Ok
 }
 
-/// Remove every reverse rule this connection established.
+/// Remove every reverse rule on the device, whichever connection
+/// established it.
 ///
 /// # Safety
 /// `conn` must be a valid handle.
@@ -93,9 +95,10 @@ pub unsafe extern "C" fn adb_reverse_remove_all(conn: *mut adb_connection_t) -> 
     AdbStatus::Ok
 }
 
-/// List the device's reverse rules, as `<serial> <remote> <local>\n`
-/// lines, into `(buf, buf_len, out_len)` per [`adb_connection_features`].
-/// The lines are the device's own bytes, passed on unparsed.
+/// List the device's reverse rules, whichever connection established
+/// them, as `<serial> <remote> <local>\n` lines, into
+/// `(buf, buf_len, out_len)` per [`adb_connection_features`]. The lines
+/// are the device's own bytes, passed on unparsed.
 ///
 /// [`adb_connection_features`]: crate::adb_connection_features
 ///

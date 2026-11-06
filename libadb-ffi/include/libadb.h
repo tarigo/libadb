@@ -494,19 +494,25 @@ adb_status_t adb_reverse_forward(
     size_t            data_cap,
     size_t           *out_data_len);
 
-/* Remove the reverse rule listening on device_spec. */
+/*
+ * Remove the reverse rule listening on device_spec, whichever connection
+ * established it.
+ */
 adb_status_t adb_reverse_remove(
     adb_connection_t *conn,
     const char       *device_spec);
 
-/* Remove every reverse rule this connection established. */
+/*
+ * Remove every reverse rule on the device, whichever connection
+ * established it.
+ */
 adb_status_t adb_reverse_remove_all(adb_connection_t *conn);
 
 /*
- * List the device's reverse rules as "<serial> <remote> <local>\n"
- * lines into (buf, buf_len, out_len), same convention as
- * adb_connection_features(). The lines are the device's own bytes,
- * passed on unparsed.
+ * List the device's reverse rules, whichever connection established
+ * them, as "<serial> <remote> <local>\n" lines into (buf, buf_len,
+ * out_len), same convention as adb_connection_features(). The lines are
+ * the device's own bytes, passed on unparsed.
  */
 adb_status_t adb_reverse_list(
     adb_connection_t *conn,

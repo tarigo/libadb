@@ -1,14 +1,18 @@
 //! Reverse forwards (`adb reverse`): rules that make the device listen
 //! on its side and open channels toward the host.
 //!
-//! Rules live on this connection — adbd drops them when it goes away.
-//! Every connection the device then accepts arrives here as a
-//! device-initiated OPEN whose destination is the rule's `<local>`
-//! spec: receive them with
+//! A rule lives on the connection that established it: adbd drops it
+//! when that connection goes away. Every connection the device then
+//! accepts arrives there as a device-initiated OPEN whose destination is
+//! the rule's `<local>` spec: receive them with
 //! [`Connection::accept_incoming`](crate::Connection::accept_incoming)
 //! (or `Reader::accept_incoming` on a split connection, and an
 //! `IncomingListener` from `Writer::listen_incoming` while
 //! `Reader::run` dispatches; without one, `run` refuses them).
+//!
+//! The list of rules is the device's, shared by all its connections:
+//! [`list`] shows every rule on it, and [`remove`] and [`remove_all`]
+//! take rules off it whichever connection established them.
 //!
 //! Specs are passed through verbatim, e.g. `tcp:8080` or
 //! `localabstract:name`. On the device, adbd binds `tcp:` listeners on
@@ -125,7 +129,8 @@ pub async fn establish<C: ServiceChannel>(
     parse_port(&data).map_err(Error::Reverse)
 }
 
-/// Remove the rule listening on `device_spec`.
+/// Remove the rule listening on `device_spec`, whichever connection
+/// established it.
 pub async fn remove<C: ServiceChannel>(
     conn: &mut C,
     device_spec: &str,
@@ -140,14 +145,14 @@ pub async fn remove<C: ServiceChannel>(
     Ok(())
 }
 
-/// Remove every rule this connection established.
+/// Remove every rule on the device, whichever connection established it.
 pub async fn remove_all<C: ServiceChannel>(conn: &mut C) -> Result<(), Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:killforward-all\0").await?;
     parse_status(&reply).map_err(Error::Reverse)?;
     Ok(())
 }
 
-/// The device's current rules.
+/// The device's current rules, whichever connection established them.
 ///
 /// adbd prints each rule as a `<serial> <remote> <local>` line and
 /// separates the fields with a bare space, so a space inside `local`
