@@ -158,6 +158,34 @@ fn settled_bytes_owe_a_second_read_nothing() {
     assert!(slot.take_acks(buf.len()), "what is left owes its own");
 }
 
+/// A cap of one packet makes the watermark 1, where anything held holds
+/// back the OKAY until it has all been taken.
+#[test]
+fn at_a_watermark_of_one_the_okay_waits_for_the_buffer_to_drain() {
+    let policy = RxPolicy {
+        ack: AckMode::Classic,
+        rx_cap: 1024,
+        watermark: 1,
+    };
+    let mut slot = ChannelSlot::opening(LocalId::from(LOCAL), policy);
+    accept(&mut slot);
+
+    assert!(matches!(slot.apply_write(&[1; 10]), Ok(AckDecision::Hold)));
+    let mut buf = [0u8; 4];
+    assert_eq!(slot.settle_take(buf.len()), None, "six bytes would stay");
+    assert_eq!(slot.take_buffered::<Infallible>(&mut buf).unwrap(), Some(4));
+
+    let mut buf = [0u8; 16];
+    assert!(slot.settle_take(buf.len()).is_some(), "the last of them");
+    assert_eq!(slot.take_buffered::<Infallible>(&mut buf).unwrap(), Some(6));
+    assert_eq!((slot.buffered(), slot.unacked()), (0, 0));
+
+    assert!(
+        slot.deliver(10).is_some(),
+        "with nothing held, a packet read straight is acknowledged"
+    );
+}
+
 /// adbd has dropped the socket by the time its CLSE arrives, so what it
 /// sent before that is read without an OKAY.
 #[test]

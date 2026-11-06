@@ -51,12 +51,12 @@ pub enum Error<E> {
     /// [`ConnectionConfig::max_rx_per_channel`] allows.
     ///
     /// The last line of defence, not the usual brake: unread data holds
-    /// back acknowledgements, so a device that respects flow
-    /// control stops on its own well before this. Reaching it means the
-    /// peer kept writing without its window being re-opened. The
-    /// connection is left intact but the offending packet was dropped
-    /// unacknowledged, so that channel now has a gap in its byte stream
-    /// — treat it as fatal for that channel.
+    /// back acknowledgements, so a device that respects flow control
+    /// never gets past it, even with a full packet on its last byte of
+    /// credit. Going past it means the peer kept writing without its
+    /// window being re-opened. The connection is left intact but the
+    /// offending packet was dropped unacknowledged, so that channel now
+    /// has a gap in its byte stream — treat it as fatal for that channel.
     ///
     /// [`ConnectionConfig::max_rx_per_channel`]: crate::ConnectionConfig::max_rx_per_channel
     ChannelRxOverflow,

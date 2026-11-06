@@ -10,8 +10,8 @@ use core::task::Poll;
 use super::*;
 use crate::base::mock::{
     abandon, clse, cnxn, connected_for_select, connected_with_channel, now, okay, okay_with_budget,
-    stls, sync_fail, two_channels_classic, two_channels_delayed_ack, wrte, Mock, MockError, NoAuth,
-    Signs, Withholds,
+    stls, sync_fail, two_channels_classic, two_channels_delayed_ack, two_channels_delayed_ack_with,
+    wrte, Mock, MockError, NoAuth, Signs, Withholds,
 };
 use crate::base::protocol::command::{Command, AUTH_RSAPUBLICKEY, AUTH_SIGNATURE, AUTH_TOKEN};
 use crate::base::protocol::Packet;
@@ -440,6 +440,123 @@ fn reading_past_the_watermark_releases_the_held_ack() {
     );
 }
 
+/// Packets in these tests, and the smallest cap there is.
+const PACKET: usize = 1024;
+
+/// A config whose cap is `packets` packets.
+fn capped_at(packets: usize) -> ConnectionConfig {
+    ConnectionConfig::new()
+        .with_max_payload(PACKET as u32)
+        .with_max_rx_per_channel(packets * PACKET)
+}
+
+/// The next `len` bytes after `sent` of a stream whose bytes show any
+/// gap or reordering.
+fn next_bytes(sent: &[u8], len: usize) -> Vec<u8> {
+    let end = sent.len() + len;
+    (sent.len()..end).map(|at| (at % 251) as u8).collect()
+}
+
+/// Have the device send `packet` on the second channel, and a read of the
+/// first take it off the wire, which reads nothing of the second.
+fn land(
+    conn: &mut Connection<Mock>,
+    first: ChannelId,
+    packet: &[u8],
+) -> Result<(), Error<MockError>> {
+    conn.transport_mut()
+        .feed(&wrte(2, packet))
+        .feed(&wrte(1, b"next"));
+    let mut next = [0u8; 8];
+    now(conn.read_channel(first, &mut next)).map(|_| ())
+}
+
+/// What the OPEN of the channel with this id advertised.
+fn open_credit(conn: &Connection<Mock>, local: u32) -> u32 {
+    let sent = conn.transport().sent();
+    let open = sent
+        .iter()
+        .find(|(cmd, arg0, ..)| *cmd == Command::Open && *arg0 == local);
+    open.expect("the channel was opened").2
+}
+
+/// The device sends all it may while nobody reads `b`, each time all but
+/// the last byte of its credit and then a full packet on that byte, as
+/// adbd can. It waits only once the credit is gone.
+#[test]
+fn a_full_packet_on_the_last_byte_of_credit_does_not_overflow() {
+    for packets in [1, 2, 3] {
+        let (mut conn, a, b) = two_channels_delayed_ack_with(capped_at(packets), 1 << 20, &[]);
+        let total = 8 * PACKET;
+        let (mut sent, mut got, mut chunk) = (Vec::new(), Vec::new(), [0u8; 100]);
+
+        while got.len() < sent.len() || sent.len() < total {
+            let acked: u32 = conn.transport().acks_for(2).iter().sum();
+            let credit = i64::from(open_credit(&conn, 2)) + i64::from(acked) - sent.len() as i64;
+            if credit > 0 && sent.len() < total {
+                let len = usize::try_from(credit - 1).unwrap().min(PACKET);
+                let next = next_bytes(&sent, if len == 0 { PACKET } else { len });
+                land(&mut conn, a, &next).unwrap();
+                sent.extend(next);
+            } else {
+                let n = now(conn.read_channel(b, &mut chunk)).unwrap();
+                got.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        assert!(got == sent, "a cap of {packets} packets");
+    }
+}
+
+/// The device sends a full packet on each OKAY as soon as it has one,
+/// after a first packet that may leave room for an OKAY.
+#[test]
+fn a_full_packet_right_after_an_okay_does_not_overflow() {
+    for (packets, first) in [(1, 1), (1, PACKET - 1), (2, PACKET - 1), (3, PACKET - 1)] {
+        let (mut conn, a, b) = two_channels_classic(capped_at(packets), &[]);
+        let total = 8 * PACKET;
+        let (mut sent, mut got, mut chunk) = (Vec::new(), Vec::new(), [0u8; 100]);
+        let mut sends = 0;
+
+        while got.len() < sent.len() || sent.len() < total {
+            if sends <= conn.transport().acks_for(2).len() && sent.len() < total {
+                let next = next_bytes(&sent, if sends == 0 { first } else { PACKET });
+                land(&mut conn, a, &next).unwrap();
+                sent.extend(next);
+                sends += 1;
+            } else {
+                let n = now(conn.read_channel(b, &mut chunk)).unwrap();
+                got.extend_from_slice(&chunk[..n]);
+            }
+        }
+
+        assert!(got == sent, "a cap of {packets} packets");
+    }
+}
+
+/// With the cap full and no OKAY sent for the last packet, one byte more
+/// is past what flow control allows, in either mode.
+#[test]
+fn a_device_past_the_limits_overflows() {
+    for (delayed, packets) in [(true, 1), (true, 3), (false, 1), (false, 3)] {
+        let (mut conn, a, b) = if delayed {
+            two_channels_delayed_ack_with(capped_at(packets), 1 << 20, &[])
+        } else {
+            two_channels_classic(capped_at(packets), &[])
+        };
+
+        for _ in 0..packets {
+            land(&mut conn, a, &[0x11; PACKET]).unwrap();
+        }
+        let err = land(&mut conn, a, &[0x22]).unwrap_err();
+        assert!(matches!(err, Error::ChannelRxOverflow), "got {err:?}");
+
+        let mut held = vec![0u8; 2 * packets * PACKET];
+        let n = now(conn.read_channel(b, &mut held)).unwrap();
+        assert_eq!(n, packets * PACKET, "delayed ACK: {delayed}");
+    }
+}
+
 mod incoming {
     use super::*;
     use crate::base::mock::{
@@ -700,6 +817,7 @@ mod incoming {
         let mut mock = Mock::new();
         mock.feed(&cnxn_with("shell_v2,delayed_ack"));
         let config = ConnectionConfig::new()
+            .with_max_payload(8 * 1024)
             .with_initial_ack_bytes(32 * 1024 * 1024)
             .with_max_rx_per_channel(1024 * 1024);
         let mut conn = now(Connection::connect(
@@ -716,7 +834,8 @@ mod incoming {
 
         let (cmd, _, _, payload) = conn.transport.sent().last().unwrap().clone();
         assert_eq!(cmd, Command::Ready);
-        assert_eq!(payload, (1024u32 * 1024).to_le_bytes());
+        let room = 1024u32 * 1024 - 8 * 1024 + 1;
+        assert_eq!(payload, room.to_le_bytes());
     }
 
     #[test]

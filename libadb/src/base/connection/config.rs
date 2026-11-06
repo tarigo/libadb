@@ -130,9 +130,12 @@ impl ConnectionConfig {
     /// [`max_payload`](Self::max_payload), so one legal packet always
     /// fits.
     ///
-    /// Backpressure normally keeps a channel well under this: see
-    /// [`rx_watermark`](Self::rx_watermark). Hitting the cap means the
-    /// device wrote past a window that was never re-opened.
+    /// Backpressure keeps a channel within this. Delayed-ACK credit and
+    /// [`rx_watermark`](Self::rx_watermark) both stop at
+    /// `cap - max_payload + 1`, because the device may send a full packet
+    /// on its last byte of credit or right after an OKAY, so a cap of
+    /// `max_payload` has it send one packet at a time. Going past the
+    /// cap means the device wrote past a window that was never re-opened.
     ///
     /// A fuse, not flow control. Crossing it drops the WRTE that did
     /// not fit and fails the call that observed it with
@@ -217,12 +220,16 @@ impl ConnectionConfig {
     ///
     /// Acknowledging an inbound write is what re-opens the sender's
     /// window, so acknowledging on arrival lets a device keep writing to
-    /// a channel nobody reads. The ceiling comes from what was already
+    /// a channel nobody reads. The bound comes from what was already
     /// promised: the device was told it may send
-    /// [`initial_ack_bytes`](Self::initial_ack_bytes) before waiting, so
-    /// that is the natural bound on what may pile up — clamped to the
-    /// enforced per-channel cap, and never below `max_payload`, which a
-    /// single packet would otherwise trip.
+    /// [`initial_ack_bytes`](Self::initial_ack_bytes) before waiting, or
+    /// one [`max_payload`](Self::max_payload) if that is more.
+    ///
+    /// It stops at `cap - max_payload + 1`, `cap` being the effective
+    /// [`max_rx_per_channel`](Self::with_max_rx_per_channel): an OKAY
+    /// sent one byte under the watermark lets in a full packet, which
+    /// has to fit. That can put it below `max_payload`, and at 1 the
+    /// OKAY waits until the channel has been read empty.
     ///
     /// Only consulted without delayed-ack. With it, credit is returned
     /// as bytes are read and the advertised budget is the bound.
@@ -232,7 +239,7 @@ impl ConnectionConfig {
         } else {
             self.max_payload as usize
         };
-        let ceiling = self.rx_cap();
+        let ceiling = self.rx_ceiling();
         if want > ceiling {
             ceiling
         } else {
@@ -250,15 +257,21 @@ impl ConnectionConfig {
         }
     }
 
+    /// The largest safe watermark or credit: one byte short of either, a
+    /// device may send a full packet, and that has to fit under `rx_cap`.
+    /// Never 0, which as credit would have adbd close the OPEN.
+    const fn rx_ceiling(&self) -> usize {
+        self.rx_cap() - self.max_payload as usize + 1
+    }
+
     /// Delayed-ACK credit OPEN actually advertises:
     /// [`initial_ack_bytes`](Self::initial_ack_bytes) clamped to
-    /// [`rx_cap`](Self::rx_cap). Advertising more would invite a
-    /// compliant device to overflow the buffer it was promised.
+    /// [`rx_ceiling`](Self::rx_ceiling).
     pub(crate) const fn advertised_ack_bytes(&self) -> u32 {
-        let cap = self.rx_cap();
-        if self.initial_ack_bytes as usize > cap {
-            // `cap` fits: it is below a u32 here.
-            cap as u32
+        let ceiling = self.rx_ceiling();
+        if self.initial_ack_bytes as usize > ceiling {
+            // `ceiling` fits: it is below a u32 here.
+            ceiling as u32
         } else {
             self.initial_ack_bytes
         }

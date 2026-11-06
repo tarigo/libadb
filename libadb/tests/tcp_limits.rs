@@ -306,6 +306,98 @@ async fn buffering_below_the_cap_is_fine() {
 }
 }
 
+// adbd reads a full packet on any credit above zero, so a channel can
+// hold all but the last byte of its credit and a whole packet on top.
+rt_test! {
+async fn a_full_packet_on_the_last_byte_of_credit_fits_the_smallest_cap() {
+    const LIMIT: usize = 4096;
+
+    let (mut conn, device) = session_with_config(
+        FakeDevice::new()
+            .banner(DA_DEVICE_BANNER)
+            .max_payload(LIMIT as u32)
+            .delayed_ack(4096)
+            .expect_open_asb(None),
+        DA_HOST_BANNER,
+        ConnectionConfig::new()
+            .with_max_payload(LIMIT as u32)
+            .with_max_rx_per_channel(LIMIT),
+        |mut s| async move {
+            let (ch_a, _) = s.accept_open_any().await;
+            let (a_dev, a_cli) = (ch_a.device_id(), ch_a.client_id());
+            let (ch_b, _) = s.accept_open_any().await;
+            let (b_dev, b_cli) = (ch_b.device_id(), ch_b.client_id());
+
+            let credit = s.last_open_asb().unwrap() as usize;
+            if credit > 1 {
+                s.send(CMD_WRTE, b_dev, b_cli, &vec![0x11u8; credit - 1]).await;
+            }
+            s.send(CMD_WRTE, b_dev, b_cli, &vec![0x22u8; LIMIT]).await;
+            s.send(CMD_WRTE, a_dev, a_cli, b"done").await;
+            (s, credit - 1 + LIMIT)
+        },
+    )
+    .await;
+
+    let a = conn.open_channel(b"a:\0").await.unwrap();
+    let b = conn.open_channel(b"b:\0").await.unwrap();
+
+    let mut buf = [0u8; 16];
+    let n = conn.read_channel(a, &mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"done");
+
+    let (_s, total) = rt::join(device).await;
+    let mut got = vec![0u8; total];
+    let mut filled = 0;
+    while filled < total {
+        filled += conn.read_channel(b, &mut got[filled..]).await.unwrap();
+    }
+    assert!(got[total - LIMIT..].iter().all(|&byte| byte == 0x22));
+}
+}
+
+// Dispatched, so that a packet lands whether or not anyone reads. An
+// OKAY sent on arrival would have the next packet on top of the first
+// by the end of the wait.
+rt_test! {
+async fn a_full_packet_right_after_an_okay_fits_the_smallest_cap() {
+    const LIMIT: usize = 4096;
+
+    let (conn, device) = session_with_config(
+        FakeDevice::new().max_payload(LIMIT as u32),
+        HOST_BANNER,
+        ConnectionConfig::new()
+            .with_max_payload(LIMIT as u32)
+            .with_max_rx_per_channel(LIMIT),
+        |mut s| async move {
+            let mut ch = s.accept_open(b"svc:\0").await;
+            ch.send_write(&vec![0x11u8; LIMIT - 1]).await;
+            ch.expect_ack().await;
+            ch.send_write(&vec![0x22u8; LIMIT]).await;
+            ch.expect_ack().await;
+            s
+        },
+    )
+    .await;
+
+    let (reader, writer) = conn.split().unwrap();
+    let _driver = rt::spawn(reader.run());
+    let ch = writer.open_channel(b"svc:\0").await.unwrap();
+    rt::sleep_ms(200).await;
+
+    let total = 2 * LIMIT - 1;
+    let mut got = vec![0u8; total];
+    let mut filled = 0;
+    while filled < total {
+        let read = writer.read_channel(ch, &mut got[filled..]);
+        filled += rt::within("the read", read).await.unwrap();
+    }
+    assert!(got[..LIMIT - 1].iter().all(|&byte| byte == 0x11));
+    assert!(got[LIMIT - 1..].iter().all(|&byte| byte == 0x22));
+    rt::within("the device", rt::join(device)).await;
+}
+}
+
 // ---------------------------------------------------------------------------
 // The split Reader/Writer pair inherits the same limits
 // ---------------------------------------------------------------------------

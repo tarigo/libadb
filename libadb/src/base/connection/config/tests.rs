@@ -75,12 +75,100 @@ fn max_banner_properties_is_kept_verbatim() {
 #[test]
 fn advertised_credit_never_exceeds_the_enforced_cap() {
     let c = ConnectionConfig::new()
+        .with_max_payload(8 * 1024)
         .with_initial_ack_bytes(32 * 1024 * 1024)
         .with_max_rx_per_channel(1024 * 1024);
-    assert_eq!(c.advertised_ack_bytes(), 1024 * 1024);
+    assert_eq!(c.advertised_ack_bytes(), 1024 * 1024 - 8 * 1024 + 1);
 
     let unbounded = ConnectionConfig::new().with_initial_ack_bytes(32 * 1024 * 1024);
     assert_eq!(unbounded.advertised_ack_bytes(), 32 * 1024 * 1024);
+}
+
+const KIB: u32 = 1024;
+const MIB: u32 = 1024 * KIB;
+
+/// The ceiling of a 1 KiB packet under a cap of `u32::MAX`, which is also
+/// `usize::MAX` on a 32-bit target.
+const TOP: usize = u32::MAX as usize - 1023;
+
+/// `max_payload`, `initial_ack_bytes`, `max_rx_per_channel`, and the
+/// `rx_watermark` and `advertised_ack_bytes` they come to.
+const LIMITS: [(u32, u32, usize, usize, u32); 12] = [
+    // The cap is one packet, or would be less.
+    (KIB, 32 * MIB, 1, 1, 1),
+    (KIB, 32 * MIB, 1024, 1, 1),
+    (MIB, 32 * MIB, 1024 * 1024, 1, 1),
+    // Each byte of cap past a packet is one more of either.
+    (KIB, 32 * MIB, 1025, 2, 2),
+    (KIB, 32 * MIB, 2048, 1025, 1025),
+    // Around the clamp.
+    (KIB, 1024, 2048, 1024, 1024),
+    (KIB, 1025, 2048, 1025, 1025),
+    (KIB, 1026, 2048, 1025, 1025),
+    // Credit under a packet is kept; the watermark is not below one.
+    (4 * KIB, KIB, 64 * 1024, 4096, 1024),
+    // No cap to speak of.
+    (MIB, 32 * MIB, usize::MAX, 32 << 20, 32 * MIB),
+    (KIB, TOP as u32, usize::MAX, TOP, TOP as u32),
+    // A ceiling as wide as the credit's field.
+    (KIB, u32::MAX, u32::MAX as usize, TOP, TOP as u32),
+];
+
+fn config(max_payload: u32, credit: u32, cap: usize) -> ConnectionConfig {
+    ConnectionConfig::new()
+        .with_max_payload(max_payload)
+        .with_initial_ack_bytes(credit)
+        .with_max_rx_per_channel(cap)
+}
+
+#[test]
+fn both_limits_stop_one_packet_short_of_the_cap() {
+    for (max_payload, credit, cap, watermark, advertised) in LIMITS {
+        let c = config(max_payload, credit, cap);
+        let row = (max_payload, credit, cap);
+        assert_eq!(c.rx_watermark(), watermark, "{row:?}");
+        assert_eq!(c.advertised_ack_bytes(), advertised, "{row:?}");
+    }
+}
+
+/// A device acknowledged one byte short of the watermark, or left with
+/// one byte of credit, may send a full packet.
+#[test]
+fn neither_limit_lets_a_full_packet_past_the_cap() {
+    for (max_payload, credit, cap, _, _) in LIMITS {
+        let c = config(max_payload, credit, cap);
+        let row = (max_payload, credit, cap);
+        let room = c.rx_cap() - max_payload as usize;
+        assert!(c.rx_watermark() >= 1, "{row:?}");
+        assert!(c.advertised_ack_bytes() >= 1, "{row:?}");
+        assert!(c.rx_watermark() - 1 <= room, "{row:?}");
+        assert!(c.advertised_ack_bytes() as usize - 1 <= room, "{row:?}");
+    }
+}
+
+#[test]
+fn the_presets_keep_their_limits() {
+    let desktop = ConnectionConfig::new();
+    assert_eq!(desktop.rx_watermark(), 32 * 1024 * 1024);
+    assert_eq!(desktop.advertised_ack_bytes(), 32 * 1024 * 1024);
+
+    let embedded = ConnectionConfig::embedded();
+    assert_eq!(embedded.rx_watermark(), 32 * 1024);
+    assert_eq!(embedded.advertised_ack_bytes(), 32 * 1024);
+}
+
+/// An overflow in these would stop the build rather than wrap.
+#[test]
+fn the_limits_work_in_const_context_with_no_cap_at_all() {
+    const WIDEST: ConnectionConfig = ConnectionConfig::new()
+        .with_max_payload(KIB)
+        .with_initial_ack_bytes(TOP as u32)
+        .with_max_rx_per_channel(usize::MAX);
+    const WATERMARK: usize = WIDEST.rx_watermark();
+    const CREDIT: u32 = WIDEST.advertised_ack_bytes();
+
+    assert_eq!(WATERMARK, TOP);
+    assert_eq!(CREDIT, TOP as u32);
 }
 
 #[test]

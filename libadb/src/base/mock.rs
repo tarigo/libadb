@@ -751,6 +751,15 @@ pub(crate) fn two_channels_delayed_ack(
     budget: u32,
     pushes: &[Packet],
 ) -> (Connection<Mock>, ChannelId, ChannelId) {
+    two_channels_delayed_ack_with(ConnectionConfig::new(), budget, pushes)
+}
+
+/// [`two_channels_delayed_ack`] with limits the caller picks.
+pub(crate) fn two_channels_delayed_ack_with(
+    config: ConnectionConfig,
+    budget: u32,
+    pushes: &[Packet],
+) -> (Connection<Mock>, ChannelId, ChannelId) {
     let mut mock = Mock::new();
     mock.feed(&cnxn_with("shell_v2,delayed_ack"))
         .feed(&okay_with_budget(1, budget))
@@ -762,7 +771,7 @@ pub(crate) fn two_channels_delayed_ack(
         mock,
         NoAuth,
         HostBanner::Raw(b"host::features=shell_v2,delayed_ack"),
-        ConnectionConfig::new(),
+        config,
     ))
     .unwrap();
     let a = now(conn.open_channel(b"shell:a\0")).unwrap();
