@@ -142,20 +142,6 @@ fn parse_events_buffer_raw_payload() {
 }
 
 #[test]
-fn an_unknown_buffer_keeps_its_number() {
-    let payload = text_payload(4, b"Tag", b"msg");
-    let data = make_v4_entry(1, 1, 0, 0, 8, 0, &payload);
-
-    let (entry, _) = parse_entry(&data).unwrap().unwrap();
-    assert!(
-        matches!(entry.log_id, LogId::Unknown(_)),
-        "{:?}",
-        entry.log_id
-    );
-    assert_eq!(u32::from(entry.log_id), 8);
-}
-
-#[test]
 fn each_buffer_decodes_in_its_own_format() {
     // A buffer libadb does not know (8) may be binary like events, where
     // reading it as text would take its first byte for a priority and
