@@ -36,17 +36,12 @@ fn write_destination(buf: &mut [u8], command: &str) -> Result<usize, Destination
 /// [`exec::Exec`](crate::exec::Exec) is this type under that service's
 /// name. Construct via [`open`] or [`exec::open`](crate::exec::open).
 ///
-/// Provides named methods for reading the combined stdout+stderr byte
-/// stream, forwarding stdin, and integrating with [`Channel::select`]
-/// for full-duplex interactive sessions.
-///
-/// Unlike [`shell::v2::Shell`](crate::shell::v2::Shell), nothing frames
-/// the stream: `read` returns bytes as they arrive and `write_stdin`
-/// sends bytes as they are. There is no separate stderr stream and no
-/// exit code. Both directions pass a PTY the device allocates. For an
-/// empty `shell:` it stays in its default mode, which echoes input and
-/// turns `\n` into `\r\n`; for `shell:<command>` and `exec:` it is in
-/// raw mode, and the bytes pass untouched.
+/// Nothing frames the stream: `read` returns bytes as they arrive and
+/// `write_stdin` sends bytes as they are. There is no separate stderr
+/// stream and no exit code. Both directions pass a PTY the device
+/// allocates. For an empty `shell:` it stays in its default mode, which
+/// echoes input and turns `\n` into `\r\n`; for `shell:<command>` and
+/// `exec:` it is in raw mode, and the bytes pass untouched.
 pub struct Shell<'a, S> {
     channel: Channel<'a, S>,
 }
@@ -73,16 +68,11 @@ impl<'a, S: Session> Shell<'a, S> {
     }
 
     /// Read from the channel, but return early if `interrupt` resolves
-    /// first.
-    ///
-    /// On a transport whose reads cannot be safely cancelled (USB, the
-    /// blocking socket `Inline` dials), the interrupt is checked between
-    /// reads: one already in flight completes first and may return its
-    /// data ahead of a ready interrupt — see
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    /// first. How early depends on the session and its transport: see
+    /// [`Channel::select`].
     ///
     /// After a [`SelectResult::Interrupted`] result the caller can act
-    /// on the interrupt (e.g. forward stdin) and call `select` again —
+    /// on the interrupt (e.g. forward stdin) and call `select` again:
     /// the channel state is unchanged and the next read will resume.
     pub async fn select<F: Future>(
         &mut self,
@@ -133,11 +123,8 @@ pub async fn open<'a, S: Session>(
 /// used transiently to build the `shell:<command>\0` destination string
 /// before any output arrives.
 ///
-/// `command` is shell source and reaches the device verbatim, so
-/// metacharacters in it keep their meaning and anything interpolated
-/// into it is the caller's to quote. [`cmd`](crate::cmd) quotes its
-/// arguments, but it always runs Android's `cmd` utility — it is not a
-/// general argv form of this call.
+/// `command` is shell source and reaches the device verbatim: see
+/// [`shell::v2::exec`](crate::shell::v2::exec) on quoting it.
 ///
 /// Note: the legacy protocol provides no exit code. If the caller needs
 /// one, use [`shell::v2::exec`](crate::shell::v2::exec) on devices that

@@ -16,12 +16,11 @@
 //! * `exec:<command>` — run a single command via `sh -c`; the channel
 //!   closes when the command exits.
 //!
-//! `command` is shell source and reaches the device verbatim, so
-//! metacharacters in it keep their meaning and anything interpolated
-//! into it is the caller's to quote. The argv-shaped APIs quote for
-//! you, but they run one program each: [`cmd`](crate::cmd) and
-//! [`abb`](crate::abb) run Android's `cmd`, [`logcat`](crate::logcat)
-//! runs `logcat`.
+//! `command` is shell source and reaches the device verbatim: see
+//! [`shell::v2::exec`](crate::shell::v2::exec) on quoting it. The
+//! argv-shaped APIs quote for you, but they run one program each:
+//! [`cmd`](crate::cmd) and [`abb`](crate::abb) run Android's `cmd`,
+//! [`logcat`](crate::logcat) runs `logcat`.
 //!
 //! Zero-alloc: [`Exec`] wraps an open [`Channel`](crate::channel::Channel)
 //! and all destination strings and output bytes land in caller-provided

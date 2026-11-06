@@ -299,20 +299,13 @@ pub struct CommandOutput {
 /// [`pump`](Self::pump) method that integrates with [`Channel::select`]
 /// for full-duplex interactive sessions.
 ///
-/// `Shell` does not own its receive buffer — the caller supplies a
-/// single fixed-size byte slice in [`new`](Self::new) that serves both
-/// as the destination of every channel read and as the framing
-/// accumulator. The wrapper performs zero heap allocation; the only
-/// per-frame allocation is the [`Vec<u8>`] held inside each [`Frame`]
-/// variant returned to the caller.
-///
-/// The slice is used as a linear ring: unread bytes occupy
-/// `rx[head..tail]`, fresh bytes are appended at `tail`, and the data
-/// is compacted to the start of `rx` whenever the tail hits the end.
-/// If after compaction there is still no free space — i.e. the buffer
-/// is fully occupied with one in-progress frame — operations return
-/// [`Error::ReceiveBufferFull`]. Frames whose payload exceeds the
-/// buffer size are delivered in multiple chunks transparently.
+/// The caller supplies one fixed-size byte slice in [`new`](Self::new),
+/// which receives every channel read and holds the frames being
+/// assembled. `Shell` allocates nothing on the heap but the [`Vec<u8>`]
+/// inside each [`Frame`] it returns. If one in-progress frame fills the
+/// slice, operations return [`Error::ReceiveBufferFull`]. Frames whose
+/// payload exceeds the buffer size are delivered in multiple chunks
+/// transparently.
 pub struct Shell<'a, 'b, S> {
     channel: Channel<'a, S>,
     rx: &'b mut [u8],
@@ -330,11 +323,8 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     ///
     /// # Panics
     ///
-    /// Panics if `rx.len() < HEADER_SIZE`. A buffer smaller than the
-    /// 5-byte header cannot decode any frame at all and would only be
-    /// able to surface a [`ReceiveBufferFull`](Error::ReceiveBufferFull)
-    /// error — turning that into a loud failure at construction time
-    /// is friendlier than at the first read.
+    /// Panics if `rx.len() < HEADER_SIZE`: a buffer smaller than the
+    /// 5-byte header cannot decode any frame at all.
     pub fn new(channel: Channel<'a, S>, rx: &'b mut [u8]) -> Self {
         assert!(
             rx.len() >= HEADER_SIZE,
@@ -350,12 +340,10 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
 
     /// Send a raw frame `[id, len, payload]` over the channel.
     ///
-    /// When possible the frame is assembled in the free tail of the
-    /// caller-owned `rx` buffer so no heap allocation is required.
-    /// If the frame is too large for the remaining space, header and
-    /// payload are written as two separate channel writes (still
-    /// zero-alloc — shell_v2 is stream-oriented so the receiver
-    /// reassembles from the byte stream regardless of WRTE boundaries).
+    /// Allocates nothing: the frame is assembled in the free tail of
+    /// `rx` when it fits there, and otherwise header and payload go as
+    /// two channel writes. shell_v2 is stream-oriented, so the receiver
+    /// reassembles from the byte stream regardless of WRTE boundaries.
     pub async fn send_frame(
         &mut self,
         id: FrameId,
@@ -393,12 +381,11 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// Send a `CLOSE_STDIN` frame, telling the device that no further
     /// stdin will be written.
     ///
-    /// A channel the device has already closed is not a failure: there
-    /// is no stdin left to close, and what the device wrote before
-    /// closing stays readable, so a command that finished first still
-    /// gives [`collect`](Self::collect) its output and exit code. A
-    /// channel a fault closed fails all the same, with that fault's
-    /// error, such as [`Error::ChannelRxOverflow`].
+    /// A channel the device has already closed is not a failure, so a
+    /// command that finished first still gives
+    /// [`collect`](Self::collect) its output and exit code. A channel a
+    /// fault closed fails all the same, with that fault's error, such as
+    /// [`Error::ChannelRxOverflow`].
     pub async fn close_stdin(&mut self) -> Result<(), Error<S::IoError>> {
         match self.send_frame(FrameId::CloseStdin, &[]).await {
             Err(Error::ChannelClosed) => Ok(()),
@@ -415,13 +402,10 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
 
     /// Read the next decoded frame, blocking until one is available.
     ///
-    /// `Ok(0)` from the channel is treated as "no new bytes this round"
-    /// (e.g. an empty WRTE payload) and the loop simply waits for more.
-    /// End-of-stream is reported by the channel as
-    /// [`Error::ChannelClosed`], not as a zero-length read.
-    ///
-    /// Returns [`Error::ReceiveBufferFull`] if the caller-provided
-    /// receive buffer cannot fit the frame currently being assembled.
+    /// The end of the stream is reported by the channel as
+    /// [`Error::ChannelClosed`]. Returns [`Error::ReceiveBufferFull`] if
+    /// the caller-provided receive buffer cannot fit the frame currently
+    /// being assembled.
     pub async fn read_frame(&mut self) -> Result<Frame, Error<S::IoError>> {
         loop {
             if let Some(frame) = self.try_next_frame()? {
@@ -490,12 +474,9 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// yields `None`, then call `pump` again.
     ///
     /// On [`SelectResult::Interrupted`] no bytes were appended and the
-    /// caller can act on the interrupt before pumping again. On a
-    /// transport whose reads cannot be safely cancelled (USB, the
-    /// blocking socket `Inline` dials), the interrupt is checked between
-    /// reads: one already in flight completes first and may yield
-    /// [`SelectResult::Data`] ahead of a ready interrupt — see
-    /// [`ReadCancelSafety`](crate::transport::ReadCancelSafety).
+    /// caller can act on the interrupt before pumping again. How early
+    /// an interrupt can win depends on the session and its transport:
+    /// see [`Channel::select`].
     ///
     /// Returns [`Error::ReceiveBufferFull`] if there is no free space
     /// in the buffer even after compaction.
@@ -528,12 +509,11 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
     /// Read frames until [`Frame::Exit`] is received, accumulating
     /// stdout/stderr along the way, then close the channel.
     ///
-    /// The close is sent on every way out: the exit frame, the device
-    /// closing without one, which is [`Error::ChannelClosed`], a fault
-    /// or a protocol error, since nothing else frees the slot
-    /// ([`Channel`] has no `Drop`). It is best-effort, its own result
-    /// dropped in favour of what the reads came to, so a close that
-    /// fails costs a finished command none of its output.
+    /// The device closing without an exit frame is
+    /// [`Error::ChannelClosed`]. The close goes out on every way out,
+    /// since nothing else frees the slot ([`Channel`] has no `Drop`). It
+    /// is best-effort, and what the reads came to outranks its result,
+    /// so a close that fails costs a finished command none of its output.
     pub async fn collect(mut self) -> Result<CommandOutput, Error<S::IoError>> {
         let mut out = CommandOutput::default();
         let read = loop {
