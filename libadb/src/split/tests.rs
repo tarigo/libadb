@@ -135,6 +135,48 @@ fn a_withdrawal_racing_the_accept_closes_the_split_slot() {
     );
 }
 
+/// The slot is reserved by then, and the withdrawal closes it.
+#[test]
+fn a_withdrawal_while_accept_waits_for_the_write_half_sends_no_ready() {
+    use core::task::{Context, Waker};
+
+    let mut mock = Mock::new();
+    mock.feed(&crate::base::mock::cnxn());
+    let seen = SharedMock::new(mock);
+    let conn = now(Connection::connect(
+        seen.clone(),
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
+    let (mut reader, writer) = conn.split().unwrap();
+    seen.feed(&Packet::new(Command::Open, 90, 0, b"tcp:90\0".to_vec()));
+    let inc = now(reader.accept_incoming()).unwrap();
+
+    let busy = now(writer.shared.write_half.lock());
+    let mut accept = pin!(inc.accept());
+    let waiting = accept
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    assert!(waiting.is_pending());
+    seen.feed(&withdraw(90));
+    now(reader.dispatch_one()).unwrap();
+    drop(busy);
+
+    let err = now(accept).unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    assert!(
+        !seen
+            .sent()
+            .iter()
+            .any(|(cmd, _, arg1, _)| *cmd == Command::Ready && *arg1 == 90),
+        "READY must not answer a withdrawn OPEN"
+    );
+    assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    assert!(reader.try_accept_incoming().unwrap().is_none());
+}
+
 #[test]
 fn held_holders_spend_the_open_storm_budget() {
     use core::future::Future as _;
