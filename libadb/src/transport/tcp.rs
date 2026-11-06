@@ -5,9 +5,13 @@
 #[cfg(all(test, feature = "split"))]
 mod tests;
 
+/// tokio's `TcpStream` as a transport: `TokioTcp::new` wraps a
+/// connected one.
 #[cfg(feature = "tokio")]
 pub type TokioTcp = embedded_io_adapters::tokio_1::FromTokio<tokio::net::TcpStream>;
 
+/// smol's `TcpStream` as a transport: `SmolTcp::new` wraps a connected
+/// one.
 #[cfg(feature = "smol")]
 pub type SmolTcp = embedded_io_adapters::futures_03::FromFutures<smol::net::TcpStream>;
 
