@@ -12,9 +12,9 @@ pub(crate) fn encode_channel_id(ch: ChannelId) -> u64 {
     ((ch.local_id() as u64) << 32) | (ch.slot() as u32 as u64)
 }
 
-/// The channel `id` names on `conn`. A slot outside the channel table
-/// is one no call hands out, so it is refused as an argument rather
-/// than cast into another slot or reported as a closed channel.
+/// The channel `id` names on `conn`. No call hands out a slot outside
+/// the channel table, so such an `id` is refused as an invalid argument,
+/// not cast into another slot or reported as a closed channel.
 fn decode_channel_id(conn: &adb_connection_t, id: u64) -> Result<ChannelId, AdbStatus> {
     let slot = usize::try_from(id & 0xFFFF_FFFF)
         .ok()

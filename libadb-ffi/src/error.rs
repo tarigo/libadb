@@ -47,8 +47,8 @@ pub enum AdbStatus {
     Internal = 255,
 }
 
-/// The core's advice knows neither this crate's `tls` feature nor which
-/// C call can start TLS; this is the advice that applies to the C API.
+/// The advice for C callers: the core's own knows neither this crate's
+/// `tls` feature nor which C call can start TLS.
 #[cfg(not(feature = "tls"))]
 const TLS_REQUIRED: &str = "device requires TLS (Android 11+ wireless debugging): \
     build libadb-ffi with the `tls` feature, connect over USB, \
@@ -98,13 +98,10 @@ pub(crate) fn fail_invalid_uri(msg: impl core::fmt::Display) -> AdbStatus {
     AdbStatus::InvalidUri
 }
 
-/// The verdict on a pairing that did not end with the key on the
-/// device.
+/// The status of a pairing that did not put the key on the device.
 #[cfg(feature = "pairing")]
 pub(crate) fn fail_pairing(e: PairingError<std::io::Error>) -> AdbStatus {
     let status = match &e {
-        // The device's block arrived and did not open: the code did
-        // not match.
         PairingError::WrongCode => AdbStatus::Pairing,
         // EOF mid-exchange is the device ending it — dialog dismissed,
         // attempts used up — a verdict, not a network fault that a

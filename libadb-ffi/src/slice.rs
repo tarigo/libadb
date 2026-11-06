@@ -1,12 +1,11 @@
-/// Build a `&[u8]` from a C caller's `(ptr, len)` pair. `ptr == null`
-/// with any `len` is treated as empty.
+/// Build a `&[u8]` from a C caller's `(ptr, len)` pair. A null `ptr`
+/// gives an empty slice; with a non-zero `len` it fails a debug
+/// assertion, so callers refuse that pair first.
 ///
 /// # Safety
 ///
-/// If `ptr` is non-null, the caller must guarantee the invariants of
-/// [`core::slice::from_raw_parts`]: `ptr` is valid for reads of
-/// `len * size_of::<u8>()` bytes and properly aligned, the memory is
-/// not mutated for the returned lifetime, and `len` fits in `isize`.
+/// If `ptr` is non-null, `ptr` and `len` must meet the requirements of
+/// [`core::slice::from_raw_parts`] for the returned lifetime.
 pub(crate) unsafe fn from_ptr<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     debug_assert!(!ptr.is_null() || len == 0, "null ptr with len={len}");
     if ptr.is_null() {
@@ -17,16 +16,12 @@ pub(crate) unsafe fn from_ptr<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// Build a `&mut [u8]` from a C caller's `(ptr, len)` pair. `ptr == null`
-/// with any `len` is treated as empty.
+/// [`from_ptr`] for a `&mut [u8]`.
 ///
 /// # Safety
 ///
-/// If `ptr` is non-null, the caller must guarantee the invariants of
-/// [`core::slice::from_raw_parts_mut`]: `ptr` is valid for reads and
-/// writes of `len * size_of::<u8>()` bytes, properly aligned, no other
-/// reference aliases the region for the returned lifetime, and `len`
-/// fits in `isize`.
+/// If `ptr` is non-null, `ptr` and `len` must meet the requirements of
+/// [`core::slice::from_raw_parts_mut`] for the returned lifetime.
 pub(crate) unsafe fn from_mut_ptr<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
     debug_assert!(!ptr.is_null() || len == 0, "null ptr with len={len}");
     if ptr.is_null() {
@@ -37,11 +32,9 @@ pub(crate) unsafe fn from_mut_ptr<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] 
     }
 }
 
-/// Copy `src` into `(buf, buf_len)`, truncating, and report the full
-/// length through `out_len`. The buffer-only conventions match
-/// [`adb_connection_features`].
-///
-/// [`adb_connection_features`]: crate::adb_connection_features
+/// Copy `src` into `(buf, buf_len)`, truncating, and write the full
+/// length through `out_len`, with the convention of
+/// [`adb_connection_features`](crate::adb_connection_features).
 ///
 /// # Safety
 ///

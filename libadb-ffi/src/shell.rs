@@ -33,7 +33,7 @@ impl ParseState {
         }
     }
 
-    /// The next frame, its id as the byte C sees whether or not
+    /// The next frame, with its id as the byte C sees, whether or not
     /// [`FrameId`] names it.
     fn try_next_frame(&mut self) -> Result<Option<(u8, Vec<u8>)>, Error<FfiTransportError>> {
         let frame = self
@@ -91,18 +91,13 @@ fn read_frame(sh: &adb_shell_t) -> Result<(u8, Vec<u8>), Error<FfiTransportError
     }
 }
 
-/// Send one shell_v2 frame.
+/// Send one shell_v2 frame, holding `send_lock` across both writes.
 ///
-/// The C ABI hands the same session to any number of threads, and a
-/// frame is a header plus a payload that the channel splits into
-/// `max_payload` chunks. Written without coordination, two threads
-/// produce header A, header B, payload A — and the far side reads the
-/// middle of one payload as the next header.
-///
-/// The lock is held across both writes rather than the frame being
-/// assembled into one buffer: copying the caller's payload would make
-/// every write allocate up to the 4 GiB a shell_v2 length field allows,
-/// and the session would hold on to that high-water mark afterwards.
+/// Without the lock two threads on one session send header A, header B,
+/// payload A, and the far side reads the middle of a payload as the next
+/// header. The frame is not assembled into one buffer because that would
+/// make every write allocate up to the 4 GiB a shell_v2 length field
+/// allows, and the session would hold on to that high-water mark.
 async fn send_frame_async(
     writer: &FfiWriter,
     send_lock: &Mutex<()>,
@@ -308,8 +303,8 @@ pub unsafe extern "C" fn adb_shell_close_stdin(sh: *mut adb_shell_t) -> AdbStatu
     let sh = unsafe { &*sh };
     match send_frame(sh, FrameId::CloseStdin, &[]) {
         Ok(()) => AdbStatus::Ok,
-        // `closed` goes up before `adb_shell_close` frees the slot, so
-        // a close racing this is not taken for the device's.
+        // `adb_shell_close` sets `closed` before it frees the slot, so a
+        // racing close is not mistaken for the device's.
         Err(Error::ChannelClosed) if !sh.closed.load(Ordering::Acquire) => AdbStatus::Ok,
         Err(e) => error::fail_error(e),
     }

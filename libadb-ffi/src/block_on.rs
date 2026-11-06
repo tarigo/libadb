@@ -14,8 +14,8 @@ use crate::connection::{FfiReader, FfiWriter};
 use crate::transport::FfiTransportError;
 
 /// How long a call waiting on what the read lock's holder dispatches
-/// goes without looking at the lock again. The holder wakes it only by
-/// dispatching that, and may just as well go back to C without.
+/// sleeps before it looks at the lock again. The holder wakes it only by
+/// dispatching something for it, and may return to C without doing so.
 const TICK: Duration = Duration::from_millis(10);
 
 struct ThreadWaker {
@@ -49,8 +49,8 @@ impl Wake for ThreadWaker {
     }
 }
 
-/// Poll `fut` to completion on this thread, with `wait` for what each
-/// poll leaves pending.
+/// Poll `fut` to completion on this thread, calling `wait` whenever a
+/// poll leaves it pending.
 fn run<F: Future>(fut: F, wait: impl Fn(&ThreadWaker)) -> F::Output {
     let tw = Arc::new(ThreadWaker {
         thread: std::thread::current(),
@@ -72,13 +72,13 @@ pub(crate) fn block_on<F: Future>(fut: F) -> F::Output {
 }
 
 /// Read `ch` into `buf` under the read lock or, while another call holds
-/// that, from what the holder dispatches, until the lock comes free.
+/// the lock, from what the holder dispatches, until the lock comes free.
 ///
-/// A read cannot simply wait for the lock. The holder can be a write in
-/// a read of its own, for an OKAY the device sends only once this read
-/// has taken what it wrote before: a command stuck on its stdout stops
-/// taking stdin. What is buffered needs no lock to be taken, and taking
-/// it is what gives the device credit back.
+/// A read must not simply wait for the lock. The holder can be a write
+/// reading for its OKAY, and the device may send that only once this
+/// read has taken its earlier output: a command stuck on its stdout
+/// stops taking stdin. Buffered data needs no lock, and taking it is
+/// what gives the device credit back.
 pub(crate) fn block_on_read(
     reader: &Mutex<FfiReader>,
     writer: &FfiWriter,
@@ -95,17 +95,14 @@ pub(crate) fn block_on_read(
     }
 }
 
-/// [`block_on`] for a future writing on channel `ch`. Nothing reads the
-/// connection in the background, so a write parked for the device with
-/// no read call running reads for itself, one packet at a time.
+/// [`block_on`] for a future writing on channel `ch`: a write parked for
+/// the device with no read call running reads for itself, one packet at
+/// a time (see the [crate docs](crate)).
 ///
-/// The read is never raced against the write: on USB it could not be
-/// dropped without losing data. While it runs the write is not polled,
-/// which is why only a write with nothing to do but wait starts one.
-///
-/// A failed read fails the write, which only a parked write can have
-/// started, so no packet is left half sent. A frame of several packets
-/// can be.
+/// The read never races the write, because on USB a dropped read loses
+/// data. The write is not polled while it runs, so only a write with
+/// nothing to do but wait starts one. A failed read fails the write: no
+/// packet is left half sent, but a frame of several packets can be.
 pub(crate) fn block_on_write<T>(
     reader: &Mutex<FfiReader>,
     writer: &FfiWriter,

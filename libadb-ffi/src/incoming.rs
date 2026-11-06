@@ -32,10 +32,9 @@ pub unsafe extern "C" fn adb_accept_channel(
     }
     // SAFETY: non-null, and a valid handle per `# Safety`.
     let conn = unsafe { &*conn };
-    // The staged lock is held across the empty check, the dequeue and
-    // the store: concurrent reports serialize on one staged request —
-    // a re-report of the same holder, never two racing holders. The
-    // reader lock nests inside it, in that order only.
+    // Held across the empty check, the dequeue and the store, so
+    // concurrent reports share one staged request. Lock order: this
+    // lock first, then the reader lock, never the reverse.
     let mut staged = lock_poisoned(&conn.staged_incoming);
     // A request already staged is re-reported, not displaced — that
     // keeps probe-allocate-copy sequences working on one request.

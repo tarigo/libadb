@@ -42,10 +42,9 @@ fn tcp(plain: BlockingTcp) -> FfiTcp {
 }
 
 /// Open the transport `uri` names. Over `tcp://` a second handle to the
-/// socket comes along, for socket options: `MaybeTls` keeps its stream
-/// to itself, so the clone is taken before wrapping. A clone failure
-/// fails the connect rather than producing a connection whose timeout
-/// setter claims there is no socket.
+/// socket comes along for socket options, cloned before wrapping because
+/// `MaybeTls` keeps its stream to itself. A failed clone fails the
+/// connect: the timeout setter would otherwise claim there is no socket.
 pub(crate) fn connect(uri: &str) -> Result<(FfiTransport, Option<TcpStream>), FfiConnectError> {
     match crate::block_on::block_on(any::connect::<Inline, Backend>(uri))? {
         Transport::Tcp(plain) => {

@@ -49,9 +49,8 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
 
     // SAFETY: non-null, and a C string per `# Safety`.
     let dir = unsafe { CStr::from_ptr(android_dir) };
-    // A Unix path is any byte string without a NUL, and a C caller may
-    // well hand us one: insisting on UTF-8 would turn a directory that
-    // `fopen` opens happily into an invalid argument.
+    // A Unix path is any byte string without a NUL: insisting on UTF-8
+    // would make a directory that `fopen` opens an invalid argument.
     #[cfg(unix)]
     let dir = {
         use std::os::unix::ffi::OsStrExt;
@@ -72,7 +71,7 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         }
     };
 
-    // A name the format cannot carry came in through this call.
+    // A name the format cannot carry is a bad argument to this call.
     let name = match KeyName::new(name) {
         Ok(n) => n,
         Err(e) => return error::fail_invalid_arg(e),
@@ -85,11 +84,10 @@ pub unsafe extern "C" fn adb_key_load_or_generate(
         Err(e @ (store::StoreError::Malformed { .. } | store::StoreError::NotAKeyFile { .. })) => {
             return error::fail_auth(e)
         }
-        // What the key operation itself could not do.
         Err(e @ store::StoreError::Key(_)) => return error::fail_internal(e),
         // Matched by name, not by wildcard: a variant added upstream
         // should fail this build rather than acquire an ABI status by
-        // accident, which is how the two arms above went wrong.
+        // accident.
         Err(e @ store::StoreError::Io { .. }) => return error::fail_io(e),
     };
 

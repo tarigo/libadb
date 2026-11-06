@@ -17,8 +17,8 @@ use crate::error::{self, AdbStatus};
 use crate::slice::copy_out;
 use crate::transport::{self, FfiTransport};
 
-// The halves a connection splits into: with TLS in the picture they are
-// no longer the transport itself.
+// The halves a connection splits into: under TLS they are not the
+// transport itself.
 pub(crate) type FfiReadHalf = <FfiTransport as Splittable>::ReadHalf;
 pub(crate) type FfiWriteHalf = <FfiTransport as Splittable>::WriteHalf;
 pub(crate) type FfiReader = Reader<FfiReadHalf, FfiWriteHalf>;
@@ -37,10 +37,9 @@ pub struct adb_connection_t {
     pub(crate) writer: FfiWriter,
     /// Second handle to the TCP socket for timeouts; None over USB.
     pub(crate) tcp_socket: Option<std::net::TcpStream>,
-    /// The device-initiated OPEN reported by [`adb_accept_channel`],
-    /// staged until a verdict consumes it. Repeated report calls
-    /// re-report this holder; only [`adb_incoming_accept`] and
-    /// [`adb_incoming_reject`] take it out.
+    /// The device-initiated OPEN that [`adb_accept_channel`] reported.
+    /// It stays here, and repeated calls report it again, until
+    /// [`adb_incoming_accept`] or [`adb_incoming_reject`] takes it out.
     ///
     /// [`adb_accept_channel`]: crate::adb_accept_channel
     /// [`adb_incoming_accept`]: crate::adb_incoming_accept
@@ -201,7 +200,7 @@ unsafe fn handshake(
     AdbStatus::Ok
 }
 
-/// The plain handshake, as every connect ran it before `tls`.
+/// The handshake in the clear.
 fn connect_plain<A: Authenticator>(
     t: FfiTransport,
     auth: A,
