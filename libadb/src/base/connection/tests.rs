@@ -1279,10 +1279,10 @@ mod slot_tests {
 mod closed_channel_tests {
     use super::*;
     use crate::base::channel::Channel;
-    use crate::base::mock::{one_slot, shell_frame};
+    use crate::base::mock::{cnxn_with, one_slot, shell_frame};
     use crate::error::SyncError;
     use crate::shell::v2::{FrameId, Shell};
-    use crate::sync::{FileMode, SyncFlags, SyncSession};
+    use crate::sync::{self, FileMode, SyncFlags, SyncSession};
 
     /// The WRTEs that went out on `ch`.
     fn writes_on(conn: &Connection<Mock>, ch: ChannelId) -> usize {
@@ -1446,5 +1446,99 @@ mod closed_channel_tests {
         let channel = now(conn.open(b"sync:\0")).unwrap();
         assert_push_fails_with_the_devices_text(channel, b"target");
         assert_eq!(conn.table.in_use(), 0);
+    }
+
+    const REFUSAL: &[u8] = b"path too long";
+
+    fn sync_device(credit: Option<u32>, then: &[Packet]) -> Connection<Mock> {
+        let mut mock = Mock::new();
+        let host: &[u8] = match credit {
+            None => {
+                mock.feed(&cnxn_with("sendrecv_v2")).feed(&okay(1));
+                b"host::features="
+            }
+            Some(credit) => {
+                mock.feed(&cnxn_with("sendrecv_v2,delayed_ack"))
+                    .feed(&okay_with_budget(1, credit));
+                b"host::features=delayed_ack"
+            }
+        };
+        for pkt in then {
+            mock.feed(pkt);
+        }
+        now(Connection::connect(
+            mock,
+            NoAuth,
+            HostBanner::Raw(host),
+            ConnectionConfig::new(),
+        ))
+        .unwrap()
+    }
+
+    fn push_and_quit(conn: &mut Connection<Mock>, v2: bool) -> Error<MockError> {
+        let mut buf = [0u8; 256];
+        let mut session = now(sync::open(conn, &mut buf)).unwrap();
+        let data = [0x5a; 256];
+        let pushed = if v2 {
+            now(session.send_v2("/x", FileMode(0o644), 0, SyncFlags::NONE, &data))
+        } else {
+            now(session.send("/x", FileMode(0o644), 0, &data))
+        };
+        now(session.quit()).unwrap();
+        pushed.unwrap_err()
+    }
+
+    /// This follows `handle_sync_command` on a path over 1024 bytes: the
+    /// `FAIL` and the CLSE come before the device reads anything past
+    /// the request. The 256 bytes of data wait for the OKAY of the
+    /// request, or with credit for 64 bytes run out of it part way, so
+    /// a write takes the `FAIL` and the CLSE in.
+    #[test]
+    fn a_push_the_device_fails_before_its_data_gets_the_devices_text() {
+        let fail = sync_fail(REFUSAL);
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let mut conn = sync_device(credit, &[wrte(1, &fail), clse(1)]);
+                let err = push_and_quit(&mut conn, v2);
+                assert!(
+                    matches!(&err, Error::Sync(SyncError::Failed(text)) if text == REFUSAL),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+                assert_eq!(conn.table.in_use(), 0, "credit {credit:?}, v2 {v2}");
+            }
+        }
+    }
+
+    /// This follows `handle_send_link` on a `symlink` that fails: the
+    /// `FAIL` and the CLSE come once the device has read the data,
+    /// while `DONE` waits for the OKAY of the data.
+    #[test]
+    fn a_push_the_device_fails_before_done_gets_the_devices_text() {
+        let text = b"symlink failed: Read-only file system";
+        let fail = sync_fail(text);
+        for v2 in [false, true] {
+            let mut conn = sync_device(None, &[okay(1), okay(1), wrte(1, &fail), clse(1)]);
+            let err = push_and_quit(&mut conn, v2);
+            assert!(
+                matches!(&err, Error::Sync(SyncError::Failed(got)) if got == text),
+                "v2 {v2}: got {err:?}"
+            );
+            assert_eq!(conn.table.in_use(), 0, "v2 {v2}");
+        }
+    }
+
+    #[test]
+    fn a_push_the_device_closes_with_no_fail_is_channel_closed() {
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let mut conn = sync_device(credit, &[clse(1)]);
+                let err = push_and_quit(&mut conn, v2);
+                assert!(
+                    matches!(err, Error::ChannelClosed),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+                assert_eq!(conn.table.in_use(), 0, "credit {credit:?}, v2 {v2}");
+            }
+        }
     }
 }

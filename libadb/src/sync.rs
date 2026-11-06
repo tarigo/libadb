@@ -31,6 +31,15 @@
 //! before it looks at what the device advertises. The session stays
 //! usable.
 //!
+//! # A push the device fails
+//!
+//! adbd answers some pushes with `FAIL` and ends the sync service
+//! before it has read them through, a path over 1024 bytes for one. A
+//! push call that then finds the channel closed fails with the
+//! [`SyncError::Failed`] the device sent, and with
+//! [`Error::ChannelClosed`] only if it sent none. Either way it waits
+//! for nothing more from the device.
+//!
 //! # Buffer sizing
 //!
 //! [`SyncSession`] uses a caller-provided byte slice as its receive
@@ -211,6 +220,19 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
             }
             Some(id) if allowed.contains(&id) => Ok(id),
             _ => Err(SyncError::UnexpectedId(raw).into()),
+        }
+    }
+
+    async fn pushed(
+        &mut self,
+        sent: Result<(), Error<S::IoError>>,
+    ) -> Result<(), Error<S::IoError>> {
+        match sent {
+            Err(Error::ChannelClosed) => match self.read_next_id(&[]).await {
+                Err(failed @ Error::Sync(SyncError::Failed(_))) => Err(failed),
+                _ => Err(Error::ChannelClosed),
+            },
+            sent => sent,
         }
     }
 
@@ -456,6 +478,10 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// `mode` is what the device creates the file from, e.g.
     /// `FileMode(0o100644)`. adbd copies the owner's permission bits to
     /// the group and to others, so that one lands as `0o100666`.
+    ///
+    /// On a channel the device closed it fails with the device's `FAIL`,
+    /// if it sent one: see
+    /// [A push the device fails](crate::sync#a-push-the-device-fails).
     pub async fn send_start(
         &mut self,
         path: &str,
@@ -464,8 +490,10 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         check_path(path)?;
         let mut mode_dec = [0u8; 10];
         let mode_str = format_u32(mode.0, &mut mode_dec);
-        self.write_request(SyncId::Send, &[path.as_bytes(), b",", mode_str])
-            .await
+        let sent = self
+            .write_request(SyncId::Send, &[path.as_bytes(), b",", mode_str])
+            .await;
+        self.pushed(sent).await
     }
 
     /// Begin a `SND2` (v2) push.
@@ -477,6 +505,10 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// takes one compression flag at most, so two fail with
     /// [`SyncError::InvalidFlags`] whatever the device advertises.
     /// Either way nothing is sent and the session stays usable.
+    ///
+    /// On a channel the device closed it fails with the device's `FAIL`,
+    /// if it sent one: see
+    /// [A push the device fails](crate::sync#a-push-the-device-fails).
     pub async fn send_v2_start(
         &mut self,
         path: &str,
@@ -486,17 +518,19 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         check_path(path)?;
         self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
-        self.write_message(
-            SyncId::Snd2,
-            path_bytes.len() as u32,
-            &[
-                path_bytes,
-                &SyncId::Snd2.as_bytes(),
-                &mode.0.to_le_bytes(),
-                &flags.bits().to_le_bytes(),
-            ],
-        )
-        .await
+        let sent = self
+            .write_message(
+                SyncId::Snd2,
+                path_bytes.len() as u32,
+                &[
+                    path_bytes,
+                    &SyncId::Snd2.as_bytes(),
+                    &mode.0.to_le_bytes(),
+                    &flags.bits().to_le_bytes(),
+                ],
+            )
+            .await;
+        self.pushed(sent).await
     }
 
     /// Send one or more `DATA` chunks.
@@ -504,9 +538,14 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// `data` is automatically split into [`SYNC_DATA_MAX`]-sized
     /// chunks.  Must be called between a `send*_start` and
     /// [`send_done`](Self::send_done).
+    ///
+    /// On a channel the device closed it fails with the device's `FAIL`,
+    /// if it sent one: see
+    /// [A push the device fails](crate::sync#a-push-the-device-fails).
     pub async fn send_data(&mut self, data: &[u8]) -> Result<(), Error<S::IoError>> {
         for chunk in data.chunks(SYNC_DATA_MAX) {
-            self.write_request(SyncId::Data, &[chunk]).await?;
+            let sent = self.write_request(SyncId::Data, &[chunk]).await;
+            self.pushed(sent).await?;
         }
         Ok(())
     }
@@ -516,8 +555,12 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     /// has no wider field.
     ///
     /// Sends `DONE` and reads the device response (`OKAY` or `FAIL`).
+    /// On a channel the device closed it fails with the device's `FAIL`,
+    /// if it sent one: see
+    /// [A push the device fails](crate::sync#a-push-the-device-fails).
     pub async fn send_done(&mut self, mtime: u32) -> Result<(), Error<S::IoError>> {
-        self.write_header(SyncId::Done, mtime).await?;
+        let sent = self.write_header(SyncId::Done, mtime).await;
+        self.pushed(sent).await?;
         self.rx.compact();
         self.read_next_id(&[SyncId::Okay]).await?;
         self.rx.advance(HEADER_SIZE);

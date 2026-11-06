@@ -3160,11 +3160,22 @@ mod slot_tests {
 
 /// How a `Writer` handles a write to a channel the device closed.
 mod closed_channel_tests {
-    use crate::base::channel::Channel;
-    use crate::base::mock::{clse, now, split_one_channel_delayed_ack, sync_fail, wrte};
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Waker};
+
+    use crate::base::channel::{Channel, ChannelId};
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        clse, cnxn_with, now, okay, okay_with_budget, split_one_channel_delayed_ack, sync_fail,
+        wrte, Mock, MockError, NoAuth, SharedMock,
+    };
     use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
     use crate::error::{Error, SyncError};
-    use crate::sync::{FileMode, SyncSession};
+    use crate::sync::{FileMode, SyncFlags, SyncSession};
+
+    use super::{Reader, Writer};
 
     #[test]
     fn a_write_to_a_channel_the_device_closed_fails_and_sends_nothing() {
@@ -3201,6 +3212,128 @@ mod closed_channel_tests {
         now(reader.dispatch_one()).unwrap();
         now(sync.quit()).unwrap();
         assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    }
+
+    const REFUSAL: &[u8] = b"path too long";
+
+    #[allow(clippy::type_complexity)]
+    fn sync_device(
+        credit: Option<u32>,
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        let host: &[u8] = match credit {
+            None => {
+                mock.feed(&cnxn_with("sendrecv_v2")).feed(&okay(1));
+                b"host::features="
+            }
+            Some(credit) => {
+                mock.feed(&cnxn_with("sendrecv_v2,delayed_ack"))
+                    .feed(&okay_with_budget(1, credit));
+                b"host::features=delayed_ack"
+            }
+        };
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Raw(host),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"sync:\0")).unwrap();
+        (reader, writer, ch, seen)
+    }
+
+    fn answered<F: Future>(
+        push: F,
+        reader: &mut Reader<SharedMock, SharedMock>,
+        seen: &SharedMock,
+        answer: &[Packet],
+    ) -> F::Output {
+        let mut push = pin!(push);
+        for pkt in answer {
+            let waiting = push.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert!(waiting.is_pending(), "the push did not wait for the device");
+            seen.feed(pkt);
+            now(reader.dispatch_one()).unwrap();
+        }
+        now(push)
+    }
+
+    fn push_answered_with(credit: Option<u32>, v2: bool, answer: &[Packet]) -> Error<MockError> {
+        let (mut reader, writer, ch, seen) = sync_device(credit);
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut buf = [0u8; 256];
+        let mut sync = SyncSession::new(channel, &mut buf);
+        let data = [0x5a; 256];
+        let mode = FileMode(0o644);
+        let pushed = if v2 {
+            let push = sync.send_v2("/x", mode, 0, SyncFlags::NONE, &data);
+            answered(push, &mut reader, &seen, answer)
+        } else {
+            answered(sync.send("/x", mode, 0, &data), &mut reader, &seen, answer)
+        };
+        now(sync.quit()).unwrap();
+        assert_eq!(writer.shared.lock_channels().in_use(), 0);
+        pushed.unwrap_err()
+    }
+
+    /// This follows `handle_sync_command` on a path over 1024 bytes: the
+    /// `FAIL` and the CLSE come before the device reads anything past
+    /// the request. The 256 bytes of data wait for the OKAY of the
+    /// request, or with credit for 64 bytes run out of it part way, and
+    /// the device's answer is dispatched while they wait.
+    #[test]
+    fn a_push_the_device_fails_before_its_data_gets_the_devices_text() {
+        let fail = sync_fail(REFUSAL);
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let err = push_answered_with(credit, v2, &[wrte(1, &fail), clse(1)]);
+                assert!(
+                    matches!(&err, Error::Sync(SyncError::Failed(text)) if text == REFUSAL),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+            }
+        }
+    }
+
+    /// This follows `handle_send_link` on a `symlink` that fails: the
+    /// `FAIL` and the CLSE come once the device has read the data,
+    /// while `DONE` waits for the OKAY of the data.
+    #[test]
+    fn a_push_the_device_fails_before_done_gets_the_devices_text() {
+        let text = b"symlink failed: Read-only file system";
+        let answer = [okay(1), okay(1), wrte(1, &sync_fail(text)), clse(1)];
+        for v2 in [false, true] {
+            let err = push_answered_with(None, v2, &answer);
+            assert!(
+                matches!(&err, Error::Sync(SyncError::Failed(got)) if got == text),
+                "v2 {v2}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_push_the_device_closes_with_no_fail_is_channel_closed() {
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let err = push_answered_with(credit, v2, &[clse(1)]);
+                assert!(
+                    matches!(err, Error::ChannelClosed),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+            }
+        }
     }
 }
 
