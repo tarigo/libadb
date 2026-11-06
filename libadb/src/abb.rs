@@ -15,6 +15,12 @@
 //! For example, `cmd package list packages` becomes
 //! `&["package", "list", "packages"]`.
 //!
+//! An empty token fails with
+//! [`ProtocolError::InvalidDestination`](crate::ProtocolError::InvalidDestination),
+//! as one holding a NUL does. adbd drops empty arguments here, so
+//! `&["pm", "", "x"]` would run as `&["pm", "x"]`, a different command.
+//! [`cmd`](crate::cmd) sends such a command through the shell instead.
+//!
 //! # Examples
 //!
 //! ```ignore
@@ -49,7 +55,8 @@ use crate::shell::v2::Shell;
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// For example, to run `cmd package list packages -3` pass
-/// `&["package", "list", "packages", "-3"]`.
+/// `&["package", "list", "packages", "-3"]`. An empty one fails, as the
+/// [module docs](self) say.
 pub async fn open_exec<'a, S: Session>(
     session: &'a mut S,
     args: &[&str],
@@ -64,7 +71,8 @@ pub async fn open_exec<'a, S: Session>(
 /// Opens an `abb_exec:` channel, reads all output until the device
 /// closes the channel, and returns the collected bytes.
 ///
-/// `args` are the tokens that would follow `cmd` on the device shell.
+/// `args` are the tokens that would follow `cmd` on the device shell, and
+/// an empty one fails, as the [module docs](self) say.
 /// `rx` is used as a temporary read buffer (not retained after return).
 pub async fn exec<S: Session>(
     session: &mut S,
@@ -85,7 +93,8 @@ pub async fn exec<S: Session>(
 /// [`Shell::read_frame`] / [`Shell::pump`] and writes stdin via
 /// [`Shell::write_stdin`].
 ///
-/// `args` are the tokens that would follow `cmd` on the device shell.
+/// `args` are the tokens that would follow `cmd` on the device shell, and
+/// an empty one fails, as the [module docs](self) say.
 /// `rx` is the caller-owned receive buffer — see [`Shell::new`] for
 /// sizing advice.
 pub async fn open<'a, 'b, S: Session>(
@@ -129,6 +138,38 @@ mod tests {
             build_nul_destination("abb_exec:", &["bad\0arg"]),
             Err(ProtocolError::InvalidDestination)
         );
+    }
+
+    #[test]
+    fn destination_rejects_an_empty_argument() {
+        use crate::error::ProtocolError;
+        for args in [&["pm", "", "x"][..], &["", "x"], &["pm", ""], &[""]] {
+            assert_eq!(
+                build_nul_destination("abb:", args),
+                Err(ProtocolError::InvalidDestination),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_argument_opens_nothing() {
+        use crate::error::ProtocolError::InvalidDestination;
+        let mut conn = one_slot("abb,abb_exec", &[]);
+        let mut rx = [0u8; 16];
+        let args = ["pm", "", "x"];
+
+        let exec = now(exec(&mut conn, &args, &mut rx));
+        assert!(matches!(exec, Err(Error::Protocol(InvalidDestination))));
+        let open_exec = now(open_exec(&mut conn, &args)).map(drop);
+        assert!(matches!(
+            open_exec,
+            Err(Error::Protocol(InvalidDestination))
+        ));
+        let opened = now(open(&mut conn, &args, &mut rx)).map(drop);
+        assert!(matches!(opened, Err(Error::Protocol(InvalidDestination))));
+
+        assert_eq!(conn.transport().sent().len(), 1, "the CNXN alone");
     }
 
     #[test]

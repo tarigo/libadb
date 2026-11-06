@@ -54,14 +54,15 @@ fn split_nul(bytes: &[u8]) -> Vec<Vec<u8>> {
     parts
 }
 
-fn expected() -> Vec<Vec<u8>> {
-    ARGS.iter().map(|a| a.as_bytes().to_vec()).collect()
+fn expected(args: &[&str]) -> Vec<Vec<u8>> {
+    args.iter().map(|a| a.as_bytes().to_vec()).collect()
 }
 
-rt_test! {
+/// The argv a device with `banner` runs for [`ARGS`], which reach it
+/// through the shell.
 #[cfg(unix)]
-async fn the_shell_path_hands_the_device_the_arguments_it_was_given() {
-    let dev = FakeDevice::new().banner(b"device::features=shell_v2".to_vec());
+async fn argv_through_the_shell(banner: &'static [u8]) -> Vec<Vec<u8>> {
+    let dev = FakeDevice::new().banner(banner.to_vec());
     let (mut conn, device) = session(dev, b"host::features=shell_v2", |mut s| async move {
         let (mut ch, dest) = s.accept_open_any().await;
         assert_eq!(ch.expect_write_ack().await[0], SH_CLOSE_STDIN);
@@ -85,7 +86,23 @@ async fn the_shell_path_hands_the_device_the_arguments_it_was_given() {
         .and_then(|d| d.strip_suffix('\0'))
         .unwrap_or_else(|| panic!("unexpected destination {dest:?}"));
 
-    assert_eq!(argv_via_sh(command), expected());
+    argv_via_sh(command)
+}
+
+rt_test! {
+#[cfg(unix)]
+async fn the_shell_path_hands_the_device_the_arguments_it_was_given() {
+    let argv = argv_through_the_shell(b"device::features=shell_v2").await;
+    assert_eq!(argv, expected(ARGS));
+}
+}
+
+// `abb` would run the command without the empty argument.
+rt_test! {
+#[cfg(unix)]
+async fn an_empty_argument_reaches_a_device_with_abb_through_the_shell() {
+    let argv = argv_through_the_shell(b"device::features=abb_exec,shell_v2").await;
+    assert_eq!(argv, expected(ARGS));
 }
 }
 
@@ -99,14 +116,15 @@ async fn the_abb_path_agrees_with_the_shell_path() {
     })
     .await;
 
+    let args: Vec<&str> = ARGS.iter().copied().filter(|a| !a.is_empty()).collect();
     let mut rx = [0u8; 4096];
-    cmd::exec(&mut conn, ARGS, &mut rx).await.unwrap();
+    cmd::exec(&mut conn, &args, &mut rx).await.unwrap();
     let dest = rt::join(device).await;
 
-    let args = dest
+    let sent = dest
         .strip_prefix(b"abb_exec:".as_slice())
         .unwrap_or_else(|| panic!("unexpected destination {dest:?}"));
 
-    assert_eq!(split_nul(args), expected());
+    assert_eq!(split_nul(sent), expected(&args));
 }
 }

@@ -88,11 +88,14 @@ fn write_quoted(buf: &mut [u8], len: usize, arg: &[u8]) -> Result<usize, Destina
     write_bytes(buf, len, b"'")
 }
 
+/// `service`, then each of `args` NUL-terminated, for the `abb` services.
+/// adbd drops an empty argument, which would run a different command, so
+/// one is refused as a NUL is.
 pub(crate) fn build_nul_destination(
     service: &str,
     args: &[&str],
 ) -> Result<Vec<u8>, ProtocolError> {
-    if service.contains('\0') || args.iter().any(|a| a.contains('\0')) {
+    if service.contains('\0') || args.iter().any(|a| a.is_empty() || a.contains('\0')) {
         return Err(ProtocolError::InvalidDestination);
     }
     let nul_terminated_args_len: usize = args.iter().map(|a| a.len() + 1).sum();

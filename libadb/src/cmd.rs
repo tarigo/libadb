@@ -10,7 +10,9 @@
 //!
 //! `args` is an argv either way: the `abb` services take NUL-separated
 //! arguments, and the shell fallback quotes each one, so a device
-//! without `abb` runs the same command as a device with it.
+//! without `abb` runs the same command as a device with it. An empty
+//! argument takes the shell path even on a device with `abb`, which
+//! [cannot carry one](crate::abb).
 //!
 //! # Examples
 //!
@@ -42,13 +44,20 @@ use crate::shell::v2::{self as shell_v2, Shell};
 /// What the shell fallback runs `args` with.
 const PROGRAM: &[u8] = b"cmd";
 
+/// Whether `args` holds what the shell can carry and `abb` cannot.
+fn needs_shell(args: &[&str]) -> bool {
+    args.iter().any(|arg| arg.is_empty())
+}
+
 /// Run a one-shot `cmd` command and collect all output.
 ///
-/// Uses `abb_exec` when the device advertises it (fastest path, raw
-/// bytes); otherwise falls back to `shell,v2,raw:cmd …`, closes its
-/// stdin, as [`shell::v2::exec`](crate::shell::v2::exec) does, and
-/// collects stdout via shell_v2. A device that lists neither
-/// `abb_exec` nor `shell_v2` fails with [`Error::MissingFeature`].
+/// Uses `abb_exec` when the device advertises it and no argument is
+/// empty (fastest path, raw bytes); otherwise falls back to
+/// `shell,v2,raw:cmd …`, closes its stdin, as
+/// [`shell::v2::exec`](crate::shell::v2::exec) does, and collects stdout
+/// via shell_v2. A device that lists neither `abb_exec` nor `shell_v2`
+/// fails with [`Error::MissingFeature`], as does one without `shell_v2`
+/// when an argument is empty.
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell.
 /// For example, `cmd package list packages` is
@@ -63,7 +72,7 @@ pub async fn exec<S: Session>(
     args: &[&str],
     rx: &mut [u8],
 ) -> Result<Vec<u8>, Error<S::IoError>> {
-    if session.advertises(&Feature::AbbExec) {
+    if session.advertises(&Feature::AbbExec) && !needs_shell(args) {
         return abb::exec(session, args, rx).await;
     }
 
@@ -73,10 +82,11 @@ pub async fn exec<S: Session>(
 
 /// Open a streaming `cmd` session.
 ///
-/// Uses `abb` when the device advertises it; otherwise falls back to
-/// `shell,v2,raw:cmd …`.  Both paths return a [`Shell`] handle for
-/// reading frames. A device that lists neither `abb` nor `shell_v2`
-/// fails with [`Error::MissingFeature`].
+/// Uses `abb` when the device advertises it and no argument is empty;
+/// otherwise falls back to `shell,v2,raw:cmd …`.  Both paths return a
+/// [`Shell`] handle for reading frames. A device that lists neither
+/// `abb` nor `shell_v2` fails with [`Error::MissingFeature`], as does
+/// one without `shell_v2` when an argument is empty.
 ///
 /// `args` are the tokens that would follow `cmd` on the device shell,
 /// one element per argument — see [`exec`] on how they are passed.
@@ -87,7 +97,7 @@ pub async fn open<'a, 'b, S: Session>(
     args: &[&str],
     rx: &'b mut [u8],
 ) -> Result<Shell<'a, 'b, S>, Error<S::IoError>> {
-    if session.advertises(&Feature::Abb) {
+    if session.advertises(&Feature::Abb) && !needs_shell(args) {
         return abb::open(session, args, rx).await;
     }
 
@@ -99,6 +109,40 @@ pub async fn open<'a, 'b, S: Session>(
 mod tests {
     use super::*;
     use crate::base::destination::DestinationError;
+    use crate::base::mock::{now, one_slot, shell_frame, wrte, Mock};
+    use crate::base::protocol::command::Command;
+    use crate::shell::v2::FrameId;
+    use crate::Connection;
+
+    /// The destination of the channel `conn` opened.
+    fn opened(conn: &Connection<Mock>) -> Vec<u8> {
+        let sent = conn.transport().sent();
+        let open = sent.iter().find(|(cmd, ..)| *cmd == Command::Open);
+        open.expect("a channel was opened").3.clone()
+    }
+
+    #[test]
+    fn exec_takes_the_shell_path_past_abb_for_an_empty_argument() {
+        let exit = wrte(1, &shell_frame(FrameId::Exit, &[0]));
+        let mut conn = one_slot("abb_exec,shell_v2", &[exit]);
+        let mut rx = [0u8; 64];
+
+        now(exec(&mut conn, &["set", "", "x"], &mut rx)).unwrap();
+
+        assert_eq!(opened(&conn), b"shell,v2,raw:cmd set '' x\0");
+    }
+
+    #[test]
+    fn open_takes_the_shell_path_past_abb_for_an_empty_argument() {
+        let mut conn = one_slot("abb,shell_v2", &[]);
+        let mut rx = [0u8; 64];
+
+        now(open(&mut conn, &["set", "", "x"], &mut rx))
+            .map(drop)
+            .unwrap();
+
+        assert_eq!(opened(&conn), b"shell,v2,raw:cmd set '' x\0");
+    }
 
     /// The destination the shell fallback opens for `args`.
     fn write_shell_destination(buf: &mut [u8], args: &[&str]) -> Result<usize, DestinationError> {

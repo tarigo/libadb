@@ -549,6 +549,21 @@ async fn cmd_open_falls_back_to_shell_v2_when_abb_missing() {
 }
 }
 
+rt_test! {
+async fn an_empty_argument_needs_shell_v2_on_a_device_with_abb() {
+    let (mut conn, device) = handshake(&["abb", "abb_exec"], &[]).await;
+    let mut rx = [0u8; 1024];
+
+    // The device never answers an OPEN: one sent anyway hangs.
+    let exec = cmd::exec(&mut conn, &["set", ""], &mut rx);
+    expect_missing_feature(rt::within("cmd::exec", exec).await, Feature::ShellV2);
+    let open = cmd::open(&mut conn, &["set", ""], &mut rx);
+    expect_missing_feature(rt::within("cmd::open", open).await, Feature::ShellV2);
+
+    rt::join(device).await;
+}
+}
+
 // ---------------------------------------------------------------------------
 // Tests: feature negotiation
 // ---------------------------------------------------------------------------
