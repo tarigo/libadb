@@ -177,8 +177,6 @@ pub fn destination(mode: ShellMode<'_>, command: &str) -> Result<String, Protoco
 /// Size of the framing header in bytes.
 pub const HEADER_SIZE: usize = 5;
 
-/// A header's id, or the byte it holds when [`FrameId`] does not name
-/// it, and its payload length.
 pub(crate) fn parse_header(buf: &[u8; HEADER_SIZE]) -> (Result<FrameId, u8>, u32) {
     let length = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
     (FrameId::try_from(buf[0]), length)
@@ -244,8 +242,6 @@ impl EncodedWindowSize {
         &self.bytes[..self.len]
     }
 
-    /// Append `part`. Only [`WindowSize::encode`] calls it, and what it
-    /// appends never comes to more than `MAX_LEN`.
     fn push(&mut self, part: &[u8]) {
         let end = self.len + part.len();
         self.bytes[self.len..end].copy_from_slice(part);
@@ -533,9 +529,6 @@ impl<'a, 'b, S: Session> Shell<'a, 'b, S> {
         read
     }
 
-    /// What a one-shot does with the shell it opened: close stdin, then
-    /// [`collect`](Self::collect). A `CLOSE_STDIN` that fails ends it
-    /// there, the channel closed all the same.
     pub(crate) async fn run_to_exit(mut self) -> Result<CommandOutput, Error<S::IoError>> {
         if let Err(e) = self.close_stdin().await {
             let _ = self.close().await;
@@ -631,9 +624,6 @@ pub async fn exec<S: Session>(
     open(session, command, rx).await?.run_to_exit().await
 }
 
-/// Write `shell,v2,raw:<prefix> <args…>\0` into `buf`: `prefix` as it
-/// stands, each of `args` quoted so it reaches the device as one
-/// argument.
 pub(crate) fn write_argv_destination(
     buf: &mut [u8],
     prefix: &[u8],
@@ -642,9 +632,6 @@ pub(crate) fn write_argv_destination(
     dest::write_destination(buf, &[b"shell,v2,raw:", prefix], args)
 }
 
-/// Open the channel [`write_argv_destination`] names, once the device
-/// is known to speak shell_v2. The destination is built in `buf`, so a
-/// `buf` too short for it is [`Error::ReceiveBufferFull`].
 pub(crate) async fn open_argv<'a, S: Session>(
     session: &'a mut S,
     prefix: &[u8],

@@ -41,10 +41,8 @@ use crate::base::session::Session;
 use crate::error::Error;
 use crate::shell::v2::{self as shell_v2, Shell};
 
-/// What the shell fallback runs `args` with.
 const PROGRAM: &[u8] = b"cmd";
 
-/// Whether `args` holds what the shell can carry and `abb` cannot.
 fn needs_shell(args: &[&str]) -> bool {
     args.iter().any(|arg| arg.is_empty())
 }

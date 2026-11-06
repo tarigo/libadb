@@ -87,8 +87,6 @@ use crate::base::session::Session;
 use crate::error::Error;
 use format::{u32_at, SyncId, DENT_V1_SIZE, DENT_V2_SIZE, STAT_V1_SIZE};
 
-/// What a device has to advertise, on top of `sendrecv_v2`, to take each
-/// flag.
 const FLAG_FEATURES: [(SyncFlags, Feature); 4] = [
     (SyncFlags::BROTLI, Feature::SendrecvV2Brotli),
     (SyncFlags::LZ4, Feature::SendrecvV2Lz4),
@@ -96,10 +94,8 @@ const FLAG_FEATURES: [(SyncFlags, Feature); 4] = [
     (SyncFlags::DRY_RUN, Feature::SendrecvV2DryRunSend),
 ];
 
-/// The compression flags, of which adbd takes one at most.
 const COMPRESSION: [SyncFlags; 3] = [SyncFlags::BROTLI, SyncFlags::LZ4, SyncFlags::ZSTD];
 
-/// Refuse a path adbd would end early, as the module docs tell.
 fn check_path(path: &str) -> Result<(), SyncError> {
     if path.contains('\0') {
         return Err(SyncError::InvalidPath);
@@ -135,9 +131,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         }
     }
 
-    /// Fail unless the device takes a v2 transfer with `flags`. adbd
-    /// ends the service over flags it refuses, so the session has to
-    /// find out before it writes anything.
     fn require_sendrecv_v2(&self, flags: SyncFlags) -> Result<(), Error<S::IoError>> {
         if COMPRESSION.iter().filter(|&&c| flags.contains(c)).count() > 1 {
             return Err(SyncError::InvalidFlags(flags).into());
@@ -166,7 +159,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.channel.write(&hdr).await
     }
 
-    /// Write `parts` behind a header that gives their length.
     async fn write_request(
         &mut self,
         id: SyncId,
@@ -176,8 +168,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         self.write_message(id, arg_len as u32, parts).await
     }
 
-    /// Write `parts` behind a header carrying `arg`, in one write when
-    /// they fit the free part of the receive buffer.
     async fn write_message(
         &mut self,
         id: SyncId,
@@ -227,10 +217,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
     async fn read_fail_body(&mut self) -> Result<Vec<u8>, Error<S::IoError>> {
         let msg_len = self.peek_u32(4) as usize;
         self.rx.advance(HEADER_SIZE);
-        // The device's message outranks a buffer complaint: keep what
-        // fits and drain the rest, so the error surfaces truncated
-        // rather than masked by ReceiveBufferFull — and the stream
-        // stays consistent for whatever the caller does next.
         let kept = msg_len.min(self.rx.capacity());
         if kept > 0 {
             self.rx.fill_at_least(&mut self.channel, kept).await?;
@@ -304,9 +290,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         let mut entries = Vec::new();
         loop {
             if self.read_next_id(&[SyncId::Dent, SyncId::Done]).await? == SyncId::Done {
-                // adbd closes a listing with a whole `dent` record whose
-                // id is DONE, not a bare header — consuming only the
-                // head would leave its tail in the stream.
                 self.rx
                     .fill_at_least(&mut self.channel, DENT_V1_SIZE)
                     .await?;
@@ -350,7 +333,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         let mut entries = Vec::new();
         loop {
             if self.read_next_id(&[SyncId::Dnt2, SyncId::Done]).await? == SyncId::Done {
-                // Same as `list`, with the v2 record size.
                 self.rx
                     .fill_at_least(&mut self.channel, DENT_V2_SIZE)
                     .await?;
@@ -400,8 +382,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         }
         self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
-        // The header's length stops at the path: `sync_recv_v2` follows
-        // it, and opens with the same id.
         self.write_message(
             SyncId::Rcv2,
             path_bytes.len() as u32,
@@ -432,8 +412,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         }
 
         let data_len = self.peek_u32(4) as usize;
-        // On a 32-bit target a length near `u32::MAX` overflows the sum;
-        // no buffer holds such a chunk on any target.
         let chunk_len = HEADER_SIZE
             .checked_add(data_len)
             .ok_or(Error::ReceiveBufferFull)?;
@@ -508,7 +486,6 @@ impl<'a, 'b, S: Session> SyncSession<'a, 'b, S> {
         check_path(path)?;
         self.require_sendrecv_v2(flags)?;
         let path_bytes = path.as_bytes();
-        // As in `recv_v2_start`, with `sync_send_v2` after the path.
         self.write_message(
             SyncId::Snd2,
             path_bytes.len() as u32,

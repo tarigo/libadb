@@ -81,9 +81,6 @@ use crate::shell::v2::{self as shell_v2, CommandOutput, FrameId, Shell};
 pub struct Logcat<'a, 'b, S> {
     channel: Channel<'a, S>,
     buf: &'b mut [u8],
-    // buf[acc_start..acc_end] is stdout not yet parsed into entries and
-    // buf[head..tail] raw input not yet looked at. acc_end <= head, so
-    // stdout moved down to acc_end never overwrites unread input.
     acc_start: usize,
     acc_end: usize,
     head: usize,
@@ -131,7 +128,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
             acc_end: 0,
             head: 0,
             tail: 0,
-            // Read only while `frame_left` is non-zero.
             frame_id: FrameId::Stdout,
             frame_left: 0,
             end: End::NotYet,
@@ -140,7 +136,6 @@ impl<'a, 'b, S: Session> Logcat<'a, 'b, S> {
     }
 
     fn compact(&mut self) {
-        // Accumulator first: where the raw bytes go may overlap where it is now.
         if self.acc_start > 0 {
             shift(self.buf, self.acc_start..self.acc_end, 0);
             self.acc_end -= self.acc_start;
@@ -347,7 +342,6 @@ pub async fn dump<S: Session>(
             Err(e) => break Err(e),
         }
     };
-    // The device's CLSE only marks the slot closed; ours frees it.
     let _ = logcat.close().await;
     end
 }

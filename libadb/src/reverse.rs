@@ -37,8 +37,6 @@ use crate::base::channel::{Capped, ChannelId, ReadToEnd};
 use crate::base::session::ServiceChannel;
 use crate::error::{Error, ProtocolError};
 
-/// Replies are tiny (a port number, a listing); anything past this is
-/// not the service we think we are talking to.
 const REPLY_CAP: usize = 64 * 1024;
 
 /// What the `reverse:` rule service answered.
@@ -175,18 +173,12 @@ pub async fn list<C: ServiceChannel>(conn: &mut C) -> Result<Vec<ReverseRule>, E
 /// lines themselves are not checked.
 pub async fn list_raw<C: ServiceChannel>(conn: &mut C) -> Result<Vec<u8>, Error<C::IoError>> {
     let reply = exchange(conn, b"reverse:list-forward\0").await?;
-    // The listing skips OKAY: it is just a hex4-prefixed block. A
-    // failure still arrives as FAIL + hex4 + message, and the two
-    // cannot collide — `I` and `L` are not hex digits.
     if reply.starts_with(b"FAIL") {
         return Err(Error::Reverse(fail_message(&reply[4..])));
     }
     hex4_block(&reply).ok_or(Error::Reverse(ReverseError::UnexpectedReply))
 }
 
-/// A NUL would cut the service string short on the device, making the
-/// rule differ from the requested one — reject it like the other
-/// string-taking APIs do.
 fn check_specs<E>(specs: &[&str]) -> Result<(), Error<E>> {
     if specs.iter().any(|s| s.contains('\0')) {
         return Err(Error::Protocol(ProtocolError::InvalidDestination));
@@ -194,7 +186,6 @@ fn check_specs<E>(specs: &[&str]) -> Result<(), Error<E>> {
     Ok(())
 }
 
-/// Open the service channel, read until the device closes it.
 async fn exchange<C: ServiceChannel>(
     conn: &mut C,
     dest: &[u8],
@@ -207,8 +198,6 @@ async fn exchange<C: ServiceChannel>(
         .map_err(|Capped| Error::Reverse(ReverseError::UnexpectedReply))
 }
 
-/// The channel [`exchange`] opened, paired with the [`ServiceChannel`]
-/// it was opened on.
 struct OpenedChannel<'c, C> {
     conn: &'c mut C,
     ch: ChannelId,
@@ -226,7 +215,6 @@ impl<C: ServiceChannel> ReadToEnd for OpenedChannel<'_, C> {
     }
 }
 
-/// `OKAY`[+hex4+data] → data; `FAIL`+hex4+msg → `Failed`.
 fn parse_status(reply: &[u8]) -> Result<Vec<u8>, ReverseError> {
     match reply.get(..4) {
         Some(b"OKAY") => {
@@ -242,17 +230,11 @@ fn parse_status(reply: &[u8]) -> Result<Vec<u8>, ReverseError> {
     }
 }
 
-/// The port in a successful `forward` reply: decimal digits, or nothing
-/// when adbd reports none; [`establish`] says when that is.
 fn parse_port(data: &[u8]) -> Result<Option<u32>, ReverseError> {
     if data.is_empty() {
         return Ok(None);
     }
-    // adbd holds a vsock port, an unsigned 32 bits, in an `int` and
-    // prints it with `%d`, so a port past `i32::MAX` arrives negative.
     let digits = data.strip_prefix(b"-").unwrap_or(data);
-    // Byte-wise first, as in `hex4_block`: `from_str` would also take a
-    // leading `+`.
     if !digits.iter().all(u8::is_ascii_digit) {
         return Err(ReverseError::UnexpectedReply);
     }
@@ -269,12 +251,10 @@ fn parse_port(data: &[u8]) -> Result<Option<u32>, ReverseError> {
         .ok_or(ReverseError::UnexpectedReply)
 }
 
-/// The rules in a listing: one `<serial> <remote> <local>` per line.
 fn parse_listing(block: &[u8]) -> Result<Vec<ReverseRule>, ReverseError> {
     if block.is_empty() {
         return Ok(Vec::new());
     }
-    // The last line's `\n` ends it rather than opening another.
     let lines = block.strip_suffix(b"\n").unwrap_or(block);
     lines
         .split(|&b| b == b'\n')
@@ -292,17 +272,12 @@ fn parse_listing(block: &[u8]) -> Result<Vec<ReverseRule>, ReverseError> {
         .collect()
 }
 
-/// `FAIL`'s payload: the device's message, verbatim when the length
-/// prefix itself is mangled.
 fn fail_message(rest: &[u8]) -> ReverseError {
     ReverseError::Failed(hex4_block(rest).unwrap_or_else(|| rest.to_vec()))
 }
 
-/// A `%04x` length followed by exactly that many bytes.
 fn hex4_block(b: &[u8]) -> Option<Vec<u8>> {
     let prefix = b.get(..4)?;
-    // Checked byte-wise: `from_str_radix` alone would also take a
-    // leading sign, letting `+001` pass for a one-byte block.
     if !prefix.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }

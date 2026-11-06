@@ -1,6 +1,3 @@
-//! [`FrameDecoder`]: shell v2 frames cut out of a caller's buffer, with
-//! no channel and no IO, and turned into [`Frame`]s.
-
 use alloc::vec::Vec;
 
 use crate::error::ProtocolError;
@@ -52,8 +49,6 @@ impl FrameDecoder {
         Self {
             head: 0,
             tail: 0,
-            // Read only while `large_remaining` is non-zero, and set
-            // whenever it becomes so.
             large_id: Ok(FrameId::Stdout),
             large_remaining: 0,
         }

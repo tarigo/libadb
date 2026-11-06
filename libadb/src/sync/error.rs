@@ -1,5 +1,3 @@
-//! [`SyncError`]: what a sync request fails with.
-
 use alloc::vec::Vec;
 use core::fmt;
 

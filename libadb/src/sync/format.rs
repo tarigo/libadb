@@ -8,8 +8,6 @@ pub const HEADER_SIZE: usize = 8;
 /// Maximum data payload in a single `DATA` message (64 KiB).
 pub const SYNC_DATA_MAX: usize = 64 * 1024;
 
-/// The four ASCII bytes that open every sync message: the request a
-/// host makes, or the reply a device gives to one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncId {
     Stat,
@@ -48,7 +46,6 @@ impl SyncId {
         Self::Quit,
     ];
 
-    /// The id as it goes on the wire.
     pub(crate) fn as_bytes(self) -> [u8; 4] {
         match self {
             Self::Stat => *b"STAT",
@@ -69,7 +66,6 @@ impl SyncId {
         }
     }
 
-    /// The id `bytes` spell, if they spell one.
     pub(crate) fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
         Self::ALL.into_iter().find(|id| id.as_bytes() == bytes)
     }
@@ -219,7 +215,6 @@ impl SyncFlags {
         self.0
     }
 
-    /// Whether all of `flags` are set.
     pub(crate) const fn contains(self, flags: Self) -> bool {
         self.0 & flags.0 == flags.0
     }

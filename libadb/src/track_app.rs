@@ -119,8 +119,6 @@ impl<'a, 'b, S: Session> TrackApp<'a, 'b, S> {
         let payload_len = proto::parse_hex4(self.rx.peek(HEX_LEN_PREFIX))
             .ok_or(Error::Decode(DecodeError::InvalidLengthPrefix))?
             as usize;
-        // The prefix stays until the frame is in: a call dropped while
-        // waiting must leave the next one in front of a prefix.
         let frame_len = HEX_LEN_PREFIX + payload_len;
         self.rx.fill_at_least(&mut self.channel, frame_len).await?;
         let entries = decode_app_processes(&self.rx.peek(frame_len)[HEX_LEN_PREFIX..]);
