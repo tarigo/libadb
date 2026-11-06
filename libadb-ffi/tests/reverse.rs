@@ -21,8 +21,8 @@ unsafe extern "C" fn never_signs(
     _o: *mut u8,
     _oc: usize,
     _ol: *mut usize,
-) -> adb::AdbStatus {
-    adb::AdbStatus::Auth
+) -> i32 {
+    adb::AdbStatus::Auth as i32
 }
 
 fn recv_pkt(s: &mut TcpStream) -> Option<(u32, u32, u32, Vec<u8>)> {
