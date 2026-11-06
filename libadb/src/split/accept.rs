@@ -12,6 +12,7 @@ use crate::base::channel::ChannelId;
 use crate::base::incoming::PendingOpen;
 use crate::base::protocol::command::Command;
 use crate::base::protocol::Packet;
+use crate::base::slot::ChannelSlot;
 use crate::base::wire::{connection_gone, send_pkt};
 use crate::error::Error;
 
@@ -84,13 +85,17 @@ where
             Some(credit) => credit.to_le_bytes().to_vec(),
             None => Vec::new(),
         };
-        self.answer(&Packet::new(
-            Command::Ready,
-            ch.local.raw(),
-            remote.raw(),
-            payload,
-        ))
-        .await?;
+        let ready = Packet::new(Command::Ready, ch.local.raw(), remote.raw(), payload);
+        let mut wh = shared.lock_write_half().await;
+        if shared
+            .lock_channels()
+            .get(ch)
+            .is_none_or(ChannelSlot::is_closed)
+        {
+            self.pending.take();
+            return Err(Error::ChannelClosed);
+        }
+        self.send(&mut wh, &ready).await?;
 
         self.reserved = None;
         Ok(ch)
@@ -119,9 +124,18 @@ where
     }
 
     async fn answer(&mut self, verdict: &Packet) -> Result<(), Error<<WH as ErrorType>::Error>> {
-        let mut wh = self.shared.lock_write_half().await;
+        let shared = Arc::clone(&self.shared);
+        let mut wh = shared.lock_write_half().await;
+        self.send(&mut wh, verdict).await
+    }
+
+    async fn send(
+        &mut self,
+        wh: &mut WH,
+        verdict: &Packet,
+    ) -> Result<(), Error<<WH as ErrorType>::Error>> {
         let sent = send_pkt(
-            &mut *wh,
+            wh,
             &self.shared.desync,
             verdict,
             self.shared.negotiated.checksum(),

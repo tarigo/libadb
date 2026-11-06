@@ -345,9 +345,23 @@ where
     }
 
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
-    /// takes a request that already arrived, if any.
-    pub fn try_accept_incoming(&mut self) -> Option<SplitIncoming<WH>> {
-        self.shared.take_incoming()
+    /// takes a request that already arrived, or returns `Ok(None)`.
+    ///
+    /// On a desynchronized connection it fails at once, whatever is
+    /// queued. Once the connection has ended it still hands over the
+    /// requests that arrived before the end, and then fails with
+    /// [`Error::Disconnected`].
+    pub fn try_accept_incoming(
+        &mut self,
+    ) -> Result<Option<SplitIncoming<WH>>, Error<<RH as ErrorType>::Error>> {
+        if self.shared.desync.check::<Infallible>().is_err() {
+            self.shared.check_live()?;
+        }
+        if let Some(incoming) = self.shared.take_incoming() {
+            return Ok(Some(incoming));
+        }
+        self.shared.check_live()?;
+        Ok(None)
     }
 
     async fn dispatch(

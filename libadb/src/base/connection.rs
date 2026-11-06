@@ -416,14 +416,22 @@ where
     }
 
     /// [`accept_incoming`](Self::accept_incoming) without waiting:
-    /// takes a request that already arrived, if any.
-    pub fn try_accept_incoming(&mut self) -> Option<Incoming<'_, T>> {
-        let pending = self.incoming.pop_front()?;
-        Some(Incoming {
+    /// takes a request that already arrived, or returns `Ok(None)`.
+    ///
+    /// A desynchronized connection fails with [`Error::Desynchronized`],
+    /// whatever is queued.
+    pub fn try_accept_incoming(
+        &mut self,
+    ) -> Result<Option<Incoming<'_, T>>, Error<<T as ErrorType>::Error>> {
+        self.desync.check()?;
+        let Some(pending) = self.incoming.pop_front() else {
+            return Ok(None);
+        };
+        Ok(Some(Incoming {
             conn: self,
             pending: Some(pending),
             reserved: None,
-        })
+        }))
     }
 
     /// Close a channel: free its slot and send CLSE.

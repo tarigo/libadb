@@ -59,7 +59,10 @@ fn staged_with_followup(
         }
     };
     pump(&mut reader);
-    let inc = reader.try_accept_incoming().expect("the OPEN was queued");
+    let inc = reader
+        .try_accept_incoming()
+        .unwrap()
+        .expect("the OPEN was queued");
 
     for pkt in followup {
         seen.feed(pkt);
@@ -86,7 +89,7 @@ fn a_device_cancel_reaches_the_staged_request() {
         "READY must not answer a withdrawn OPEN"
     );
     // The dead request does not come back to the queue either.
-    assert!(reader.try_accept_incoming().is_none());
+    assert!(reader.try_accept_incoming().unwrap().is_none());
 }
 
 #[test]
@@ -132,6 +135,48 @@ fn a_withdrawal_racing_the_accept_closes_the_split_slot() {
     );
 }
 
+/// The slot is reserved by then, and the withdrawal closes it.
+#[test]
+fn a_withdrawal_while_accept_waits_for_the_write_half_sends_no_ready() {
+    use core::task::{Context, Waker};
+
+    let mut mock = Mock::new();
+    mock.feed(&crate::base::mock::cnxn());
+    let seen = SharedMock::new(mock);
+    let conn = now(Connection::connect(
+        seen.clone(),
+        NoAuth,
+        HostBanner::Features(&[]),
+        ConnectionConfig::new(),
+    ))
+    .unwrap();
+    let (mut reader, writer) = conn.split().unwrap();
+    seen.feed(&Packet::new(Command::Open, 90, 0, b"tcp:90\0".to_vec()));
+    let inc = now(reader.accept_incoming()).unwrap();
+
+    let busy = now(writer.shared.write_half.lock());
+    let mut accept = pin!(inc.accept());
+    let waiting = accept
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()));
+    assert!(waiting.is_pending());
+    seen.feed(&withdraw(90));
+    now(reader.dispatch_one()).unwrap();
+    drop(busy);
+
+    let err = now(accept).unwrap_err();
+    assert!(matches!(err, Error::ChannelClosed), "got {err:?}");
+    assert!(
+        !seen
+            .sent()
+            .iter()
+            .any(|(cmd, _, arg1, _)| *cmd == Command::Ready && *arg1 == 90),
+        "READY must not answer a withdrawn OPEN"
+    );
+    assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    assert!(reader.try_accept_incoming().unwrap().is_none());
+}
+
 #[test]
 fn held_holders_spend_the_open_storm_budget() {
     use core::future::Future as _;
@@ -168,10 +213,10 @@ fn held_holders_spend_the_open_storm_budget() {
     // touching the queue length.
     seen.feed(&open_pkt(60, b"tcp:60\0"));
     pump(&mut reader);
-    let held_a = reader.try_accept_incoming().unwrap();
+    let held_a = reader.try_accept_incoming().unwrap().unwrap();
     seen.feed(&open_pkt(61, b"tcp:61\0"));
     pump(&mut reader);
-    let held_b = reader.try_accept_incoming().unwrap();
+    let held_b = reader.try_accept_incoming().unwrap().unwrap();
     assert_eq!(reader.shared.lock_incoming().len(), 0);
 
     // The third OPEN must be refused on arrival: an application
@@ -185,7 +230,7 @@ fn held_holders_spend_the_open_storm_budget() {
         "the OPEN past the budget must be refused with CLSE"
     );
     assert!(
-        reader.try_accept_incoming().is_none(),
+        reader.try_accept_incoming().unwrap().is_none(),
         "nothing may be queued past the budget"
     );
 
@@ -326,7 +371,7 @@ fn a_cancelled_overflow_refusal_keeps_the_open_recoverable() {
         .expect("a cancelled refusal must not poison the connection");
 
     // The verdict machinery now answers it: adbd gets its CLSE.
-    let inc = reader.try_accept_incoming().unwrap();
+    let inc = reader.try_accept_incoming().unwrap().unwrap();
     assert_eq!(inc.destination(), b"tcp:72\0");
     now(inc.reject()).unwrap();
     let (cmd, _, arg1, _) = seen.sent().last().unwrap().clone();
@@ -1835,12 +1880,49 @@ mod send_queue_tests {
 
 mod incoming_tests {
     use crate::base::channel::ChannelId;
-    use crate::base::mock::{now, split_one_channel_delayed_ack, wrte};
+    use crate::base::mock::{
+        abandon, now, split_one_channel_delayed_ack, split_with_channel, wrte,
+    };
     use crate::base::protocol::command::Command;
     use crate::base::protocol::Packet;
+    use crate::error::Error;
 
     fn open_pkt(remote_id: u32, credit: u32, dest: &[u8]) -> Packet {
         Packet::new(Command::Open, remote_id, credit, dest.to_vec())
+    }
+
+    /// A request taken here could only fail its verdict with the desync
+    /// and go back to the queue, to be taken again.
+    #[test]
+    fn try_accept_incoming_fails_once_the_connection_is_desynchronized() {
+        let (mut reader, writer, ch) = split_with_channel(Some(1));
+        let seen = now(writer.shared.write_half.lock()).clone();
+        seen.feed(&open_pkt(77, 0, b"tcp:80\0"));
+        now(reader.dispatch_one()).unwrap();
+        now(reader.dispatch_one()).unwrap();
+        abandon(writer.write_channel(ch, b"payload-that-never-made-it"));
+        let taken = reader.try_accept_incoming().map(|_| ());
+        assert!(matches!(taken, Err(Error::Desynchronized)), "got {taken:?}");
+    }
+
+    #[test]
+    fn a_request_queued_before_a_clean_end_is_still_handed_out() {
+        let opened = [open_pkt(77, 0, b"tcp:80\0")];
+        let (mut reader, _writer, _ch, _seen) = split_one_channel_delayed_ack(0, &opened);
+        now(reader.dispatch_one()).unwrap();
+        let end = now(reader.dispatch_one()).unwrap_err();
+        assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+
+        let incoming = reader.try_accept_incoming().unwrap();
+        now(incoming.expect("queued before the end").reject()).unwrap();
+        let next = reader.try_accept_incoming().map(|_| ());
+        assert!(matches!(next, Err(Error::Disconnected)), "got {next:?}");
+    }
+
+    #[test]
+    fn try_accept_incoming_with_nothing_queued_is_none() {
+        let (mut reader, _writer, _ch, _seen) = split_one_channel_delayed_ack(0, &[]);
+        assert!(reader.try_accept_incoming().unwrap().is_none());
     }
 
     #[test]
@@ -1890,10 +1972,13 @@ mod incoming_tests {
 /// on the connection must be told too, or they wait for ever.
 mod end_tests {
     use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::task::Wake;
     use alloc::vec::Vec;
     use core::convert::Infallible;
     use core::future::Future;
     use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use core::task::{Context, Poll, Waker};
     use embedded_io::ErrorKind;
 
@@ -2317,6 +2402,80 @@ mod end_tests {
             Err(Error::Disconnected)
         ));
         assert_eq!(seen.sent().len(), written);
+    }
+
+    struct Woken(AtomicBool);
+
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn parked_for_credit<'a>(
+        writer: &'a Writer<SharedMock>,
+        a: ChannelId,
+    ) -> (Waiter<'a>, Arc<Woken>) {
+        let woken = Arc::new(Woken(AtomicBool::new(false)));
+        let waker = Waker::from(Arc::clone(&woken));
+        let mut parked: Waiter<'a> =
+            Box::pin(async move { ("write", writer.write_channel(a, b"two").await.err()) });
+        let first = parked.as_mut().poll(&mut Context::from_waker(&waker));
+        assert!(first.is_pending());
+        assert!(writer.waits_for_credit(a));
+        (parked, woken)
+    }
+
+    fn assert_woken_to_disconnected(mut parked: Waiter<'_>, woken: &Woken) {
+        assert!(woken.0.load(Ordering::Relaxed), "the parked write slept on");
+        let Poll::Ready((_, err)) = poll_once(parked.as_mut()) else {
+            panic!("the parked write is still waiting for credit");
+        };
+        assert!(matches!(err, Some(Error::Disconnected)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_write_parked_for_credit_ends_with_run_after_another_finds_the_device_gone() {
+        let (reader, writer, a, b, seen) = two_channels();
+        let mut run = Box::pin(reader.run());
+        assert!(poll_once(run.as_mut()).is_pending());
+        let (parked, woken) = parked_for_credit(&writer, a);
+
+        seen.fail_writes(ErrorKind::BrokenPipe);
+        let err = now(writer.write_channel(b, b"x")).unwrap_err();
+        assert!(matches!(err, Error::Io(_)), "got {err:?}");
+        seen.hang_up();
+        assert!(matches!(
+            poll_once(run.as_mut()),
+            Poll::Ready(Err(Error::UnexpectedEof))
+        ));
+        assert_woken_to_disconnected(parked, &woken);
+    }
+
+    /// The receive under way is a read of the other channel, and then
+    /// the `dispatch_one` that `Writer::waits_for_credit` calls for.
+    #[test]
+    fn a_write_parked_for_credit_ends_with_a_receive_after_another_finds_the_device_gone() {
+        for dispatch_one in [false, true] {
+            let (mut reader, writer, a, b, seen) = two_channels();
+            let (parked, woken) = parked_for_credit(&writer, a);
+            let mut buf = [0u8; 8];
+            let mut receive: Pin<Box<dyn Future<Output = Result<(), Error<MockError>>> + '_>> =
+                if dispatch_one {
+                    Box::pin(reader.dispatch_one())
+                } else {
+                    Box::pin(async { reader.read_channel(b, &mut buf).await.map(drop) })
+                };
+            assert!(poll_once(receive.as_mut()).is_pending());
+
+            seen.fail_writes(ErrorKind::BrokenPipe);
+            let err = now(writer.write_channel(b, b"x")).unwrap_err();
+            assert!(matches!(err, Error::Io(_)), "got {err:?}");
+            seen.hang_up();
+            let end = now(receive).unwrap_err();
+            assert!(matches!(end, Error::UnexpectedEof), "got {end:?}");
+            assert_woken_to_disconnected(parked, &woken);
+        }
     }
 }
 
@@ -2804,7 +2963,10 @@ mod driving_tests {
 
         now(reader.dispatch_one()).unwrap();
         assert!(closes(&seen).is_empty(), "the OPEN was refused");
-        let incoming = reader.try_accept_incoming().expect("the OPEN is queued");
+        let incoming = reader
+            .try_accept_incoming()
+            .unwrap()
+            .expect("the OPEN is queued");
         assert_eq!(incoming.destination(), b"tcp:80\0");
     }
 
@@ -3160,11 +3322,22 @@ mod slot_tests {
 
 /// How a `Writer` handles a write to a channel the device closed.
 mod closed_channel_tests {
-    use crate::base::channel::Channel;
-    use crate::base::mock::{clse, now, split_one_channel_delayed_ack, sync_fail, wrte};
+    use core::future::Future;
+    use core::pin::pin;
+    use core::task::{Context, Waker};
+
+    use crate::base::channel::{Channel, ChannelId};
+    use crate::base::connection::{Connection, ConnectionConfig, HostBanner};
+    use crate::base::mock::{
+        clse, cnxn_with, now, okay, okay_with_budget, split_one_channel_delayed_ack, sync_fail,
+        wrte, Mock, MockError, NoAuth, SharedMock,
+    };
     use crate::base::protocol::command::Command;
+    use crate::base::protocol::Packet;
     use crate::error::{Error, SyncError};
-    use crate::sync::{FileMode, SyncSession};
+    use crate::sync::{FileMode, SyncFlags, SyncSession};
+
+    use super::{Reader, Writer};
 
     #[test]
     fn a_write_to_a_channel_the_device_closed_fails_and_sends_nothing() {
@@ -3201,6 +3374,128 @@ mod closed_channel_tests {
         now(reader.dispatch_one()).unwrap();
         now(sync.quit()).unwrap();
         assert_eq!(writer.shared.lock_channels().in_use(), 0);
+    }
+
+    const REFUSAL: &[u8] = b"path too long";
+
+    #[allow(clippy::type_complexity)]
+    fn sync_device(
+        credit: Option<u32>,
+    ) -> (
+        Reader<SharedMock, SharedMock>,
+        Writer<SharedMock>,
+        ChannelId,
+        SharedMock,
+    ) {
+        let mut mock = Mock::new();
+        let host: &[u8] = match credit {
+            None => {
+                mock.feed(&cnxn_with("sendrecv_v2")).feed(&okay(1));
+                b"host::features="
+            }
+            Some(credit) => {
+                mock.feed(&cnxn_with("sendrecv_v2,delayed_ack"))
+                    .feed(&okay_with_budget(1, credit));
+                b"host::features=delayed_ack"
+            }
+        };
+        let seen = SharedMock::new(mock);
+        let conn = now(Connection::connect(
+            seen.clone(),
+            NoAuth,
+            HostBanner::Raw(host),
+            ConnectionConfig::new(),
+        ))
+        .unwrap();
+        let (mut reader, writer) = conn.split().unwrap();
+        let ch = now(reader.open_channel(b"sync:\0")).unwrap();
+        (reader, writer, ch, seen)
+    }
+
+    fn answered<F: Future>(
+        push: F,
+        reader: &mut Reader<SharedMock, SharedMock>,
+        seen: &SharedMock,
+        answer: &[Packet],
+    ) -> F::Output {
+        let mut push = pin!(push);
+        for pkt in answer {
+            let waiting = push.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert!(waiting.is_pending(), "the push did not wait for the device");
+            seen.feed(pkt);
+            now(reader.dispatch_one()).unwrap();
+        }
+        now(push)
+    }
+
+    fn push_answered_with(credit: Option<u32>, v2: bool, answer: &[Packet]) -> Error<MockError> {
+        let (mut reader, writer, ch, seen) = sync_device(credit);
+        let mut session = writer.clone();
+        let channel = Channel {
+            session: &mut session,
+            id: ch,
+        };
+        let mut buf = [0u8; 256];
+        let mut sync = SyncSession::new(channel, &mut buf);
+        let data = [0x5a; 256];
+        let mode = FileMode(0o644);
+        let pushed = if v2 {
+            let push = sync.send_v2("/x", mode, 0, SyncFlags::NONE, &data);
+            answered(push, &mut reader, &seen, answer)
+        } else {
+            answered(sync.send("/x", mode, 0, &data), &mut reader, &seen, answer)
+        };
+        now(sync.quit()).unwrap();
+        assert_eq!(writer.shared.lock_channels().in_use(), 0);
+        pushed.unwrap_err()
+    }
+
+    /// This follows `handle_sync_command` on a path over 1024 bytes: the
+    /// `FAIL` and the CLSE come before the device reads anything past
+    /// the request. The 256 bytes of data wait for the OKAY of the
+    /// request, or with credit for 64 bytes run out of it part way, and
+    /// the device's answer is dispatched while they wait.
+    #[test]
+    fn a_push_the_device_fails_before_its_data_gets_the_devices_text() {
+        let fail = sync_fail(REFUSAL);
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let err = push_answered_with(credit, v2, &[wrte(1, &fail), clse(1)]);
+                assert!(
+                    matches!(&err, Error::Sync(SyncError::Failed(text)) if text == REFUSAL),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+            }
+        }
+    }
+
+    /// This follows `handle_send_link` on a `symlink` that fails: the
+    /// `FAIL` and the CLSE come once the device has read the data,
+    /// while `DONE` waits for the OKAY of the data.
+    #[test]
+    fn a_push_the_device_fails_before_done_gets_the_devices_text() {
+        let text = b"symlink failed: Read-only file system";
+        let answer = [okay(1), okay(1), wrte(1, &sync_fail(text)), clse(1)];
+        for v2 in [false, true] {
+            let err = push_answered_with(None, v2, &answer);
+            assert!(
+                matches!(&err, Error::Sync(SyncError::Failed(got)) if got == text),
+                "v2 {v2}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_push_the_device_closes_with_no_fail_is_channel_closed() {
+        for credit in [None, Some(64)] {
+            for v2 in [false, true] {
+                let err = push_answered_with(credit, v2, &[clse(1)]);
+                assert!(
+                    matches!(err, Error::ChannelClosed),
+                    "credit {credit:?}, v2 {v2}: got {err:?}"
+                );
+            }
+        }
     }
 }
 
