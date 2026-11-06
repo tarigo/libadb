@@ -346,8 +346,8 @@ pub async fn dump<S: Session>(
 /// you want the human-readable text output or need a format flag like
 /// `-v threadtime`.
 ///
-/// For a one-shot dump pass `"-d"` in `args`; otherwise logcat streams
-/// indefinitely.
+/// For a one-shot dump pass `"-d"` or `"-t"` in `args`; otherwise logcat
+/// streams indefinitely.
 pub async fn open_text<'a, 'b, S: Session>(
     session: &'a mut S,
     args: &[&str],
@@ -360,9 +360,10 @@ pub async fn open_text<'a, 'b, S: Session>(
 /// Run a one-shot text logcat, collecting stdout and stderr.
 ///
 /// Arguments are passed verbatim.  You almost always want to include
-/// `"-d"` (dump and exit) or `"-t"` / `"-T"` (last N entries) so that
+/// `"-d"` (dump and exit) or `"-t"` (last N entries, then exit) so that
 /// `logcat` terminates on its own; without one of these flags it will
-/// stream indefinitely and this function will never return.
+/// stream indefinitely, as it does after `"-T"`'s last N entries, and
+/// this function will never return.
 pub async fn exec_text<S: Session>(
     session: &mut S,
     args: &[&str],
