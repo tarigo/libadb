@@ -17,18 +17,9 @@ use common::poll_once;
 const DA_BANNER: &[u8] = b"device::features=delayed_ack";
 const DA_MAX_PAYLOAD: u32 = 16;
 
-// ---------------------------------------------------------------------------
-// Test 1 — Concurrent bidirectional traffic on a single split connection.
-//
-// Main task opens a channel, moves the Reader into a background task that
-// loops read_channel until CLSE, and from the foreground drives the
-// cloneable Writer. Exercises:
-//  * Reader dispatching OKAYs for the Writer's WRTEs while buffering
-//    WRTEs from the device,
-//  * Writer issuing sends that cross the await boundary with the Reader,
-//  * clean shutdown via close_channel + remote CLSE.
-// ---------------------------------------------------------------------------
-
+// The `Reader`, looping in a task of its own, takes the OKAYs for the
+// `Writer`'s WRTEs while it buffers the device's, and both sides shut
+// down cleanly on `close_channel` and the device's CLSE.
 rt_test! {
 async fn split_concurrent_write_and_read() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -95,15 +86,9 @@ async fn split_concurrent_write_and_read() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 2 — Local close_channel wakes a writer parked on flow control.
-//
-// Legacy (no delayed-ack) mode. A first write consumes the initial
-// wrte_acked=true, a second write from a cloned Writer parks. A third
-// task calls close_channel — the wake issued from Writer::close_channel
-// must unblock the parked write with ChannelClosed.
-// ---------------------------------------------------------------------------
-
+// Without delayed ACK the first write uses up the one WRTE the channel
+// may have unacknowledged, so a second from a cloned `Writer` parks.
+// `close_channel` must wake it with `ChannelClosed`.
 rt_test! {
 async fn split_close_wakes_parked_writer() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -145,14 +130,9 @@ async fn split_close_wakes_parked_writer() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 3 — Remote CLSE wakes a writer parked on flow control.
-//
-// Reader::dispatch / Reader::read_channel both process CLSE by flipping
-// the slot to Closed and waking its FlowSignal. A parked writer must
-// then re-poll, observe the terminal state, and return ChannelClosed.
-// ---------------------------------------------------------------------------
-
+// The device's CLSE reaches the `Reader`, which closes the slot and
+// wakes the writer parked for its OKAY: that write must fail with
+// `ChannelClosed`.
 rt_test! {
 async fn split_remote_close_wakes_parked_writer() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -194,14 +174,9 @@ async fn split_remote_close_wakes_parked_writer() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 4 — Delayed-ACK with budget < max_payload still progresses.
-//
-// Regression test for the "split writer requires send_budget >=
-// chunk_len" bug. With initial_asb = 8 and max_payload = 16, writing 24
-// bytes must go out as three 8-byte WRTEs rather than hang.
-// ---------------------------------------------------------------------------
-
+// Regression: the split writer required a budget of a whole chunk. With
+// a budget of 8 and a `max_payload` of 16, writing 24 bytes must go out
+// as three 8-byte WRTEs rather than hang.
 rt_test! {
 async fn split_delayed_ack_partial_budget_progresses() {
     const INITIAL_ASB: u32 = 8;
@@ -253,14 +228,9 @@ async fn split_delayed_ack_partial_budget_progresses() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 5 — Slot-table exhaustion on the split path.
-//
-// `Reader::open_channel` reserves a slot before sending OPEN, so when the
-// table is full the caller must see `NoFreeChannels` before any wire
-// traffic — the device never sees a third OPEN.
-// ---------------------------------------------------------------------------
-
+// `Reader::open_channel` reserves a slot before it sends OPEN, so with
+// the table full the caller gets `NoFreeChannels` and the device never
+// sees a third OPEN.
 rt_test! {
 async fn split_open_channel_no_free_slots_when_table_is_full() {
     let config = ConnectionConfig::new().with_max_channels(2);
@@ -301,14 +271,8 @@ async fn split_open_channel_no_free_slots_when_table_is_full() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 6 — Writing to a locally-closed channel.
-//
-// `close_channel` clears the slot. A subsequent `write_channel` must fail
-// at the credit-reservation step with `ChannelClosed` rather than pushing
-// a stray WRTE onto the wire.
-// ---------------------------------------------------------------------------
-
+// `close_channel` frees the slot, so the write fails when it reserves
+// credit, rather than push a stray WRTE onto the wire.
 rt_test! {
 async fn split_write_channel_after_local_close_returns_channel_closed() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -337,14 +301,8 @@ async fn split_write_channel_after_local_close_returns_channel_closed() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 7 — Reading from a locally-closed channel.
-//
-// After `close_channel` clears the slot, `read_channel` must refuse
-// immediately — it must not start pulling packets from the wire under
-// a freed id.
-// ---------------------------------------------------------------------------
-
+// The read must refuse at once, not start taking packets off the wire
+// under a freed id.
 rt_test! {
 async fn split_read_channel_after_local_close_returns_channel_closed() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -374,13 +332,8 @@ async fn split_read_channel_after_local_close_returns_channel_closed() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 8 — Device rejects an OPEN by sending CLSE before OKAY.
-//
-// `open_channel` matches CLSE by `arg1 == local_id` and surfaces
-// `ChannelClosed`; the `SlotGuard` Drop path releases the reserved slot.
-// ---------------------------------------------------------------------------
-
+// `open_channel` matches the device's CLSE by `arg1 == local_id`, and
+// `SlotGuard`'s `Drop` releases the reserved slot.
 rt_test! {
 async fn split_open_channel_returns_channel_closed_when_device_rejects() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -407,14 +360,8 @@ async fn split_open_channel_returns_channel_closed_when_device_rejects() {
 }
 }
 
-// ---------------------------------------------------------------------------
-// Test 9 — Two cloned `Writer`s drive different channels concurrently.
-//
-// Proves the clone is usable from an independent task: both writes
-// serialize on the shared `write_half` mutex and both complete without
-// one starving the other.
-// ---------------------------------------------------------------------------
-
+// Clones of a `Writer` work from separate tasks: their writes serialize
+// on the shared `write_half` mutex and neither starves the other.
 rt_test! {
 async fn split_two_cloned_writers_make_progress_on_different_channels() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -663,8 +610,6 @@ async fn split_writer_open_channel_keeps_a_channel_closed_before_it_looked() {
 }
 }
 
-// Data the device sent before closing is still read; after it the
-// channel reports `ChannelClosed`.
 rt_test! {
 async fn split_writer_read_channel_drains_then_reports_close() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -757,8 +702,9 @@ async fn split_waiters_see_disconnected_when_reception_ends() {
 }
 }
 
-// Nobody accepts device-initiated channels while `run` owns the reader,
-// so it refuses them instead of leaving the device waiting.
+// With no listener nobody accepts device-initiated channels while `run`
+// owns the reader, so it refuses them instead of leaving the device
+// waiting.
 rt_test! {
 async fn split_run_refuses_device_initiated_open() {
     let (conn, device) = session(FakeDevice::new(), b"host::", |mut s| async move {
@@ -777,9 +723,9 @@ async fn split_run_refuses_device_initiated_open() {
 }
 }
 
-// A packet that breaks one channel alone stays there: the device floods
-// `b` past its cap, `run` closes `b`, its reader drains what fit and
-// then gets the overflow, and `a` carries on.
+// A packet that breaks one channel costs only that channel: the device
+// floods `b` past its cap, `run` closes `b`, its reader drains what fit
+// and then gets the overflow, and `a` carries on.
 rt_test! {
 async fn split_run_closes_only_the_channel_a_packet_broke() {
     const CHUNK: usize = 4096;

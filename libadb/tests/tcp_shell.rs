@@ -18,11 +18,11 @@ use common::{shell_v2_encode, shell_v2_parse, SH_CLOSE_STDIN, SH_EXIT, SH_STDERR
 // Shell v2 framing test
 // ---------------------------------------------------------------------------
 
-/// Fill `buf` in full from `ch`, propagating only `ChannelClosed` as EOF.
+/// Fill `buf` from `ch`, panicking if the channel ends first.
 ///
 /// `Channel::read` can legitimately return `Ok(0)` for an empty WRTE
-/// frame — that's "no progress", not EOF. Real end-of-stream surfaces
-/// as `Err(ChannelClosed)` and triggers a panic here.
+/// frame: that is no progress, not EOF. The real end of the stream is
+/// `Err(ChannelClosed)`.
 async fn read_exact_or_panic(
     ch: &mut libadb::channel::Channel<'_, libadb::Connection<rt::AdbTransport>>,
     buf: &mut [u8],
@@ -296,5 +296,3 @@ async fn shell_v1_open_with_tight_dest_buffer_fails_cleanly() {
     rt::join(device).await;
 }
 }
-
-// ---------------------------------------------------------------------------

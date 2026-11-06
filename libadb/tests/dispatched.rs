@@ -74,12 +74,12 @@ async fn shell_v2_exec_runs_over_the_writer() {
 // A command may finish before its task reaches `close_stdin`: `run` has
 // taken the output and the CLSE by then. Stdin is gone, which is no
 // failure, so the output still comes back and the slot is freed as
-// usual. `marker` fixes that order: its data follows the CLSE, and `run`
-// dispatches packets in order. It also holds one of the two slots, so
-// the last open can only get the one the shell gave back. With delayed
-// ACK every OKAY leaves from the read that took the data, which puts the
-// host's packets in one order for the device to expect, and the shell's
-// data has none: the channel it came on was closed before it was read.
+// usual. `marker` fixes that order: its data follows the CLSE, and
+// `run` dispatches packets in order. It also holds one of the two
+// slots, so the last open can only get the one the shell gave back.
+// With delayed ACK every OKAY leaves from the read that took the data,
+// so the device can expect the host's packets in one order. The shell's
+// data gets no OKAY: its channel was closed before it was read.
 rt_test! {
 async fn close_stdin_finds_the_channel_already_closed() {
     let dev = FakeDevice::new().banner(b"device::features=shell_v2,delayed_ack".to_vec()).delayed_ack(4096);

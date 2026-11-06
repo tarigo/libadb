@@ -79,7 +79,6 @@ const FLAGS: [(SyncFlags, Feature, u32); 4] = [
     ),
 ];
 
-/// Expect a sync request WRTE with the given 4-byte id and path payload.
 /// adbd terminates a LIST with a full `dent_v1` whose id is DONE, not a
 /// bare 8-byte header — see `do_list` in file_sync_service.cpp.
 fn list_done_v1() -> Vec<u8> {
@@ -122,7 +121,6 @@ async fn expect_sync_req(ch: &mut FakeChannel<'_>, id: &[u8; 4], path: &[u8]) {
     assert_eq!(&req[8..], path);
 }
 
-/// Expect the client's `QUIT` WRTE followed by a channel close.
 async fn expect_sync_quit(ch: &mut FakeChannel<'_>) {
     assert_eq!(&ch.expect_write_ack().await[..4], b"QUIT");
     ch.expect_close().await;
@@ -515,10 +513,10 @@ async fn sync_fail_response_surfaces_device_message() {
 }
 }
 
-/// A device that fails a push as `handle_send_file` does: the `FAIL` as
-/// soon as it knows, then on reading what the host sends, for as long
-/// as that takes it to reach `DONE`, and only then the end of the
-/// service. From there on a WRTE reaches nobody.
+/// A device that fails a push as `handle_send_file` does: it sends the
+/// `FAIL` as soon as it knows, goes on reading what the host sends
+/// until it reaches `DONE`, and only then ends the service. After that
+/// a WRTE reaches nobody.
 async fn fail_the_push(mut s: FakeSession, id: &[u8; 4], text: &[u8]) {
     let mut ch = s.accept_open(b"sync:\0").await;
     let send = ch.expect_write_ack().await;
@@ -540,8 +538,8 @@ async fn fail_the_push(mut s: FakeSession, id: &[u8; 4], text: &[u8]) {
 }
 
 /// The text has to reach the host however its writes fall around the
-/// `FAIL`, and the session end with a `quit` that may find the device
-/// gone from the channel.
+/// `FAIL`, and the session must end with a `quit` that may find the
+/// device gone from the channel.
 async fn a_failed_push_gets_the_devices_text(device: FakeDevice, banner: &'static [u8], v2: bool) {
     const TEXT: &[u8] = b"couldn't create file: Read-only file system";
     let id = if v2 { b"SND2" } else { b"SEND" };

@@ -1,13 +1,13 @@
 #![cfg(any(feature = "tokio", feature = "smol"))]
 
-//! How a connection ends, on real sockets, because what a write to a
-//! peer that hung up does is the kernel's to say.
+//! How a connection ends, on real sockets, because the kernel decides
+//! what a write to a peer that hung up does.
 //!
-//! A device says what it has to say and goes. However the host reads,
-//! all of it comes back in the order it was sent, and only then the end
-//! of the channel or of the connection: an OKAY nobody is left to
-//! receive costs a read nothing. Everything else waiting on the
-//! connection hears of the end, and a write given up on ends it as well.
+//! A device sends its data and goes. However the host reads, all of it
+//! comes back in the order it was sent, and only then the end of the
+//! channel or of the connection: an OKAY that finds the device gone
+//! costs a read nothing. Everything else waiting on the connection sees
+//! the end too, and an abandoned write ends the connection as well.
 
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,10 +53,10 @@ enum Goes {
     Abruptly,
 }
 
-/// A connection to a device that accepts `svc:` and then sends all of
-/// [`sent`] and goes; `open` is what the host opens it with. The device
-/// is gone by the time this returns, so nothing the host reads can come
-/// before an OKAY it sends has failed.
+/// A connection to a device that accepts `svc:`, sends all of [`sent`]
+/// and goes; `open` is how the host opens the channel. The device is
+/// gone by the time this returns, so the OKAY for anything the host
+/// reads goes to a closed socket.
 async fn with_device_gone<C>(
     ack: Ack,
     goes: Goes,
@@ -243,14 +243,15 @@ enum HangsUp {
     WithReset,
 }
 
-/// What the device gives the calls to reach their waits. Nothing fails
-/// if they are later than that; the test just proves less on that run.
+/// How long the device gives the calls to reach their waits. Nothing
+/// fails if they are later than that; the test just proves less on that
+/// run.
 const SETTLE_MS: u64 = 50;
 
-/// On a reader-driven connection the read is what sees the socket go.
-/// Everything parked on the `Writer` depends on it to hear of that: a
-/// write the device took one packet of and closed the socket on, as much
-/// as an open, an accept and a read of another channel.
+/// On a reader-driven connection only the read sees the socket go.
+/// Everything parked on the `Writer` depends on it to learn that: a
+/// write the device took one packet of before it closed the socket, an
+/// open, an accept and a read of another channel.
 async fn every_waiter_ends(hangs_up: HangsUp) {
     let (conn, device) = session(
         FakeDevice::new(),
@@ -352,8 +353,8 @@ async fn a_write_given_up_on_ends_run() {
 }
 }
 
-// Nothing else is going on here to carry the CLSE an opener given up on
-// leaves behind, and the device has nothing to say until it gets one.
+// No other call is running to send the CLSE a dropped opener leaves
+// owed, and the device sends nothing until it gets one.
 rt_test! {
 async fn an_opener_given_up_on_is_closed_with_nothing_else_going_on() {
     let (conn, device) = session(FakeDevice::new(), b"host::features=", |mut s| async move {
@@ -377,8 +378,8 @@ async fn an_opener_given_up_on_is_closed_with_nothing_else_going_on() {
 }
 
 // A write that times out on a socket the device has stopped reading
-// desynchronizes the connection, which says nothing about what it had
-// delivered by then.
+// desynchronizes the connection, which does not affect what the device
+// had delivered by then.
 rt_test! {
 async fn a_write_given_up_on_leaves_what_arrived_readable() {
     const TAIL: usize = 100;
@@ -401,7 +402,8 @@ async fn a_write_given_up_on_leaves_what_arrived_readable() {
     let _run = rt::spawn(reader.run());
     let ch = writer.open_channel(b"svc:\0").await.unwrap();
 
-    // Reading into the last packet says all of them were dispatched.
+    // Reading into the last packet shows that all of them were
+    // dispatched.
     let mut got = vec![0u8; PACKET * PACKETS - TAIL];
     let mut filled = 0;
     while filled < got.len() {

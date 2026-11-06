@@ -379,7 +379,6 @@ impl FakeSession {
         }
     }
 
-    /// Low-level: send a message with command + args + payload.
     pub async fn send(&mut self, cmd: u32, arg0: u32, arg1: u32, payload: &[u8]) {
         let mut buf = [0u8; HEADER_SIZE];
         encode_header(cmd, arg0, arg1, payload, &mut buf);
@@ -417,7 +416,6 @@ impl FakeSession {
         rt::write_all(&mut self.stream, bytes).await;
     }
 
-    /// Low-level: receive the next message and its payload.
     pub async fn recv(&mut self) -> (MsgHeader, Vec<u8>) {
         let mut buf = [0u8; HEADER_SIZE];
         rt::read_exact(&mut self.stream, &mut buf).await;
@@ -440,7 +438,6 @@ impl FakeSession {
         (hdr, payload)
     }
 
-    /// Low-level: receive and assert the command code.
     pub async fn expect(&mut self, cmd: u32) -> (MsgHeader, Vec<u8>) {
         let (hdr, payload) = self.recv().await;
         assert_eq!(
@@ -526,7 +523,6 @@ impl<'a> FakeChannel<'a> {
         payload
     }
 
-    /// Expect a CMD_WRTE and assert its payload equals `expected`.
     pub async fn expect_write_eq(&mut self, expected: &[u8]) {
         let payload = self.expect_write().await;
         assert_eq!(payload, expected, "WRTE payload mismatch");
@@ -556,7 +552,6 @@ impl<'a> FakeChannel<'a> {
         }
     }
 
-    /// Send CMD_WRTE with `data` to the client.
     pub async fn send_write(&mut self, data: &[u8]) {
         self.session
             .send(CMD_WRTE, self.device_id, self.client_id, data)
@@ -581,14 +576,12 @@ impl<'a> FakeChannel<'a> {
         }
     }
 
-    /// Expect CMD_CLSE from the client.
     pub async fn expect_close(&mut self) {
         let (hdr, _) = self.session.expect(CMD_CLSE).await;
         assert_eq!(hdr.arg0, self.client_id);
         assert_eq!(hdr.arg1, self.device_id);
     }
 
-    /// Send CMD_CLSE to the client.
     pub async fn send_close(&mut self) {
         self.session
             .send(CMD_CLSE, self.device_id, self.client_id, &[])
