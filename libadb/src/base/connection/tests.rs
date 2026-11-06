@@ -480,6 +480,13 @@ fn open_credit(conn: &Connection<Mock>, local: u32) -> u32 {
     open.expect("the channel was opened").2
 }
 
+#[test]
+fn a_config_that_grants_no_credit_still_opens_with_some() {
+    let config = ConnectionConfig::new().with_initial_ack_bytes(0);
+    let (conn, ..) = two_channels_delayed_ack_with(config, 4096, &[]);
+    assert_eq!(open_credit(&conn, 1), 1);
+}
+
 /// The device sends all it may while nobody reads `b`, each time all but
 /// the last byte of its credit and then a full packet on that byte, as
 /// adbd can. It waits only once the credit is gone.
@@ -854,6 +861,28 @@ mod incoming {
         assert_eq!(cmd, Command::Ready);
         let room = 1024u32 * 1024 - 8 * 1024 + 1;
         assert_eq!(payload, room.to_le_bytes());
+    }
+
+    #[test]
+    fn the_ready_credit_is_clamped_to_what_an_int32_holds() {
+        let mut mock = Mock::new();
+        mock.feed(&cnxn_with("shell_v2,delayed_ack"));
+        let config = ConnectionConfig::new().with_initial_ack_bytes(u32::MAX);
+        let mut conn = now(Connection::connect(
+            mock,
+            NoAuth,
+            HostBanner::Raw(b"host::features=shell_v2,delayed_ack"),
+            config,
+        ))
+        .unwrap();
+
+        now(conn.dispatch(open_pkt(7, 0, b"tcp:7\0"))).unwrap();
+        let incoming = conn.try_accept_incoming().unwrap().unwrap();
+        now(incoming.accept()).unwrap();
+
+        let (cmd, _, _, payload) = conn.transport.sent().last().unwrap().clone();
+        assert_eq!(cmd, Command::Ready);
+        assert_eq!(payload, i32::MAX.to_le_bytes());
     }
 
     #[test]

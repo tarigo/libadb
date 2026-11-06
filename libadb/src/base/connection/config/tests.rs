@@ -62,6 +62,30 @@ fn max_channels_clamp_works_in_const_context() {
     assert_eq!(CAP.max_channels(), ConnectionConfig::MAX_CHANNELS);
 }
 
+#[test]
+fn initial_ack_bytes_is_clamped_to_one() {
+    let clamped = |n| {
+        ConnectionConfig::new()
+            .with_initial_ack_bytes(n)
+            .initial_ack_bytes()
+    };
+    assert_eq!(clamped(0), 1);
+    assert_eq!(clamped(1), 1);
+    assert_eq!(clamped(4096), 4096);
+}
+
+#[test]
+fn initial_ack_bytes_is_clamped_to_i32_max() {
+    let clamped = |n| {
+        ConnectionConfig::new()
+            .with_initial_ack_bytes(n)
+            .initial_ack_bytes()
+    };
+    assert_eq!(clamped(u32::MAX), MOST);
+    assert_eq!(clamped(MOST + 1), MOST);
+    assert_eq!(clamped(MOST), MOST);
+}
+
 /// Unlike the channel count, the property cap may be zero: a banner
 /// with no properties is still a banner.
 #[test]
@@ -86,6 +110,7 @@ fn advertised_credit_never_exceeds_the_enforced_cap() {
 
 const KIB: u32 = 1024;
 const MIB: u32 = 1024 * KIB;
+const MOST: u32 = i32::MAX as u32;
 
 /// The ceiling of a 1 KiB packet under a cap of `u32::MAX`, which is also
 /// `usize::MAX` on a 32-bit target.
@@ -93,7 +118,7 @@ const TOP: usize = u32::MAX as usize - 1023;
 
 /// `max_payload`, `initial_ack_bytes`, `max_rx_per_channel`, and the
 /// `rx_watermark` and `advertised_ack_bytes` they come to.
-const LIMITS: [(u32, u32, usize, usize, u32); 12] = [
+const LIMITS: [(u32, u32, usize, usize, u32); 13] = [
     // The cap is one packet, or would be less.
     (KIB, 32 * MIB, 1, 1, 1),
     (KIB, 32 * MIB, 1024, 1, 1),
@@ -109,9 +134,16 @@ const LIMITS: [(u32, u32, usize, usize, u32); 12] = [
     (4 * KIB, KIB, 64 * 1024, 4096, 1024),
     // No cap to speak of.
     (MIB, 32 * MIB, usize::MAX, 32 << 20, 32 * MIB),
-    (KIB, TOP as u32, usize::MAX, TOP, TOP as u32),
+    (KIB, TOP as u32, usize::MAX, MOST as usize, MOST),
     // A ceiling as wide as the credit's field.
-    (KIB, u32::MAX, u32::MAX as usize, TOP, TOP as u32),
+    (KIB, u32::MAX, u32::MAX as usize, MOST as usize, MOST),
+    (
+        KIB,
+        u32::MAX,
+        MOST as usize + 1022,
+        MOST as usize - 1,
+        MOST - 1,
+    ),
 ];
 
 fn config(max_payload: u32, credit: u32, cap: usize) -> ConnectionConfig {
@@ -162,13 +194,13 @@ fn the_presets_keep_their_limits() {
 fn the_limits_work_in_const_context_with_no_cap_at_all() {
     const WIDEST: ConnectionConfig = ConnectionConfig::new()
         .with_max_payload(KIB)
-        .with_initial_ack_bytes(TOP as u32)
+        .with_initial_ack_bytes(u32::MAX)
         .with_max_rx_per_channel(usize::MAX);
     const WATERMARK: usize = WIDEST.rx_watermark();
     const CREDIT: u32 = WIDEST.advertised_ack_bytes();
 
-    assert_eq!(WATERMARK, TOP);
-    assert_eq!(CREDIT, TOP as u32);
+    assert_eq!(WATERMARK, MOST as usize);
+    assert_eq!(CREDIT, MOST);
 }
 
 #[test]

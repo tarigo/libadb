@@ -119,9 +119,21 @@ impl ConnectionConfig {
     /// Delayed-ACK credit granted to the device when a channel opens
     /// (`OPEN.arg1`), i.e. how many unacknowledged bytes it may send.
     ///
+    /// Clamped to `1..=i32::MAX`. With delayed ACK on, adbd closes an
+    /// OPEN that grants 0, and the READY that accepts a channel the
+    /// device opened grants the same, which adbd reads as a signed
+    /// 32-bit count: at 0 the device has no credit to send on it, and
+    /// past `i32::MAX` the grant reaches it as a debt.
+    ///
     /// Only meaningful when both peers advertise `delayed_ack`.
     pub const fn with_initial_ack_bytes(mut self, bytes: u32) -> Self {
-        self.initial_ack_bytes = bytes;
+        self.initial_ack_bytes = if bytes == 0 {
+            1
+        } else if bytes > i32::MAX as u32 {
+            i32::MAX as u32
+        } else {
+            bytes
+        };
         self
     }
 
