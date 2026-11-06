@@ -233,10 +233,14 @@ fn priority_display_and_char() {
 }
 
 #[test]
-fn log_id_display() {
-    assert_eq!(format!("{}", LogId::Main), "main");
-    assert_eq!(format!("{}", LogId::Crash), "crash");
-    assert_eq!(format!("{}", LogId::from(9)), "unknown(9)");
+fn every_buffer_displays_the_name_logcat_gives_it() {
+    let names = [
+        "main", "radio", "events", "system", "crash", "stats", "security", "kernel",
+    ];
+    for (number, name) in (0..).zip(names) {
+        assert_eq!(format!("{}", LogId::from(number)), name);
+    }
+    assert_eq!(format!("{}", LogId::from(8)), "unknown(8)");
 }
 
 #[test]
